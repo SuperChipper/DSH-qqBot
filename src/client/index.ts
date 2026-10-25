@@ -77,10 +77,11 @@ function BindGuideIcon(): ReactNode {
   );
 }
 
-/** 设置页「QQ Bot」栏目：面板常驻展示绑定状态（配置已迁到插件管理页） */
+/** 设置页「QQ Bot」栏目：绑定状态 + 配置表单（与插件管理页同一份 ConfigPanel） */
 function QQBotSettingsSection(): ReactNode {
   return createElement('div', null,
     createElement(BindPanelBody),
+    createElement(ConfigPanel),
   );
 }
 
