@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import { ConfigSchema, type ImQQBotConfig } from './config.ts';
 import { bootstrapGateway } from './gateway/index.ts';
 import type { DshAgentRegistry } from './session/index.ts';
-import { getProfileDir, resolveEnv } from './shared/index.ts';
+import { resolveProfileDir, resolveEnv } from './shared/index.ts';
 import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
 import type { Logger } from './types.ts';
 
@@ -24,6 +24,9 @@ export type { ImQQBotConfig } from './config.ts';
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
+  // Cordis Loader 根（profile 的 cordis.yml 所在目录）：链接安装下比
+  // 插件源码路径更可靠，扫码/配置写入据此落到正确 profile。
+  const profileDir = resolveProfileDir(ctx.baseUrl);
 
   let appId = resolveEnv(config.appId, 'QQBOT_APPID');
   let appSecret = resolveEnv(config.appSecret, 'QQBOT_SECRET');
@@ -36,7 +39,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
     // 无限期等待用户扫码会阻塞 Host ready——Desktop 界面无法进入、
     // Web 的 URL 延迟输出。绑定编排（路由/呈现/生命周期）在
     // ensureCredentials 的同步阶段即完成，凭据就绪后由异步链接管。
-    void ensureCredentials(ctx, { logger, config: { ...config } })
+    void ensureCredentials(ctx, { logger, config: { ...config }, profileDir })
       .then((credentials): void => {
         if (!credentials) {
           // null 包括：扫码取消、手动提交（已另行持久化）、流程失败
@@ -48,7 +51,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
         // 注意：不写入 process.env——resolveEnv 的 env 回退属于用户显式
         // export 的配置语义，运行时写入会与解绑清理不对齐（解绑后 HMR
         // 重载的新 fiber 仍从 env 读到旧凭据，状态停留 bound）
-        const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
+        const persisted = persistCredentialsToProfile(credentials, profileDir ?? undefined, logger);
         if (persisted) {
           // 写入 cordis.patch.yml 会触发 dsh 热更新，自动重新加载本插件。
           logger.info('配置已保存，等待热更新重新加载...');
@@ -74,7 +77,7 @@ export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> 
   }
 
   // 已绑定：注册常驻路由（状态回显 + 手动编辑/更换凭据 + 配置编辑）
-  registerBoundCredentialRoutes(ctx, logger, appId, { ...config });
+  registerBoundCredentialRoutes(ctx, logger, appId, { ...config }, profileDir);
 
   const resolvedConfig: ImQQBotConfig = { ...config, appId, appSecret };
 

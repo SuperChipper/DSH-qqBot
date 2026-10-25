@@ -98,8 +98,8 @@
   config:
     appId: ${QQBOT_APPID}
     appSecret: ${QQBOT_SECRET}
-    provider: deepseek
-    model: deepseek-chat
+    provider: deepseek-official
+    model: deepseek-flash
     cwd: ${DSH_CWD:-/tmp/dsh-qqbot}
     requireMention: true
     textChunkLimit: 4500

@@ -1,7 +1,30 @@
+# ── 依赖与构建产物 ──
 node_modules/
 dist/
 lib/
-.env
-.dsh-sessions/
 *.tsbuildinfo
+
+# ── 本地凭据与环境变量 ──
+.env
+.env.*
+!.env.example
+# 从 profile 复制出的本地覆盖，可能含真实 AppID/AppSecret
+cordis.patch.local.yml
+
+# ── 本地运行态（会话、QQ 附件缓存）──
+.dsh-sessions/
+media/
 cordis.dev.yml
+
+# ── 本地表情包素材 ──
+# 含用户投稿/二创图片，默认不提交；确认版权与授权后可 git add -f 单独提交。
+stickers/
+
+# ── 日志 / 系统 / 编辑器 ──
+*.log
+pnpm-debug.log*
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

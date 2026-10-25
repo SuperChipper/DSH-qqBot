@@ -6,6 +6,27 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)。
 
+## [Unreleased]
+
+### 新功能
+
+- **纳入 DSH 插件管理**：可在 DSH Web 的「插件」页安装、启停 `@tencent-connect/dsh-qqbot`，并在组合包详情页直接调整配置，无需手改 profile 文件。
+- **配置项扩展**：新增群聊未 @ 回复概率、群历史条数、会话闲置超时、主人 openid、文件访问白名单/敏感路径等可编辑项。
+
+### 体验优化
+
+- **配置入口调整**：端内配置从「设置 → QQ 机器人」迁移到「插件 → 已安装插件 → @tencent-connect/dsh-qqbot」；设置页保留扫码绑定与状态查看。
+- **链接安装定位修复**：通过 `ctx.baseUrl`、`DSH_PROFILE_DIR` 与安装链接探测定位 profile，修复本地路径安装时扫码/配置写入找不到 profile 的问题。
+- **运行方式说明**：以 Web 插件方式运行时 bot 与 DSH Web 同进程，请勿同时启动独立 profile（如旧的启动脚本），避免同一机器人建立两个连接。
+
+### 问题修复
+
+- **模型 ID 说明更正**：`deepseek-official` 下 V4.1 Flash 的模型 ID 为 `deepseek-flash`；`deepseek-v4-flash` 属于 `deepseek-vision` 路由，避免在官方路由下继续使用旧 ID。
+
+### 文档
+
+- README 补充 DSH Web 插件管理运行方式、文件访问配置与安全提交说明；`.gitignore` / `.npmignore` 排除运行期媒体和本地表情包素材。
+
 ## [0.5.2] - 2026-10-12
 
 ### 问题修复

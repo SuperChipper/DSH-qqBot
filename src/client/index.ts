@@ -7,7 +7,9 @@
  * 1. 设置页「QQ Bot」栏目（settings.section 席位）——注册即展示，
  *    无 Session surface 时序依赖，待绑定/已绑定状态常驻可见；
  * 2. 右侧栏「QQ Bot 绑定」页（sidebarRightTabs）——Start 页入口 +
- *    待绑定时自动打开（失败随轮询重试）。
+ *    待绑定时自动打开（失败随轮询重试）；
+ * 3. 插件管理页的组合包详情（plugins.bundle.config）——配置表单，
+ *    以 npm 包名为 key，随组合包启停同生共死。
  *
  * 运行时依赖仅 react（客户端平台种子表提供）；宿主服务经 cordis inject
  * 声明访问（声明缺失时插件保持 inactive，不阻塞浏览器启动）。
@@ -75,11 +77,10 @@ function BindGuideIcon(): ReactNode {
   );
 }
 
-/** 设置页「QQ Bot」栏目：面板常驻展示绑定状态 */
+/** 设置页「QQ Bot」栏目：面板常驻展示绑定状态（配置已迁到插件管理页） */
 function QQBotSettingsSection(): ReactNode {
   return createElement('div', null,
     createElement(BindPanelBody),
-    createElement(ConfigPanel),
   );
 }
 
@@ -90,11 +91,20 @@ export function apply(ctx: Context): void {
 
   const disposers: Array<() => void> = [];
 
-  // 1. 设置页「QQ Bot」栏目（主展示位：注册即展示，无时序依赖）
+  // 1. 设置页「QQ Bot」栏目（绑定状态常驻展示）
   if (slots !== undefined) {
     disposers.push(    slots.inject('settings.section', () => slots.register(
       { name: 'settings.section', id: 'qqbot', order: 7, label: 'QQ 机器人' },
       QQBotSettingsSection,
+    )));
+  }
+
+  // 1.5 插件管理页：组合包详情里的配置表单（plugins.bundle.config，
+  // 以 npm 包名为 key）。插件被关闭时浏览器半边随之卸载，配置入口一起消失。
+  if (slots !== undefined) {
+    disposers.push(    slots.inject('plugins.bundle.config', () => slots.register(
+      { name: 'plugins.bundle.config', key: '@tencent-connect/dsh-qqbot' },
+      ConfigPanel,
     )));
   }
 

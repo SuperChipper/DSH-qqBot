@@ -6,6 +6,27 @@ This file records significant dsh-qqbot updates from a product perspective, focu
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased]
+
+### Added
+
+- **DSH plugin management**: install, enable/disable, and configure `@tencent-connect/dsh-qqbot` from the DSH Web Plugins page and the bundle detail form, without hand-editing profile files.
+- **More editable settings**: group reply probability, group history size, session idle timeout, owner openid, and file-access allowlist / sensitive paths.
+
+### Changed
+
+- **Config location**: in-app config moved from Settings → QQ Bot to Plugins → Installed plugins → `@tencent-connect/dsh-qqbot`; Settings keeps QR binding and status.
+- **Linked installs**: profile resolution now uses `ctx.baseUrl`, `DSH_PROFILE_DIR`, and the installed link, fixing QR/config writes that could not locate the profile for local-path installs.
+- **Runtime note**: in Web-plugin mode the bot shares the DSH Web process; do not run the standalone profile at the same time, or the same bot may open two connections.
+
+### Fixed
+
+- **Model ID clarification**: under `deepseek-official`, V4.1 Flash is `deepseek-flash`; `deepseek-v4-flash` belongs to the `deepseek-vision` route. This avoids keeping the old ID on the official route.
+
+### Documentation
+
+- README covers the Web-plugin workflow, file-access settings, and safe-commit guidance; `.gitignore` / `.npmignore` now exclude runtime media and the local sticker pack.
+
 ## [0.5.2] - 2026-10-12
 
 ### Fixed

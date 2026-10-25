@@ -47,6 +47,15 @@ export interface SendFileConfig {
   extraRoots: string[];
 }
 
+export interface FileAccessConfig {
+  /** 是否只有主人私聊能访问文件（ownerOpenid 未设置时不生效） */
+  ownerOnly: boolean;
+  /** 额外允许访问文件的 openid */
+  extraAllow: string[];
+  /** 敏感路径（拦截名单）：这些目录下的文件禁止访问/发送 */
+  sensitivePaths: string[];
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -94,6 +103,10 @@ export interface ImQQBotConfig {
   vision: VisionConfig;
   /** 附件发送（qqbot_send_file 工具） */
   sendFile: SendFileConfig;
+  /** bot 主人 QQ openid（私聊识别，用于文件访问白名单） */
+  ownerOpenid?: string;
+  /** 文件访问白名单 */
+  fileAccess: FileAccessConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -102,6 +115,13 @@ export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
   c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单'),
   groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式'),
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单'),
+});
+
+/** 文件访问白名单子 Schema（独立导出：config 路由的服务端校验复用） */
+export const FileAccessSchema: Schema<FileAccessConfig> = Schema.object({
+  ownerOnly: Schema.boolean().default(true).description('是否只有主人私聊能访问文件'),
+  extraAllow: Schema.array(Schema.string()).default([]).description('额外允许访问文件的 openid'),
+  sensitivePaths: Schema.array(Schema.string()).default([]).description('敏感路径（拦截访问）'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -163,4 +183,10 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     restrictPaths: true,
     extraRoots: [],
   }).description('附件发送工具配置'),
+  ownerOpenid: Schema.string().description('bot 主人 QQ openid（私聊识别，文件访问白名单）'),
+  fileAccess: FileAccessSchema.default({
+    ownerOnly: true,
+    extraAllow: [],
+    sensitivePaths: [],
+  }).description('文件访问白名单'),
 });

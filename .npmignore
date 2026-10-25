@@ -2,8 +2,15 @@ src/
 dev.ts
 cordis.dev.yml
 tsconfig.json
+tsconfig.client.json
+tsdown.client.config.ts
 .env
 .env.example
+cordis.patch.local.yml
 .dsh-sessions/
+media/
+stickers/
+.git/
+.gitignore
 *.tsbuildinfo
 node_modules/

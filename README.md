@@ -75,17 +75,32 @@ export QQBOT_APPID="你的AppID" QQBOT_SECRET="你的AppSecret"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+### 方式四：作为 DSH Web 插件运行（推荐）
+
+把 bot 装进当前 DSH Web 使用的 profile，就能在侧栏「插件」里统一安装、启停和调整配置：
+
+1. 打开 DSH Web，侧栏 **插件 → 添加插件 → 安装第三方插件**，输入本地目录（如 `/path/to/dsh-qqbot`）或包名 `@tencent-connect/dsh-qqbot`。
+2. 安装完成后在 **已安装插件** 中启用 `@tencent-connect/dsh-qqbot`。
+3. 点进该组合包，在详情页的配置表单里调整模型、提示词、群聊回复概率、访问控制、主人 openid 与文件访问白名单；保存后插件自动重载。
+4. 扫码绑定、更换凭据、解绑仍在 **设置 → QQ 机器人**。
+
+> **运行方式**：这种方式下 bot 与 DSH Web 同进程，关闭 Web 即下线。请勿同时启动独立 `qqbot` profile（例如旧的启动脚本），否则同一个 QQ 机器人会建立两个连接并可能重复回复。需要 7×24 独立运行时，继续使用方式一/二。
+
 ## 配置项
+
+> 在 DSH Web 插件管理中运行时，多数配置可直接在 **插件 → 已安装插件 → `@tencent-connect/dsh-qqbot`** 的配置页修改；`appId`/`appSecret` 走绑定流程，`cwd` 仍由 profile patch / 环境变量控制。
 
 | 配置 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `appId` | string | **必填** | QQ Bot AppID（或通过 `QQBOT_APPID` 环境变量） |
 | `appSecret` | string | **必填** | QQ Bot AppSecret（或通过 `QQBOT_SECRET` 环境变量） |
-| `provider` | string | `deepseek-official` | LLM 提供商名称 |
-| `model` | string | `deepseek-chat` | 模型名称 |
+| `provider` | string | `deepseek-official` | LLM 提供商名称（留空继承宿主默认） |
+| `model` | string | `deepseek-flash` | 模型名称；DSH `deepseek-official` 当前的 V4.1 Flash（留空继承宿主默认） |
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent 工作目录 |
+| `ownerOpenid` | string | - | bot 主人 QQ openid（文件访问白名单识别） |
 | `requireMention` | boolean | `true` | 群聊是否需要 @bot 才触发 |
+| `groupReplyProbability` | number | `0` | 群聊未 @bot 时随机回复概率（0–1），0=关闭 |
 | `groupPrompt` | string | - | 群聊额外 system prompt |
 | `directPrompt` | string | - | 私聊额外 system prompt |
 | `textChunkLimit` | number | `4500` | 单条消息最大字符数 |
@@ -107,6 +122,14 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | 群聊访问模式 |
 | `access.groupAllow` | string[] | `[]` | 群聊白名单（group openid） |
 
+### 文件访问（fileAccess）
+
+| 配置 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `fileAccess.ownerOnly` | boolean | `true` | 是否仅主人私聊可访问文件（需配合 `ownerOpenid`） |
+| `fileAccess.extraAllow` | string[] | `[]` | 额外允许访问文件的 openid |
+| `fileAccess.sensitivePaths` | string[] | `[]` | 敏感路径（拦截名单），命中后禁止访问/发送 |
+
 ### 富媒体理解（media）
 
 | 配置 | 类型 | 默认值 | 说明 |
@@ -125,6 +148,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `vision.maxBytes` | number | `10MB` | 图片字节上限 |
 | `vision.maxTokens` | number | `1024` | 输出 token 上限 |
 | `vision.timeoutMs` | number | `120000` | 视觉调用超时(ms) |
+
+> 如果宿主提供 `deepseek-vision` 路由，视觉理解可用 `vision.provider: deepseek-vision`、`vision.model: deepseek-v4-flash`；文字对话的 V4.1 Flash 是 `deepseek-official` 下的 `deepseek-flash`，两者不要混用。
 
 ### 附件发送（sendFile）
 
@@ -162,8 +187,9 @@ src/
 │   ├── qr-svg.ts               # 二维码 SVG 渲染（宿主侧）
 │   └── persist.ts              # 凭据写入 cordis.patch.yml
 ├── client/                     # 浏览器半边（dsh.client Web Bundle）
-│   ├── index.ts                # 侧栏 Tab 注册 + 待绑定自动引导
-│   └── bind-page.ts             # 端内绑定页（二维码 + 状态轮询）
+│   ├── index.ts                # 侧栏 Tab + 插件管理页配置入口
+│   ├── bind-page.ts            # 端内绑定页（二维码 + 状态轮询）
+│   └── config-panel.ts         # 插件详情页配置表单（访问/模型/提示词等）
 ├── gateway/                    # 网关装配
 │   ├── bootstrap.ts            # 启动装配（监听 session/event 等）
 │   └── middleware-setup.ts     # 中间件链配置
@@ -187,6 +213,7 @@ src/
 ├── features/                   # 交互特性
 │   ├── question-channel.ts     # ask_user_question 问答通道
 │   ├── approval-channel.ts     # approval 审批确认通道
+│   ├── group-memory.ts         # 群聊持久化记忆
 │   └── answer-parser.ts        # 答案解析
 ├── media/                      # 多媒体
 │   ├── vision-tool.ts          # 图片视觉理解
@@ -196,9 +223,10 @@ src/
 │   ├── question-answer.ts      # 问答答案处理
 │   └── attachment.ts           # 附件处理
 ├── shared/                     # 共享工具
-│   ├── utils.ts                # 通用函数
+│   ├── utils.ts                # 通用函数与 profile 定位
 │   ├── scope.ts                # scope/peer 提取
-│   └── send-helper.ts          # 分块发送
+│   ├── send-helper.ts          # 分块发送
+│   └── file-access.ts          # 文件访问/敏感路径拦截
 └── commands/                   # 斜杠命令
 ```
 
@@ -237,6 +265,12 @@ pnpm dev
 export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
+
+## 安全与隐私
+
+- 凭据（AppID/AppSecret、API Key）只应存在于 profile 的 `cordis.patch.yml` 或环境变量中，**不要提交**。
+- `.gitignore` 默认排除 `.env*`、`media/`、`stickers/`、`.dsh-sessions/` 等本地/运行期内容。`media/` 是 QQ 私聊/群聊附件缓存，可能包含他人隐私；`stickers/` 含用户投稿，提交前请确认版权与授权。
+- 提交前用 `git status --short` 和 `git diff --cached` 复查；若曾误提交密钥，请立即在 QQ 开放平台重置 AppSecret，并清理 Git 历史。
 
 ## License
 

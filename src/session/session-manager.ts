@@ -20,6 +20,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
+import { resolveSessionCwd } from '../shared/file-access.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import type {
@@ -315,7 +316,7 @@ export class SessionManager {
       sessionId: childId,
       seed,
       meta: {
-        cwd: this.config.cwd || process.cwd(),
+        cwd: resolveSessionCwd(record.scope, record.senderId, this.config),
         parentSession: record.sessionId,
         seedLength: seed.length,
         ...(composed.agentPreset ? { agentPreset: composed.agentPreset } : {}),
@@ -509,7 +510,7 @@ export class SessionManager {
         const created = await this.agents.create({
           sessionId,
           meta: {
-            cwd: this.config.cwd || process.cwd(),
+            cwd: resolveSessionCwd(scope, senderId, this.config),
             ...(agentPreset ? { agentPreset } : {}),
           },
           ...(route ? { agentOptions: route } : {}),

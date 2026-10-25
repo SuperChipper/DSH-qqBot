@@ -25,6 +25,13 @@ interface AccessControlWire {
   groupAllow: string[];
 }
 
+/** 文件访问白名单（与 src/config.ts 的 FileAccessConfig 对应） */
+interface FileAccessWire {
+  ownerOnly: boolean;
+  extraAllow: string[];
+  sensitivePaths: string[];
+}
+
 /** GET 回显的生效配置（appSecret 已剔除） */
 type ConfigWire = {
   requireMention?: boolean;
@@ -36,7 +43,12 @@ type ConfigWire = {
   preset?: string;
   groupPrompt?: string;
   directPrompt?: string;
+  groupReplyProbability?: number;
+  historyLimit?: number;
+  sessionIdleTimeout?: number;
+  ownerOpenid?: string;
   access?: AccessControlWire;
+  fileAccess?: FileAccessWire;
   cwd?: string;
 };
 
@@ -205,6 +217,24 @@ function FieldRow({ label, help, value, placeholder, onChange }: {
   );
 }
 
+/** 数字行（label 上 + number 输入下） */
+function NumberRow({ label, help, value, min, max, step, onChange }: {
+  label: string; help?: string; value: number; min?: number; max?: number; step?: number;
+  onChange: (next: number) => void;
+}): ReactNode {
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('span', { className: 'imqb2-label' }, label),
+    createElement('input', {
+      className: 'imqb2-input', type: 'number', value, min, max, step,
+      onChange: (event: ChangeEvent<HTMLInputElement>) => {
+        const next = event.currentTarget.valueAsNumber;
+        if (Number.isFinite(next)) onChange(next);
+      },
+    }),
+    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+  );
+}
+
 /** 多行文本行 */
 function AreaRow({ label, help, value, rows, onChange }: {
   label: string; help?: string; value: string; rows?: number; onChange: (next: string) => void;
@@ -301,6 +331,14 @@ export function ConfigPanel(): ReactNode {
         groupAllow: a.groupAllow.map((s) => s.trim()).filter(Boolean),
       };
     }
+    if (changed.fileAccess !== undefined) {
+      const f = changed.fileAccess as FileAccessWire;
+      changed.fileAccess = {
+        ...f,
+        extraAllow: f.extraAllow.map((s) => s.trim()).filter(Boolean),
+        sensitivePaths: f.sensitivePaths.map((s) => s.trim()).filter(Boolean),
+      };
+    }
 
     setBusy(true);
     void fetch(BIND_CONFIG_PATH, {
@@ -333,6 +371,7 @@ export function ConfigPanel(): ReactNode {
 
   const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
   const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
+  const fileAccess: FileAccessWire = form.fileAccess ?? { ownerOnly: true, extraAllow: [], sensitivePaths: [] };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
@@ -359,6 +398,28 @@ export function ConfigPanel(): ReactNode {
         })
       : null,
 
+    createElement('div', { className: 'imqb2-group-title' }, '主人与文件访问'),
+    createElement(FieldRow, {
+      label: '主人 openid', value: form.ownerOpenid ?? '', placeholder: '留空表示未设置主人',
+      help: '用于识别私聊主人；配合下方文件访问白名单限制敏感文件',
+      onChange: (v) => { patch('ownerOpenid', v); },
+    }),
+    createElement(SwitchRow, {
+      label: '仅主人可访问文件', checked: fileAccess.ownerOnly,
+      help: '开启后，只有主人私聊或额外允许的 openid 能收发本地文件',
+      onChange: (v) => { patch('fileAccess', { ...fileAccess, ownerOnly: v }); },
+    }),
+    createElement(AreaRow, {
+      label: '额外允许的 openid', help: '每行一个；这些用户也可访问文件', rows: 2,
+      value: fileAccess.extraAllow.join('\n'),
+      onChange: (v) => { patch('fileAccess', { ...fileAccess, extraAllow: v.split('\n').map((s) => s.trim()) }); },
+    }),
+    createElement(AreaRow, {
+      label: '敏感路径（拦截）', help: '每行一个目录或文件前缀；命中后禁止访问/发送', rows: 3,
+      value: fileAccess.sensitivePaths.join('\n'),
+      onChange: (v) => { patch('fileAccess', { ...fileAccess, sensitivePaths: v.split('\n').map((s) => s.trim()) }); },
+    }),
+
     createElement('div', { className: 'imqb2-group-title' }, '基础设置'),
     createElement(SwitchRow, {
       label: '群聊仅回复 @机器人的消息', checked: form.requireMention ?? true,
@@ -374,6 +435,24 @@ export function ConfigPanel(): ReactNode {
       label: '显示工具调用结果', checked: form.showToolResults ?? false,
       help: '在聊天中展示 agent 工具调用的结构化结果',
       onChange: (v) => { patch('showToolResults', v); },
+    }),
+    createElement(NumberRow, {
+      label: '群聊未 @ 时回复概率', value: form.groupReplyProbability ?? 0,
+      min: 0, max: 1, step: 0.05,
+      help: '0 表示只在被 @ 时回复；0.1 表示约 10% 的群消息会主动接话',
+      onChange: (v) => { patch('groupReplyProbability', v); },
+    }),
+    createElement(NumberRow, {
+      label: '群历史缓冲条数', value: form.historyLimit ?? 10,
+      min: 0, max: 200, step: 1,
+      help: '注入到群聊上下文的最近消息条数',
+      onChange: (v) => { patch('historyLimit', v); },
+    }),
+    createElement(NumberRow, {
+      label: '会话闲置超时（毫秒）', value: form.sessionIdleTimeout ?? 1800000,
+      min: 60000, max: 2592000000, step: 60000,
+      help: '超过该时长未活动会回收会话；86400000 = 24 小时',
+      onChange: (v) => { patch('sessionIdleTimeout', v); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '模型'),

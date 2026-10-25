@@ -19,7 +19,7 @@ import {
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { AccessControlSchema } from '../config.ts';
+import { AccessControlSchema, FileAccessSchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
   BIND_MANUAL_PATH,
@@ -82,6 +82,12 @@ export interface BindRoutesOptions {
    */
   currentConfig?: () => Record<string, unknown>;
   /**
+   * 所属 profile 目录（优先于 getProfileDir 的路径探测）。
+   * 链接安装时插件真实路径不在 node_modules 下，路径探测会落空；
+   * 调用方通常传入由 ctx.baseUrl 推导的值。
+   */
+  profileDir?: string | null;
+  /**
    * 配置写入处理（默认：最小合并写入 profile patch）。
    */
   onUpdateConfig?: (config: Record<string, unknown>) => boolean;
@@ -92,7 +98,8 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
-  'access',
+  'groupReplyProbability', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
+  'access', 'fileAccess',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
@@ -106,7 +113,12 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   preset: stringSchema('preset'),
   groupPrompt: stringSchema('groupPrompt'),
   directPrompt: stringSchema('directPrompt'),
+  groupReplyProbability: (v) => numberSchema(v, 'groupReplyProbability', 0, 1),
+  historyLimit: (v) => integerSchema(v, 'historyLimit', 0, 200),
+  sessionIdleTimeout: (v) => integerSchema(v, 'sessionIdleTimeout', 60_000, 30 * 24 * 60 * 60 * 1000),
+  ownerOpenid: stringSchema('ownerOpenid'),
   access: (v) => AccessControlSchema(v as never),
+  fileAccess: (v) => FileAccessSchema(v as never),
 };
 
 function booleanSchema(value: unknown, name: string): boolean {
@@ -120,6 +132,18 @@ function stringSchema(name: string): (value: unknown) => unknown {
     if (value.length > 20000) throw new TypeError(`${name} 过长`);
     return value;
   };
+}
+
+function numberSchema(value: unknown, name: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new TypeError(`${name} 必须是数字`);
+  if (value < min || value > max) throw new TypeError(`${name} 必须在 ${min} 到 ${max} 之间`);
+  return value;
+}
+
+function integerSchema(value: unknown, name: string, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new TypeError(`${name} 必须是整数`);
+  if (value < min || value > max) throw new TypeError(`${name} 必须在 ${min} 到 ${max} 之间`);
+  return value;
 }
 
 /** manual 请求体大小上限（appId + appSecret 远小于此值） */
@@ -141,7 +165,7 @@ export function registerBindRoutes(
   options: BindRoutesOptions = {},
 ): () => void {
   const defaultManual = (credentials: SetupCredentials): ManualSubmitResult => {
-    const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
+    const persisted = persistCredentialsToProfile(credentials, options.profileDir ?? getProfileDir() ?? undefined, logger);
     return persisted ? { persisted: true } : { persisted: false, error: '无法定位 profile 目录或写入失败，请改用环境变量配置' };
   };
   const handleManualSubmit = options.onManualCredentials ?? defaultManual;
@@ -318,7 +342,7 @@ function handleUnbind(req: IncomingMessage, res: ServerResponse, options: BindRo
   }
   const result: UnbindResult = options.onUnbind === undefined
     ? (() => {
-        const removed = removeCredentialsFromProfile(getProfileDir() ?? undefined, undefined);
+        const removed = removeCredentialsFromProfile(options.profileDir ?? getProfileDir() ?? undefined, undefined);
         if (removed) {
           // 清除进程内凭据：扫码绑定成功时会写入 env（供热更新后的下次
           // apply 兜底读取）；不清则 HMR 重载后新 fiber 仍从 env 读到
@@ -402,7 +426,7 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
   }
 
   const persisted = options.onUpdateConfig === undefined
-    ? updateProfileConfig(validated, getProfileDir() ?? undefined, undefined)
+    ? updateProfileConfig(validated, options.profileDir ?? getProfileDir() ?? undefined, undefined)
     : options.onUpdateConfig(validated);
   if (!persisted) {
     sendJson(res, 500, { ok: false, error: '无法定位 profile 目录或写入失败' });

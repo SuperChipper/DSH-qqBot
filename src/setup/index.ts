@@ -18,7 +18,6 @@ import { BindingService } from './binding-service.ts';
 import { registerBindRoutes, type WebServerLike } from './bind-routes.ts';
 import { createBrowserPresenter, createTerminalPresenter, isDesktopHost } from './presenters.ts';
 import { persistCredentialsToProfile, type SetupCredentials } from './persist.ts';
-import { getProfileDir } from '../shared/index.ts';
 
 export type { SetupCredentials } from './persist.ts';
 export { persistCredentialsToProfile } from './persist.ts';
@@ -34,6 +33,8 @@ export interface EnsureCredentialsOptions {
   source?: string;
   /** 当前生效配置（apply 时 loader 合并值；config 路由 GET 回显用） */
   config: Record<string, unknown>;
+  /** 所属 profile 目录（优先于路径探测；链接安装时由 ctx.baseUrl 推导） */
+  profileDir?: string | null;
 }
 
 /**
@@ -92,9 +93,10 @@ export async function ensureCredentials(
       // 未绑定流程中的手动提交：终止扫码轮询，走同一持久化路径
       onManualCredentials: (credentials) => {
         service.dispose();
-        return persistCredentials(credentials, logger);
+        return persistCredentials(credentials, logger, options.profileDir);
       },
       currentConfig: () => options.config,
+      profileDir: options.profileDir,
     });
     // 回调作用域（服务卸载/替换、插件卸载）连带注销路由
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
@@ -111,7 +113,13 @@ export async function ensureCredentials(
  * 在 apply 的 bootstrapGateway 之前调用；写入经同一 persist 路径，
  * 保存后触发 HMR 重载、新 fiber 以新凭据重启网关。
  */
-export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appId: string, config: Record<string, unknown>): void {
+export function registerBoundCredentialRoutes(
+  ctx: Context,
+  logger: Logger,
+  appId: string,
+  config: Record<string, unknown>,
+  profileDir?: string | null,
+): void {
   (ctx as unknown as {
     inject(deps: readonly string[], callback: (scoped: Context) => void): unknown;
   }).inject(['webServer'], (scoped) => {
@@ -119,8 +127,9 @@ export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appI
     if (webServer === undefined || typeof webServer.register !== 'function') return;
     const disposeRoutes = registerBindRoutes(webServer, null, logger, {
       boundAppId: () => appId,
-      onManualCredentials: (credentials) => persistCredentials(credentials, logger),
+      onManualCredentials: (credentials) => persistCredentials(credentials, logger, profileDir),
       currentConfig: () => config,
+      profileDir,
     });
     (scoped as unknown as { effect(fn: () => () => void, name?: string): void }).effect(() => {
       return disposeRoutes;
@@ -129,8 +138,12 @@ export function registerBoundCredentialRoutes(ctx: Context, logger: Logger, appI
 }
 
 /** 手动凭据持久化（失败时返回可展示的错误） */
-function persistCredentials(credentials: SetupCredentials, logger: Logger): { persisted: boolean; error?: string } {
-  const persisted = persistCredentialsToProfile(credentials, getProfileDir() ?? undefined, logger);
+function persistCredentials(
+  credentials: SetupCredentials,
+  logger: Logger,
+  profileDir?: string | null,
+): { persisted: boolean; error?: string } {
+  const persisted = persistCredentialsToProfile(credentials, profileDir ?? undefined, logger);
   return persisted
     ? { persisted: true }
     : { persisted: false, error: '无法定位 profile 目录或写入失败，请改用环境变量配置' };

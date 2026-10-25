@@ -73,17 +73,32 @@ export QQBOT_APPID="yourAppID" QQBOT_SECRET="yourAppSecret"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
 
+### Method 4: Run as a DSH Web plugin (recommended)
+
+Install the bot into the profile your DSH Web GUI is using, then manage it from the sidebar **Plugins** page:
+
+1. Open DSH Web, go to **Plugins → Add plugin → Install third-party plugin**, and enter a local directory (e.g. `/path/to/dsh-qqbot`) or the package name `@tencent-connect/dsh-qqbot`.
+2. Enable `@tencent-connect/dsh-qqbot` under **Installed plugins**.
+3. Open the bundle to edit model, prompts, group reply probability, access control, owner openid, and the file-access allowlist in its config form; saving reloads the plugin automatically.
+4. QR binding, credential rotation, and unbinding remain under **Settings → QQ Bot**.
+
+> **Runtime**: in this mode the bot shares the DSH Web process, so closing Web takes the bot offline. Do not start the standalone `qqbot` profile (for example, an old launcher script) at the same time — the same QQ bot would open two connections and may reply twice. Use Method 1/2 if you need 24/7 standalone operation.
+
 ## Configuration
+
+> When running as a DSH Web plugin, most fields can be edited under **Plugins → Installed plugins → `@tencent-connect/dsh-qqbot`**. `appId`/`appSecret` go through the binding flow, and `cwd` remains a profile-patch / environment concern.
 
 | Config | Type | Default | Description |
 |------|------|--------|------|
 | `appId` | string | **required** | QQ Bot AppID (or via `QQBOT_APPID` env var) |
 | `appSecret` | string | **required** | QQ Bot AppSecret (or via `QQBOT_SECRET` env var) |
-| `provider` | string | `deepseek-official` | LLM provider name |
-| `model` | string | `deepseek-chat` | Model name |
+| `provider` | string | `deepseek-official` | LLM provider name (empty inherits the host default) |
+| `model` | string | `deepseek-flash` | Model name; the DSH `deepseek-official` V4.1 Flash (empty inherits the host default) |
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent working directory |
+| `ownerOpenid` | string | - | Bot owner QQ openid (used by the file-access allowlist) |
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
+| `groupReplyProbability` | number | `0` | Chance (0–1) of replying to a group message without @bot; 0 disables |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
 | `directPrompt` | string | - | Extra system prompt for direct chats |
 | `textChunkLimit` | number | `4500` | Max chars per message |
@@ -105,6 +120,14 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `access.groupMode` | `open`/`allowlist`/`disabled` | `open` | Group access mode |
 | `access.groupAllow` | string[] | `[]` | Group allowlist (group openid) |
 
+### File access (fileAccess)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `fileAccess.ownerOnly` | boolean | `true` | Only the owner's direct chat may access files (requires `ownerOpenid`) |
+| `fileAccess.extraAllow` | string[] | `[]` | Extra openids allowed to access files |
+| `fileAccess.sensitivePaths` | string[] | `[]` | Sensitive paths (deny list); access/sending is blocked when matched |
+
 ### Rich media (media)
 
 | Config | Type | Default | Description |
@@ -123,6 +146,8 @@ npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 | `vision.maxBytes` | number | `10MB` | Max image bytes |
 | `vision.maxTokens` | number | `1024` | Max output tokens |
 | `vision.timeoutMs` | number | `120000` | Vision call timeout (ms) |
+
+> When the host exposes the `deepseek-vision` route, use `vision.provider: deepseek-vision` with `vision.model: deepseek-v4-flash`; the text V4.1 Flash is `deepseek-flash` under `deepseek-official`. Do not mix the two.
 
 ### File sending (sendFile)
 
@@ -152,7 +177,17 @@ src/
 ├── index.ts                    # Cordis plugin entry (async apply)
 ├── config.ts                   # Config schema
 ├── types.ts                    # Global types
-├── setup.ts                    # Credential binding (QR)
+├── setup/                      # Credential binding (QR)
+│   ├── index.ts                # Binding orchestration (ensureCredentials)
+│   ├── binding-service.ts      # QR state machine (single source of truth in the host)
+│   ├── bind-routes.ts          # In-app binding routes (/qqbot/im-qqbot/bind)
+│   ├── presenters.ts           # Presentation strategy (terminal / browser fallback)
+│   ├── qr-svg.ts               # QR SVG rendering (host side)
+│   └── persist.ts              # Credential writes to cordis.patch.yml
+├── client/                     # Browser half (dsh.client Web Bundle)
+│   ├── index.ts                # Sidebar tab + plugin-manager config entry
+│   ├── bind-page.ts            # In-app binding page (QR + status polling)
+│   └── config-panel.ts         # Bundle-detail config form (access/model/prompts)
 ├── gateway/                    # Gateway assembly
 │   ├── bootstrap.ts            # Startup wiring (session/event listeners, etc.)
 │   └── middleware-setup.ts     # Middleware chain config
@@ -176,6 +211,7 @@ src/
 ├── features/                   # Interaction features
 │   ├── question-channel.ts     # ask_user_question Q&A channel
 │   ├── approval-channel.ts     # approval confirmation channel
+│   ├── group-memory.ts         # Persistent group memory
 │   └── answer-parser.ts        # Answer parsing
 ├── media/                      # Media
 │   ├── vision-tool.ts          # Image vision understanding
@@ -185,9 +221,10 @@ src/
 │   ├── question-answer.ts      # Q&A answer handling
 │   └── attachment.ts           # Attachment handling
 ├── shared/                     # Shared utilities
-│   ├── utils.ts                # Common helpers
+│   ├── utils.ts                # Common helpers + profile resolution
 │   ├── scope.ts                # scope/peer extraction
-│   └── send-helper.ts          # Chunked send
+│   ├── send-helper.ts          # Chunked send
+│   └── file-access.ts          # File access / sensitive-path guard
 └── commands/                   # Slash commands
 ```
 
@@ -226,6 +263,12 @@ pnpm dev
 export QQBOT_APPID="xxx" QQBOT_SECRET="xxx"
 npx @deepseek-ai/dsh web --patch /path/to/dsh-qqbot/cordis.dev.yml
 ```
+
+## Security & Privacy
+
+- Credentials (AppID/AppSecret, API keys) belong only in the profile's `cordis.patch.yml` or environment variables — **never commit them**.
+- `.gitignore` excludes `.env*`, `media/`, `stickers/`, `.dsh-sessions/`, and other local/runtime content. `media/` holds QQ direct/group attachment caches and may contain other people's private content; `stickers/` includes user-submitted art — confirm copyright and permission before committing either.
+- Review `git status --short` and `git diff --cached` before committing. If a secret was committed by mistake, rotate the AppSecret in the QQ Open Platform immediately and clean the Git history.
 
 ## License
 

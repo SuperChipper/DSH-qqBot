@@ -15,6 +15,7 @@ import type { ImQQBotConfig, SendFileConfig } from '../config.ts';
 import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
+import { isSensitivePath } from '../shared/file-access.ts';
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';
@@ -152,6 +153,9 @@ export function registerSendFileTool(
       const absPath = resolve(file_path);
       if (!isPathAllowed(absPath, config.sendFile, cwd)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${absPath}`);
+      }
+      if (isSensitivePath(absPath, config)) {
+        throw new Error(`qqbot_send_file: file_path 位于敏感目录，禁止访问: ${absPath}`);
       }
       if (!existsSync(absPath)) {
         throw new Error(`qqbot_send_file: 文件不存在: ${absPath}`);

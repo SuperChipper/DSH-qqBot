@@ -6,13 +6,13 @@
  */
 import { existsSync } from 'node:fs';
 import { readdir, rm, stat } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Context } from '@deepseek-ai/cordis';
 import type { Logger } from '../types.ts';
 
-/** 富媒体下载根目录（attachment.ts 复用） */
-export const MEDIA_ROOT = resolve(homedir(), '.dsh-qqbot', 'media');
+/** 富媒体下载根目录（仓库内 media/，attachment.ts 复用） */
+export const MEDIA_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'media');
 
 /** 定期清理间隔（毫秒），固定 1 小时 */
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
