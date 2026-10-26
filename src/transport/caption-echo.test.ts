@@ -28,6 +28,22 @@ describe('stripCaptionEcho', () => {
     expect(stripCaptionEcho('明天几点开会？', captions)).toBe('明天几点开会？');
   });
 
+  it('发送汇报式旁白 → 空串', () => {
+    const sent = ['这句是真的，刚才那份人物画像烧了小半碗 token。'];
+    expect(stripCaptionEcho('表情和图都已经发出去了，还附了一句话：写这段话确实烧了不少token。', sent)).toBe('');
+    expect(stripCaptionEcho('已发送～', sent)).toBe('');
+    expect(stripCaptionEcho('图配好了，附了一句吐槽', sent)).toBe('');
+  });
+
+  it('没发过 caption 时，汇报式文本不受影响', () => {
+    expect(stripCaptionEcho('图已经发出去了', [])).toBe('图已经发出去了');
+  });
+
+  it('长文本即使提到「发了」也保留', () => {
+    const long = '顺便回答你刚才的问题：'.padEnd(120, '这个配置项控制群聊里未被 @ 时的回复概率');
+    expect(stripCaptionEcho(`${long}，昨天也发了公告`, captions)).toBe(`${long}，昨天也发了公告`);
+  });
+
   it('多条 caption 都会被过滤', () => {
     expect(stripCaptionEcho('第二张', ['第一张', '第二张'])).toBe('');
   });

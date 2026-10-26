@@ -20,7 +20,13 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
-import { readRecentGroupMessages } from '../features/group-memory.ts';
+import { readRecentGroupMessages, type GroupMemoryImage } from '../features/group-memory.ts';
+import {
+  downloadRecentHistoryImages,
+  historyImageTag,
+  numberHistoryImages,
+  type HistoryImage,
+} from '../media/history-images.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -51,6 +57,8 @@ interface HistoryEntry {
   content: string;
   timestamp: number;
   messageId: string;
+  /** 群记忆里的图片（SDK historyBuffer 的条目没有） */
+  images?: GroupMemoryImage[];
 }
 
 interface MentionState {
@@ -106,8 +114,23 @@ export async function handleInbound(
     msgId: msg.messageId,
   };
 
+  // ── 群历史：被 @/随机触发时读持久化群记忆，并按需下载最近几张历史图片 ──
+  const isGroupTrigger = scope === 'group'
+    && ((mwState.mention?.wasMentioned ?? false) || (mwState.mention?.implicit ?? false));
+  const history: HistoryEntry[] | undefined = isGroupTrigger
+    ? readRecentGroupMessages(config.appId, peerId, config.historyLimit, msg.messageId)
+    : mwState.history;
+  const historyImages = isGroupTrigger ? numberHistoryImages(history ?? []) : [];
+  if (historyImages.length > 0) {
+    try {
+      await downloadRecentHistoryImages(historyImages, config.media, logger);
+    } catch (err) {
+      logger.warn(`im-qqbot: 历史图片下载失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(msg, mwState, scope, config, logger, manager);
+  const agentBody = assembleAgentBody(msg, mwState, scope, manager, history, historyImages);
 
   if (!agentBody) return;
 
@@ -149,15 +172,42 @@ export async function handleInbound(
   // 不再先经过 qqbot_describe_image 的「图片 → 文字描述」链路。
   if (nativeImages) {
     const seen = new Set<string>();
+    const hasNativeImage = historyImages.length > 0
+      || [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]
+        .some((file) => file.contentType === 'image');
+    if (hasNativeImage) {
+      content.push({
+        type: 'text' as const,
+        text: '[图片已原生注入：直接看图，不要先调用 qqbot_describe_image；只有逐字 OCR、图表/表格、长截图或你看不清时才用它补充。]',
+      });
+    }
+
+    // 历史图片在前，每张前加编号标签，和历史文本里的 [图片#n] 对应
+    let historyAttached = 0;
+    for (const image of historyImages) {
+      if (image.localPath === undefined || seen.has(image.localPath)) continue;
+      seen.add(image.localPath);
+      const block = await manager.createImageBlock(image.localPath);
+      if (block === undefined) continue;
+      content.push({ type: 'text', text: `[历史图片#${image.index}]` }, block);
+      historyAttached++;
+    }
+
     const images = [
       ...(mwState.downloadedFiles ?? []),
       ...(mwState.downloadedQuoteFiles ?? []),
     ];
+    let currentLabeled = false;
     for (const file of images) {
       if (file.contentType !== 'image' || seen.has(file.localPath)) continue;
       seen.add(file.localPath);
       const block = await manager.createImageBlock(file.localPath);
-      if (block !== undefined) content.push(block);
+      if (block === undefined) continue;
+      if (historyAttached > 0 && !currentLabeled) {
+        content.push({ type: 'text', text: '[当前消息的图片]' });
+        currentLabeled = true;
+      }
+      content.push(block);
     }
   }
 
@@ -193,15 +243,15 @@ function assembleAgentBody(
   msg: ProcessedMessage,
   state: MiddlewareState,
   scope: ChatScope,
-  config: ImQQBotConfig,
-  logger: Logger,
   manager: SessionManager,
+  history: HistoryEntry[] | undefined,
+  historyImages: HistoryImage[],
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
   const implicit = state.mention?.implicit ?? false;
 
-  const userContent = buildUserContent(msg, state, logger);
+  const userContent = buildUserContent(msg, state);
 
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
@@ -218,10 +268,7 @@ function assembleAgentBody(
   const migrationHint = manager.takeScheduleMigration(scope, peerId);
 
   const base = [dynamicCtx, stickerHints, unsentHint, migrationHint, userMessage].filter(Boolean).join('\n');
-  const history = (isGroup && (wasMentioned || implicit))
-    ? readRecentGroupMessages(config.appId, msg.groupOpenid ?? msg.senderId, config.historyLimit, msg.messageId)
-    : state.history;
-  const agentBody = buildAgentBody(base, history, isGroup, wasMentioned || implicit);
+  const agentBody = buildAgentBody(base, history, isGroup, wasMentioned || implicit, historyImages);
 
   return agentBody;
 }
@@ -261,7 +308,7 @@ function isEmptyMessage(
 /**
  * Layer 1: 用户文本内容 + 语音转录 + 附件类型标签（媒体路径由 buildDynamicCtx 提供）
  */
-function buildUserContent(msg: ProcessedMessage, state: MiddlewareState, logger: Logger): string {
+function buildUserContent(msg: ProcessedMessage, state: MiddlewareState): string {
   const parts: string[] = [];
 
   const text = (msg.content ?? '').trim();
@@ -269,7 +316,7 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState, logger:
     parts.push(text);
   }
 
-  const voiceTexts = extractVoiceTexts(msg.attachments, state.processedAttachments, logger);
+  const voiceTexts = extractVoiceTexts(msg.attachments, state.processedAttachments);
   if (voiceTexts.length > 0) {
     for (const vt of voiceTexts) {
       const durationTag = vt.duration ? ` (${vt.duration}s)` : '';
@@ -400,26 +447,41 @@ function renderMediaLine(
 /**
  * Layer 5: 最终 agentBody 拼合
  */
-function buildAgentBody(
+export function buildAgentBody(
   base: string,
   history: HistoryEntry[] | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
+  historyImages: readonly HistoryImage[] = [],
 ): string {
   if (!isGroup || !wasMentioned || !history || history.length === 0) {
     return base;
   }
 
+  const imagesByMessage = new Map<string, HistoryImage[]>();
+  for (const image of historyImages) {
+    const list = imagesByMessage.get(image.messageId) ?? [];
+    list.push(image);
+    imagesByMessage.set(image.messageId, list);
+  }
+
   const historyLines = history.map(h => {
     const name = h.senderName ?? shortSenderId(h.senderId);
-    return `[${name} (${h.senderId})] ${h.content}`;
+    const tags = (imagesByMessage.get(h.messageId) ?? []).map(historyImageTag);
+    return `[${name} (${h.senderId})] ${[h.content, ...tags].filter(Boolean).join(' ')}`;
   });
+
+  const imageNote = historyImages.length > 0
+    ? ['[图片#n] 是历史消息里的图片。消息末尾附了「[历史图片#n]」的可以直接看；'
+      + '其余的用 qqbot_describe_image 传路径/URL 查看（URL 可能已过期）。']
+    : [];
 
   return [
     '[Chat history begins]',
     ...historyLines,
     '',
     '[Chat history ends]',
+    ...imageNote,
     '[Current message]',
     base,
   ].join('\n');

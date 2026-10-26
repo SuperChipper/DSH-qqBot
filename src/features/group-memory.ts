@@ -6,12 +6,20 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
+/** 群消息里的图片（只存 QQ 下发的 URL，真正用到时再下载） */
+export interface GroupMemoryImage {
+  url: string;
+  filename?: string;
+}
+
 export interface GroupMemoryEntry {
   messageId: string;
   senderId: string;
   senderName?: string;
   content: string;
   timestamp: number;
+  /** 图片附件；旧记录没有该字段 */
+  images?: GroupMemoryImage[];
 }
 
 function sanitize(s: string): string {

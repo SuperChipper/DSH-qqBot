@@ -21,7 +21,8 @@ import {
 } from '@tencent-connect/qqbot-nodejs';
 import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
-import type { Logger } from '../types.ts';
+import type { Logger, RawAttachment } from '../types.ts';
+import { isImageContentType } from '../transport/attachment.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
@@ -67,15 +68,20 @@ export function setupMiddlewares(
   }));
 
   // 4.5. 持久化群记忆：所有群消息（含未 @bot）落盘 JSONL，供重启后回灌长期上下文
+  //      图片只记 URL：未 @bot 的消息不会经过附件下载，等被触发读历史时再按需下载
   bot.use(async (ctx, next) => {
     const msg = ctx.message;
     if (msg.kind === 'group' && msg.groupOpenid) {
+      const images = ((msg as { attachments?: RawAttachment[] }).attachments ?? [])
+        .filter((a) => isImageContentType(a.content_type) && a.url)
+        .map((a) => ({ url: a.url, ...(a.filename ? { filename: a.filename } : {}) }));
       appendGroupMessage(config.appId, msg.groupOpenid, {
         messageId: msg.messageId,
         senderId: msg.senderId,
         senderName: msg.senderName,
         content: String(msg.content ?? '').replace(/<@!?\d+>/g, '').trim(),
         timestamp: Date.now(),
+        ...(images.length > 0 ? { images } : {}),
       });
     }
     await next();
