@@ -248,6 +248,55 @@ describe('OutboundRouter.routeStreamFrame', () => {
     });
   });
 
+  it('assistant/message 的 usage 记为会话上下文大小（输入 + 缓存命中 + 输出）', async () => {
+    const record = createRecord(groupTarget);
+    const { outbound } = setup({ record });
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
+      type: 'assistant/message',
+      data: {
+        message: { content: [{ type: 'text', text: 'hi' }] },
+        usage: { inputTokens: 419, outputTokens: 206, cacheReadTokens: 64896 },
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(record.contextTokens).toBe(419 + 206 + 64896);
+  });
+
+  describe('工具报错展示', () => {
+    const sess = { header: { id: 'sess-qq' } };
+    const failWebFetch = (outbound: ReturnType<typeof setup>['outbound']) => {
+      outbound.routeSessionEvent(sess, {
+        type: 'tool/call',
+        data: { callId: 'w1', name: 'web_fetch', arguments: JSON.stringify({ url: 'http://app.myzaker.com/x' }) },
+      });
+      outbound.routeSessionEvent(sess, {
+        type: 'tool/result',
+        data: { message: { source: { callId: 'w1' } }, error: { name: 'WebError', code: 'WEB_REDIRECT_BLOCKED' } },
+      });
+    };
+
+    it('群聊默认不发工具报错', async () => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget) });
+      failWebFetch(outbound);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it('私聊照常发工具报错', async () => {
+      const { outbound, bot } = setup();
+      failWebFetch(outbound);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    });
+
+    it('开了 showToolResults 时群聊也发', async () => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget), config: createConfig({ showToolResults: true }) });
+      failWebFetch(outbound);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('旧通道回归：durable assistant/chunk 事件仍进 buffer', async () => {
     const { outbound, bot, session } = setup();
 

@@ -20,7 +20,12 @@ import {
   type MediaKind,
 } from './attachment.ts';
 import { clearGroupHistory } from '../features/history-store.ts';
-import { readRecentGroupMessages, type GroupMemoryImage } from '../features/group-memory.ts';
+import {
+  readGroupMessagesAfter,
+  readHistoryCursor,
+  writeHistoryCursor,
+  type GroupMemoryImage,
+} from '../features/group-memory.ts';
 import {
   downloadRecentHistoryImages,
   historyImageTag,
@@ -115,10 +120,16 @@ export async function handleInbound(
   };
 
   // ── 群历史：被 @/随机触发时读持久化群记忆，并按需下载最近几张历史图片 ──
+  // 只注入上次注入之后的新消息：更早的已经在会话历史里了，重复注入只会让上下文越滚越大。
+  // 游标绑定 sessionId，换了新会话（/new）时会话里没有旧历史，退回完整的最近 N 条。
   const isGroupTrigger = scope === 'group'
     && ((mwState.mention?.wasMentioned ?? false) || (mwState.mention?.implicit ?? false));
+  const cursor = isGroupTrigger ? readHistoryCursor(config.appId, peerId) : undefined;
+  const cursorMessageId = cursor !== undefined && cursor.sessionId === manager.sessionIdFor(scope, peerId)
+    ? cursor.messageId
+    : undefined;
   const history: HistoryEntry[] | undefined = isGroupTrigger
-    ? readRecentGroupMessages(config.appId, peerId, config.historyLimit, msg.messageId)
+    ? readGroupMessagesAfter(config.appId, peerId, config.historyLimit, cursorMessageId, msg.messageId)
     : mwState.history;
   const historyImages = isGroupTrigger ? numberHistoryImages(history ?? []) : [];
   if (historyImages.length > 0) {
@@ -172,7 +183,13 @@ export async function handleInbound(
   // 不再先经过 qqbot_describe_image 的「图片 → 文字描述」链路。
   if (nativeImages) {
     const seen = new Set<string>();
-    const hasNativeImage = historyImages.length > 0
+
+    // 历史图片只在当前消息像是在说图时才原生附上：否则模型会去点评一屏历史图，
+    // 忽略真正触发它的那句话。没附上的仍在历史文本里留路径，需要时自己看。
+    const attachHistory = wantsHistoryImages(
+      [msg.content ?? '', mwState.quote?.text ?? mwState.quote?.entry?.content ?? ''].join('\n'),
+    );
+    const hasNativeImage = (attachHistory && historyImages.some((image) => image.localPath !== undefined))
       || [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]
         .some((file) => file.contentType === 'image');
     if (hasNativeImage) {
@@ -184,7 +201,7 @@ export async function handleInbound(
 
     // 历史图片在前，每张前加编号标签，和历史文本里的 [图片#n] 对应
     let historyAttached = 0;
-    for (const image of historyImages) {
+    for (const image of attachHistory ? historyImages : []) {
       if (image.localPath === undefined || seen.has(image.localPath)) continue;
       seen.add(image.localPath);
       const block = await manager.createImageBlock(image.localPath);
@@ -223,6 +240,10 @@ export async function handleInbound(
   if (scope === 'group') {
     clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
   }
+  // 推进群历史游标：到当前这条为止的群消息都已经进了会话
+  if (isGroupTrigger) {
+    writeHistoryCursor(config.appId, peerId, { sessionId: record.sessionId, messageId: msg.messageId });
+  }
 
   // 阻塞等待本轮 turn 收敛，避免后续消息在 turn 运行期间被 followup 打断
   try {
@@ -230,6 +251,9 @@ export async function handleInbound(
   } catch (err) {
     logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  // 上下文超阈值时后台压缩（只针对 QQ 会话）
+  manager.maybeAutoCompact(record);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -446,6 +470,18 @@ function renderMediaLine(
   }
 }
 
+/** 当前消息（含引用原文）里指向图片/前文的说法 */
+const HISTORY_IMAGE_CUE = /图|照片|截图|表情|这张|那张|上面|上边|楼上|前面|刚才|刚刚|之前发|meme|pic|image/i;
+
+/**
+ * 是否要把历史图片原生附给模型：当前消息像是在说前面的图，或者只 @ 了 bot 没说话
+ * （常见于「@bot」让它对刚才的内容做反应）。其余情况只留文本标记，避免模型点评一屏历史图。
+ */
+export function wantsHistoryImages(currentText: string): boolean {
+  const text = currentText.replace(/<@!?[^>]*>/g, '').trim();
+  return text.length === 0 || HISTORY_IMAGE_CUE.test(text);
+}
+
 /**
  * Layer 5: 最终 agentBody 拼合
  */
@@ -473,17 +509,21 @@ export function buildAgentBody(
     return `[${name} (${h.senderId})] ${[h.content, ...tags].filter(Boolean).join(' ')}`;
   });
 
-  const imageNote = historyImages.length > 0
-    ? ['[图片#n] 是历史消息里的图片。消息末尾附了「[历史图片#n]」的可以直接看；'
-      + '其余的用 qqbot_describe_image 传路径/URL 查看（URL 可能已过期）。']
-    : [];
+  const notes = [
+    '（以上是群聊背景，不是要你逐条回应的内容。回复只针对下面 [Current message] 那一句；'
+      + '它没提到的历史消息和图片，别主动去点评。）',
+  ];
+  if (historyImages.length > 0) {
+    notes.push('[图片#n] 是历史消息里的图片。当前消息问到它们时：消息末尾附了「[历史图片#n]」的直接看，'
+      + '其余的用 qqbot_describe_image 传路径/URL 查看（URL 可能已过期）。');
+  }
 
   return [
     '[Chat history begins]',
     ...historyLines,
     '',
     '[Chat history ends]',
-    ...imageNote,
+    ...notes,
     '[Current message]',
     base,
   ].join('\n');

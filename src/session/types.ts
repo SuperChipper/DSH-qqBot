@@ -134,6 +134,10 @@ export interface SessionRecord {
   senderId: string;
   lastActivity: number;
   agentPreset?: string;
+  /** 最近一次模型请求后的上下文 token 数（出站从 assistant/message usage 更新），用于自动压缩 */
+  contextTokens?: number;
+  /** 自动压缩进行中（防重入） */
+  compacting?: boolean;
 }
 
 /** 会话状态信息（/status 用） */

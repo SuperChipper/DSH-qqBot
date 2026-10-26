@@ -121,6 +121,8 @@ export interface ImQQBotConfig {
   askTimeoutMs: number;
   /** 群历史缓冲条数 */
   historyLimit: number;
+  /** QQ 会话上下文超过这么多 token 时，在轮次结束后自动压缩（0=关闭，交给 dsh 默认阈值） */
+  autoCompactTokens: number;
   /** 访问控制 */
   access: AccessControlConfig;
   /** 是否展示工具调用成功结果（工具错误始终展示） */
@@ -197,13 +199,14 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
+  autoCompactTokens: Schema.number().default(120000).description('上下文超过此 token 数时自动压缩（0=关闭）'),
   access: AccessControlSchema.default({
     c2cMode: 'open',
     c2cAllow: [],
     groupMode: 'open',
     groupAllow: [],
   }).description('访问控制'),
-  showToolResults: Schema.boolean().default(false).description('是否展示工具调用成功结果（错误始终展示）'),
+  showToolResults: Schema.boolean().default(false).description('是否展示工具调用结果（关闭时私聊仍展示错误，群聊不展示）'),
   debug: Schema.boolean().default(false),
   media: Schema.object({
     enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),

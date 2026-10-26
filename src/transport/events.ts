@@ -27,10 +27,23 @@ export interface ChunkEvent {
   text: string;
 }
 
+/** 一次模型请求的 token 用量（inputTokens 不含缓存命中部分） */
+export interface MessageUsage {
+  inputTokens: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+}
+
 /** assistant/message 事件 */
 export interface MessageEvent {
   type: 'assistant/message';
   content: Array<{ type: string; text?: string }>;
+  usage?: MessageUsage;
+}
+
+/** 本次请求之后的会话上下文大小：请求输入（含缓存命中）+ 本次输出 */
+export function contextTokensOf(usage: MessageUsage): number {
+  return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.outputTokens ?? 0);
 }
 
 /** tool/call 事件 */
@@ -78,9 +91,26 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
     }
 
     case 'assistant/message': {
-      const message = (raw.data as { message?: { content?: Array<{ type: string; text?: string }> } }).message;
+      const data = raw.data as {
+        message?: { content?: Array<{ type: string; text?: string }> };
+        usage?: Partial<MessageUsage>;
+      };
+      const message = data.message;
       if (message === undefined || !Array.isArray(message.content)) return undefined;
-      return { type: 'assistant/message', content: message.content };
+      const usage = data.usage;
+      return {
+        type: 'assistant/message',
+        content: message.content,
+        ...(typeof usage?.inputTokens === 'number'
+          ? {
+            usage: {
+              inputTokens: usage.inputTokens,
+              ...(typeof usage.outputTokens === 'number' ? { outputTokens: usage.outputTokens } : {}),
+              ...(typeof usage.cacheReadTokens === 'number' ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+            },
+          }
+          : {}),
+      };
     }
 
     case 'tool/call': {

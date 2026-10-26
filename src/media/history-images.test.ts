@@ -9,7 +9,7 @@ import {
   historyImageTag,
   numberHistoryImages,
 } from './history-images.ts';
-import { buildAgentBody } from '../transport/inbound.ts';
+import { buildAgentBody, wantsHistoryImages } from '../transport/inbound.ts';
 
 const logger: Logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const media = { enabled: true, maxMB: 10, ttlHours: 24 } as MediaConfig;
@@ -86,8 +86,27 @@ describe('buildAgentBody 历史图片', () => {
     expect(body).toContain('[图片#n] 是历史消息里的图片');
   });
 
-  it('没有历史图片时不加说明', () => {
+  it('没有历史图片时不加图片说明，但仍提醒只回当前这句', () => {
     const body = buildAgentBody('[当前]', [history[2]!], true, true, []);
     expect(body).not.toContain('[图片#n]');
+    expect(body).toContain('回复只针对下面 [Current message] 那一句');
+  });
+});
+
+describe('wantsHistoryImages', () => {
+  it('当前消息在说图/前文 → 附历史图', () => {
+    expect(wantsHistoryImages('上面那张图是谁')).toBe(true);
+    expect(wantsHistoryImages('刚才那个表情什么意思')).toBe(true);
+    expect(wantsHistoryImages('这张笑死')).toBe(true);
+  });
+
+  it('只 @ 了 bot 没说话 → 附历史图', () => {
+    expect(wantsHistoryImages('')).toBe(true);
+    expect(wantsHistoryImages('<@7A3B71762CFE765933AD79E8F2E04B92> ')).toBe(true);
+  });
+
+  it('普通的一句话 → 不附历史图', () => {
+    expect(wantsHistoryImages('区区')).toBe(false);
+    expect(wantsHistoryImages('你今天吃了吗')).toBe(false);
   });
 });

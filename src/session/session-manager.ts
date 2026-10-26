@@ -149,6 +149,21 @@ export class SessionManager {
         sections.push({ name: 'qqbot:scope-prompt', order: 90, text: prompt });
       }
 
+      // 水群：模型看到一整屏历史时容易挨个点评，真人只会接触发自己的那一句。
+      if (record.scope === 'group') {
+        sections.push({
+          name: 'qqbot:group-focus',
+          order: 91,
+          text: [
+            '【水群】',
+            '你被 @ 或随机冒泡时，只接 [Current message] 那一句：先弄懂这句话本身在说什么、冲谁说的，再回它。',
+            '[Chat history] 是你刚好扫到的聊天记录，只用来理解语境（这句话在接谁、在聊什么）；别把前面的消息、图片挨个点评一遍，也别总结群聊。',
+            '只有当前这句明确提到前面的内容（「上面那张图」「刚才说的」、引用了某条消息）时，才回到前文去看。',
+            '一句话能回完就一句话；不知道对方指什么就直接问，别自己脑补一大段。',
+          ].join('\n'),
+        });
+      }
+
       // 动态表情清单：新收藏的表情在当前会话的下一回合即可见，不需要改人设配置。
       if (this.stickerStore !== undefined) {
         try {
@@ -601,6 +616,12 @@ export class SessionManager {
     return this.modelResolver.getSessionId(sessionKey) ?? this.deriveSessionId(sessionKey);
   }
 
+  /** 该 peer 当前（或下一次 getOrCreate 将使用）的 sessionId */
+  sessionIdFor(scope: ChatScope, peerId: string): string {
+    const record = this.sessions.get(this.sessionKey(scope, peerId));
+    return record?.sessionId ?? this.currentSessionId(this.sessionKey(scope, peerId));
+  }
+
   private async composePreset(presetId?: string): Promise<PresetComposition> {
     const presets = this.getPresetsService();
     if (!presets) return {};
@@ -783,6 +804,40 @@ export class SessionManager {
       this.logger.warn(`compact failed: key=${key} err=${message}`);
       return { ok: false, reason: 'failed', message };
     }
+  }
+
+  /**
+   * 轮次结束后按上下文大小自动压缩（后台执行，不阻塞下一条消息）。
+   *
+   * dsh 默认阈值按模型窗口算（deepseek-flash 约 678k token），群聊会话几乎碰不到；
+   * 这里只对 QQ 会话、按 autoCompactTokens 主动压缩。压缩期间进来的消息由 agent 排队，压完再跑。
+   * 正忙、正在压缩或还不知道上下文大小时跳过，下一轮再判断。
+   */
+  maybeAutoCompact(record: SessionRecord): void {
+    const threshold = this.config.autoCompactTokens ?? 0;
+    if (threshold <= 0 || record.compacting) return;
+    if (record.contextTokens === undefined || record.contextTokens < threshold) return;
+    if (record.agent.status !== 'idle') return;
+
+    const before = record.contextTokens;
+    record.compacting = true;
+    void this.compact(record.scope, record.peerId)
+      .then((outcome) => {
+        if (outcome.ok) {
+          record.contextTokens = undefined; // 下一次请求后重新测量
+          this.logger.info(
+            `im-qqbot: 自动压缩 key=${record.sessionKey} 上下文≈${before} tokens → 摘要替换 ${outcome.shadowed ?? 0} 条（约 ${outcome.tokens ?? 0} tokens）`,
+          );
+        } else {
+          this.logger.warn(`im-qqbot: 自动压缩跳过 key=${record.sessionKey} reason=${outcome.reason}${outcome.message ? ` ${outcome.message}` : ''}`);
+        }
+      })
+      .catch((err: unknown) => {
+        this.logger.warn(`im-qqbot: 自动压缩失败 key=${record.sessionKey}: ${err instanceof Error ? err.message : String(err)}`);
+      })
+      .finally(() => {
+        record.compacting = false;
+      });
   }
 
   async disposeAll(): Promise<void> {

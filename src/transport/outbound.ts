@@ -17,6 +17,7 @@ import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from '.
 import {
   parseEvent,
   extractTurnError,
+  contextTokensOf,
   type ChunkEvent,
   type MessageEvent,
   type ToolCallEvent,
@@ -181,6 +182,11 @@ class OutboundRouter {
 
   /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块 */
   private onMessage(sessionId: string, record: SessionRecord, event: MessageEvent): void {
+    // 记下当前上下文大小，供 turn 结束后判断是否自动压缩（旧 sessionId 的迟到事件不算）
+    if (event.usage !== undefined && record.sessionId === sessionId) {
+      record.contextTokens = contextTokensOf(event.usage);
+    }
+
     const buffer = this.buffers.get(sessionId);
     if (buffer !== undefined && buffer.text.trim()) {
       void buffer.flush();
@@ -227,6 +233,12 @@ class OutboundRouter {
     }
 
     if (event.error === undefined && !this.config.showToolResults) return;
+    // 群聊不刷工具报错：模型通常会自己换路子（如 web_fetch 被拦后改用 web_search），
+    // 报错原文对群友只是噪音；私聊照常展示便于主人排查，开了 showToolResults 时群聊也展示。
+    if (event.error !== undefined && record.replyTarget.scope === 'group' && !this.config.showToolResults) {
+      this.logger.info(`im-qqbot: 群聊工具报错未展示 tool=${call.name} code=${event.error.code}`);
+      return;
+    }
 
     const text = formatToolResult(
       call.name,

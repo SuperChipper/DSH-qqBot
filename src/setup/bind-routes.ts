@@ -99,7 +99,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
   'groupReplyProbability', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
-  'adminOpenids',
+  'adminOpenids', 'autoCompactTokens',
   'access', 'fileAccess', 'stickers',
 ]);
 
@@ -116,6 +116,7 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   directPrompt: stringSchema('directPrompt'),
   groupReplyProbability: (v) => numberSchema(v, 'groupReplyProbability', 0, 1),
   historyLimit: (v) => integerSchema(v, 'historyLimit', 0, 200),
+  autoCompactTokens: (v) => integerSchema(v, 'autoCompactTokens', 0, 1_000_000),
   sessionIdleTimeout: (v) => integerSchema(v, 'sessionIdleTimeout', 60_000, 30 * 24 * 60 * 60 * 1000),
   ownerOpenid: stringSchema('ownerOpenid'),
   adminOpenids: (v) => stringArraySchema(v, 'adminOpenids'),
