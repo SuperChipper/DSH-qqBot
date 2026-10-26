@@ -33,6 +33,7 @@ import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-t
 import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
+import { registerPetNativeBalance } from '../pet/native-balance.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -277,6 +278,9 @@ export async function bootstrapGateway(
     registerSaveStickerTool(ctx, stickerStore, logger);
     registerMatchStickerTool(ctx, stickerStore, logger);
   }
+
+  // ── 桌宠余额：自定义 deepseek-native 不在 dsh-pet 内置表里，补一个同接口 provider ──
+  registerPetNativeBalance(ctx, logger);
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })

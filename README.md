@@ -239,6 +239,7 @@ Web profile 新增了一个 pi-ai 路由 `deepseek-native`：
 - Web GUI 的默认模型仍是 `deepseek-official/deepseek-flash`；要在 GUI 里原生读图，在模型选择里选 `DeepSeek V4.1 Native`。
 - 这个路由走 pi-ai 的通用 OpenAI 适配器，不是官方 DeepSeek adapter；工具调用/推理已用子 agent 验收过（`read_image` 直接看图成功），但正式长期使用前建议再观察几轮。
 - 如果 pi-ai 路由出现问题，回退方式：把 `im-qqbot.provider` 改回 `deepseek-official`，并把 `vision.native` 设为 `false`，原两段式链路即可恢复。
+- 桌宠余额：`deepseek-native` 不在 dsh-pet 的内置余额 provider 表里。QQ 插件启动时会通过 `petApi7340.balance.register` 注册一个同接口的 `deepseek-native` provider（`/user/balance` + `DEEPSEEK_API_KEY`），所以桌宠在 native 下仍能查余额，并带 DeepSeek 峰/谷档位（北京时间工作日 9–12、14–18 为峰，其余及周末为谷）。若停用 QQ 插件，桌宠对 native 会退回 `unsupported`。
 
 ## 定时任务与 /new
 

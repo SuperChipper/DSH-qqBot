@@ -237,6 +237,7 @@ Notes:
 - The Web GUI default model is still `deepseek-official/deepseek-flash`; to use native vision there, select `DeepSeek V4.1 Native` in the model picker.
 - This route uses the generic pi-ai OpenAI adapter, not the official DeepSeek adapter. Tool calls and reasoning were smoke-tested with a subagent (`read_image` saw the image directly), but observe it for a few turns before relying on it long-term.
 - To roll back: set `im-qqbot.provider` back to `deepseek-official` and `vision.native` to `false`; the original two-stage chain returns.
+- Pet balance: `deepseek-native` is not in dsh-pet's built-in balance provider table. The QQ plugin registers a matching `deepseek-native` provider at startup via `petApi7340.balance.register` (`/user/balance` + `DEEPSEEK_API_KEY`), so the desktop pet can still query balance under native, including the DeepSeek peak/idle tier (Beijing time weekdays 9–12 and 14–18 are peak; everything else and weekends are idle). If the QQ plugin is disabled, the pet falls back to `unsupported` for native.
 
 ## Schedules and /new
 

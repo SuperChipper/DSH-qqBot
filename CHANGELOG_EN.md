@@ -32,6 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Pseudo tool-call fallback**: when the model writes `qqbot_save_sticker` as text tags, the outbound layer strips the tags and executes the collection instead of sending XML to the user.
 - **Pseudo send_file fallback**: `<qqbot_send_file>...` text tags are stripped by the outbound layer and do not trigger a second send.
 - **Old session lost after `/new`**: kept a retired-session mapping (`old sessionId → current session`) so a resumed old schedule still routes to the current QQ conversation; failed sends are queued and a `[上次未送达]` hint is injected on the next user message for a resend.
+- **Desktop pet balance with `deepseek-native`**: registered a matching balance provider via `petApi7340.balance.register` (`/user/balance` + `DEEPSEEK_API_KEY`) with the DeepSeek peak/idle tier, so switching to native no longer shows `unsupported`.
 - **Approval card failed**: pending is now registered before the card is sent (race fix); stale cards/plugin-reload clicks say “审批已失效” instead of showing a QQ approval failure.
 
 ### Security

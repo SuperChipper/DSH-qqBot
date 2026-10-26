@@ -17,6 +17,7 @@
 - **B 站只读工具**：新增 `bili_search`、`bili_video`、`bili_comments`、`bili_subtitle` 及扫码登录 `bili_login` / `bili_login_check`；只读、凭证存本机、不注册发评论/投稿/私信等写操作。
 - **原生读图**：新增 `deepseek-native` pi-ai 路由（`deepseek-flash`，text+image）和 `vision.native`；QQ 入站图片经 attachments 转为 ImageBlock 直接交给主模型，跳过 `qqbot_describe_image` 的转述。`qqbot_describe_image` 保留为 OCR/图表 fallback。
 - **`/new` 自动迁移定时任务**：`/new` 时捕获旧会话 active 的 daily/weekly/every 任务，在新会话第一条消息注入 `schedule_list` / `schedule_create` 重建指令；一次性 after/at 不迁移。
+- **桌宠余额兼容 `deepseek-native`**：通过 `petApi7340.balance.register` 注册同接口的余额 provider（`/user/balance` + `DEEPSEEK_API_KEY`），并带 DeepSeek 峰/谷档位；切换 native 后桌宠不再显示 `unsupported`。
 - **梗图/表情匹配**：新增 `qqbot_match_sticker`，按 SHA-256 在本地 `stickers/index.json` 查完全相同的图；配套 `meme-recognition` skill 在未命中时用 OCR + KnowYourMeme/萌娘百科/百度/B站等文本检索。当前仅精确哈希，感知哈希待后续。
 
 ### 体验优化
