@@ -221,6 +221,68 @@ describe('ApprovalChannel.handleInteraction', () => {
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'deny' }), { user: 'peer-qq' }))).toBe(true);
     await expect(p).resolves.toBe('rejected');
   });
+
+  it('stale approval card without pending is acknowledged with a notice', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(createManager(), createSender(sent), createLogger());
+    expect(ch.handleInteraction(
+      makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'peer-qq' }),
+    )).toBe(true);
+    await sleep(10);
+    expect(sent.some((item) => item.text.includes('已失效'))).toBe(true);
+  });
+
+  it('allows the c2c session user to approve their own operation', async () => {
+    const sent: SentMessage[] = [];
+    const rec: ApprovalSessionRecordLike = {
+      sessionKey: sessionKey('c2c', 'peer-qq'),
+      scope: 'c2c',
+      replyTarget: { scope: 'c2c', targetId: 'peer-qq', msgId: 'm' },
+    };
+    const ch = new ApprovalChannel(
+      createManager({
+        findBySessionId: (id) => (id === 'sess-qq' ? rec : undefined),
+        getSessionRecord: () => rec,
+      }),
+      createSender(sent),
+      createLogger(),
+      (senderId) => senderId === 'owner',
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'peer-qq' }))).toBe(true);
+    await expect(p).resolves.toBe('allowed-once');
+  });
+
+  it('ignores clicks from non-privileged senders and keeps the approval pending', async () => {
+    const sent: SentMessage[] = [];
+    const groupKey = sessionKey('group', 'group-1');
+    const ch = new ApprovalChannel(
+      createManager({
+        findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(groupKey, 'group') : undefined),
+      }),
+      createSender(sent),
+      createLogger(),
+      (senderId) => senderId === 'owner',
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+
+    // 非主人点击：消费事件但不结算，审批仍等待
+    expect(ch.handleInteraction(
+      makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', user: 'stranger' }),
+    )).toBe(true);
+
+    // 主人点击：正常放行
+    expect(ch.handleInteraction(
+      makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', user: 'owner' }),
+    )).toBe(true);
+    await expect(p).resolves.toBe('allowed-once');
+  });
 });
 
 describe('ApprovalChannel.cancelPending', () => {

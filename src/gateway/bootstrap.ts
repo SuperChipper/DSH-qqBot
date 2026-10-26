@@ -5,6 +5,9 @@
  * dsh session/event → createOutboundHandler → QQ 出站。
  */
 import type { Context } from '@deepseek-ai/cordis';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, resolve } from 'node:path';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
@@ -17,14 +20,19 @@ import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
 import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
+import { BiliClient } from '../bili/client.ts';
+import { registerBiliTools } from '../bili/tools.ts';
 import { decodeButtonData } from '../features/button-utils.ts';
-import { buildUserAgent } from '../shared/index.ts';
+import { PLUGIN_ROOT, buildUserAgent, isPrivilegedSender, privilegedOpenids } from '../shared/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
-import { startMediaCleanup } from '../media/media-cleaner.ts';
+import { MEDIA_ROOT, startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { StickerStore } from '../media/sticker-store.ts';
+import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
+import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -41,6 +49,43 @@ function dispatchInteraction(event: InteractionEvent, manager: SessionManager): 
   return false;
 }
 
+/** 解析表情包目录与允许来源，构建 StickerStore（关闭时返回 undefined） */
+function createStickerStore(config: ImQQBotConfig, logger: Logger): StickerStore | undefined {
+  const stickers = config.stickers ?? {
+    enabled: true,
+    root: '',
+    extraRoots: [],
+    maxBytes: 8 * 1024 * 1024,
+    maxAutoEntries: 200,
+  };
+  if (!stickers.enabled) return undefined;
+
+  const configuredRoot = stickers.root.trim();
+  const root = configuredRoot === ''
+    ? resolve(PLUGIN_ROOT, 'stickers')
+    : (isAbsolute(configuredRoot) ? configuredRoot : resolve(PLUGIN_ROOT, configuredRoot));
+
+  const allowedRoots = [MEDIA_ROOT];
+  // 兼容旧版 media 根目录（升级前下载的图片仍可被收藏）
+  const legacyMediaRoot = resolve(homedir(), '.dsh-qqbot', 'media');
+  if (existsSync(legacyMediaRoot)) allowedRoots.push(legacyMediaRoot);
+  for (const extra of stickers.extraRoots) {
+    if (extra.trim() === '') continue;
+    allowedRoots.push(isAbsolute(extra) ? extra : resolve(PLUGIN_ROOT, extra));
+  }
+
+  const store = new StickerStore({
+    root,
+    allowedRoots,
+    sensitivePaths: config.fileAccess?.sensitivePaths ?? [],
+    maxBytes: stickers.maxBytes,
+    maxAutoEntries: stickers.maxAutoEntries,
+    logger,
+  });
+  logger.info(`im-qqbot: 表情收藏已启用 root=${store.root}`);
+  return store;
+}
+
 export async function bootstrapGateway(
   ctx: Context,
   agents: DshAgentRegistry,
@@ -48,6 +93,15 @@ export async function bootstrapGateway(
   logger: Logger,
 ): Promise<void> {
   const manager = new SessionManager(ctx, agents, config, logger);
+
+  // 配置权限：owner/admin 为空时保持旧行为，但明确提示风险
+  if (privilegedOpenids(config).length === 0) {
+    logger.warn('im-qqbot: 未配置 ownerOpenid/adminOpenids，配置命令与审批对所有通过访问控制的用户开放');
+  }
+
+  // ── 表情收藏存储（工具 + 动态 prompt 清单共用） ──
+  const stickerStore = createStickerStore(config, logger);
+  manager.stickerStore = stickerStore;
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -99,7 +153,7 @@ export async function bootstrapGateway(
     }),
   };
 
-  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry);
+  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, stickerStore);
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
     .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void);
 
@@ -119,7 +173,12 @@ export async function bootstrapGateway(
   questionChannel.install(ctx);
 
   // ── 审批通道（approval/request → QQ 两按钮审批） ──
-  const approvalChannel = new ApprovalChannel(manager, sender, logger);
+  const approvalChannel = new ApprovalChannel(
+    manager,
+    sender,
+    logger,
+    (senderId) => isPrivilegedSender(senderId, config),
+  );
   manager.approvalChannel = approvalChannel;
   approvalChannel.install(ctx as unknown as ApprovalChannelContext);
 
@@ -172,12 +231,52 @@ export async function bootstrapGateway(
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
   const mediaSender: MediaSenderLike = {
-    sendImage: (target, source) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source),
-    sendVideo: (target, source) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source),
+    sendImage: (target, source, opts) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source, opts),
+    sendVideo: (target, source, opts) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source, opts),
     sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
     sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
   };
   registerSendFileTool(ctx, mediaSender, manager, config, logger);
+
+  // ── Bilibili 只读工具（搜索/视频/评论/字幕/扫码登录） ──
+  const biliTools = ctx.get('tools') as { register(definition: unknown): unknown } | undefined;
+  if (biliTools !== undefined) {
+    const biliClient = new BiliClient();
+    registerBiliTools(biliTools, {
+      client: biliClient,
+      logger,
+      permission: (agent) => {
+        const record = manager.findByAgent(agent as never);
+        // 本地 Web/Desktop 会话没有 QQ 记录：视为本机可信，只返回二维码路径
+        if (record === undefined) return { allowed: true };
+        if (record.scope !== 'c2c') {
+          return {
+            allowed: false,
+            reason: 'B 站登录/字幕只能在私聊里由主人或管理员操作；群聊可以用 bili_search / bili_video / bili_comments',
+          };
+        }
+        if (privilegedOpenids(config).length === 0) {
+          return { allowed: false, reason: '请先在插件配置里设置 ownerOpenid 或 adminOpenids，再登录 B 站' };
+        }
+        if (!isPrivilegedSender(record.peerId, config)) {
+          return { allowed: false, reason: '只有 bot 主人或管理员可以登录 B 站/使用登录态字幕' };
+        }
+        return { allowed: true };
+      },
+      sendQr: async (agent, qrPath, caption) => {
+        const record = manager.findByAgent(agent as never);
+        if (record === undefined) return false;
+        await mediaSender.sendImage(record.replyTarget, { localPath: qrPath }, { content: caption });
+        return true;
+      },
+    });
+  }
+
+  // ── 表情收藏工具注册（qqbot_save_sticker） ──
+  if (stickerStore !== undefined) {
+    registerSaveStickerTool(ctx, stickerStore, logger);
+    registerMatchStickerTool(ctx, stickerStore, logger);
+  }
 
   // ── 生命周期 ──
   (ctx as unknown as { effect(fn: () => (() => Promise<void>) | void, name?: string): void })

@@ -15,12 +15,16 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { SessionId } from '@deepseek-ai/dsh-session';
 import type { Context } from '@deepseek-ai/cordis';
+import type { ImageBlock } from '@deepseek-ai/dsh-llm';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
 import type { ImQQBotConfig } from '../config.ts';
+import { loadNativeImageBlock, type AttachmentStoreLike } from '../media/native-image.ts';
 import { ModelResolver } from '../model/model-resolver.ts';
 import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import { resolveSessionCwd } from '../shared/file-access.ts';
+import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts';
+import { formatScheduleMigrationHint, readScheduleMigrations, scheduleStorageHome, type ScheduleMigrationTask } from './schedule-migration.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import type {
@@ -69,6 +73,12 @@ interface AssembledPrompt {
 
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
+  /** 发送失败（常见于群主动消息无权限）的文本，等下一次用户消息时补发 */
+  private unsent = new Map<string, string[]>();
+  /** /new 或 fork 后的旧 sessionId → 当前会话 key，用于旧定时任务/旧审批卡片继续路由 */
+  private retiredSessionIds = new Map<string, string>();
+  /** /new 后待新会话重建的定时任务（旧会话 key → 任务） */
+  private pendingScheduleMigrations = new Map<string, ScheduleMigrationTask[]>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -79,6 +89,8 @@ export class SessionManager {
   public questionChannel?: QuestionChannel;
   /** 由 bootstrap 注入的审批通道（approval/request → QQ），会话回收时清理其待批审批 */
   public approvalChannel?: ApprovalChannel;
+  /** 由 bootstrap 注入的表情收藏存储（动态 prompt 清单） */
+  public stickerStore?: StickerStore;
 
   constructor(
     ctx: Context,
@@ -128,13 +140,49 @@ export class SessionManager {
       const record = this.findByAgent(context.agent);
       if (!record) return assembled;
 
+      const sections = [...(assembled.sections ?? [])];
       const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
-      if (!prompt) return assembled;
+      if (prompt) {
+        sections.push({ name: 'qqbot:scope-prompt', order: 90, text: prompt });
+      }
 
-      return {
-        ...assembled,
-        sections: [...(assembled.sections ?? []), { name: 'qqbot:scope-prompt', order: 90, text: prompt }],
-      };
+      // 动态表情清单：新收藏的表情在当前会话的下一回合即可见，不需要改人设配置。
+      if (this.stickerStore !== undefined) {
+        try {
+          sections.push(...this.stickerStore.promptSections());
+        } catch (err) {
+          this.logger.warn(`im-qqbot: 注入表情清单失败: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+
+      // 媒体 caption：QQ 支持图片/视频/文件与文字同一条发出。
+      // 这条优先于人设里的「先文字后图片」，避免用户看到两个气泡。
+      sections.push({
+        name: 'qqbot:media-caption',
+        order: 93,
+        text: [
+          '【发图配文】',
+          '用 qqbot_send_file 发图片/视频/文件并配文字时，把整段回复放进 caption，调用后不要再单独回复同一段文字；caption 会和媒体同一条消息发出。',
+          '没有媒体要发时正常文字回复。这条优先于人设里的「先文字后图片」。',
+        ].join('\n'),
+      });
+
+      sections.push({
+        name: 'qqbot:image-routing',
+        order: 94,
+        text: [
+          '【图片路由】',
+          '用户发图时：',
+          '1. 如果上下文里已有「[本地表情库]」命中提示，直接用它的情绪/文件，不要重复猜。',
+          '2. 用户问“这是谁 / 出自哪 / 什么动漫”时，调用 skill 加载 anime-recognition，再按它的流程识别。',
+          '3. 用户问“什么梗 / 表情包 / 怎么回”时，调用 skill 加载 meme-recognition。',
+          '4. 用户只是随手发图、没提问时，按人设自然反应，不必强行识别。',
+          '不要只凭肉眼断言角色或梗；需要外部检索时走对应 skill。',
+        ].join('\n'),
+      });
+
+      if (sections.length === (assembled.sections?.length ?? 0)) return assembled;
+      return { ...assembled, sections };
     };
 
     (this.ctx as unknown as {
@@ -326,6 +374,8 @@ export class SessionManager {
     });
 
     this.modelResolver.setSessionId(key, childId);
+    this.captureScheduleMigrations(key, record.sessionId);
+    this.retiredSessionIds.set(record.sessionId, key);
 
     const oldHandle = record.handle;
     record.sessionId = childId;
@@ -356,6 +406,84 @@ export class SessionManager {
 
   getSessionRecord(scope: ChatScope, peerId: string): SessionRecord | undefined {
     return this.sessions.get(this.sessionKey(scope, peerId));
+  }
+
+  /** 入站图片本地表情库精确匹配（失败/未启用时返回 undefined，不阻塞消息） */
+  matchSticker(path: string): StickerMatchResult | undefined {
+    try {
+      return this.stickerStore?.match(path);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 原生读图：把本地图片提交为 attachment，返回可直接放进 user message 的 ImageBlock */
+  async createImageBlock(path: string): Promise<ImageBlock | undefined> {
+    if (!this.config.vision.native) return undefined;
+    const attachments = this.ctx.get('attachments') as AttachmentStoreLike | undefined;
+    if (attachments === undefined) {
+      this.logger.warn('im-qqbot: vision.native 已开启，但 attachments 服务不可用，回退到图片路径');
+      return undefined;
+    }
+    try {
+      return await loadNativeImageBlock(attachments, path, this.config.vision.maxBytes);
+    } catch (err) {
+      this.logger.warn(`im-qqbot: 原生图片附件创建失败，回退到图片路径: ${err instanceof Error ? err.message : String(err)}`);
+      return undefined;
+    }
+  }
+
+  /** 当前 provider/model 是否声明 image 输入（旧会话切模型前不能硬塞 ImageBlock） */
+  async supportsImageInput(provider: string, model: string): Promise<boolean> {
+    const llm = this.ctx.get('llm') as {
+      resolveModelInfo(provider: string, model: string): Promise<{ inputModalities?: readonly string[] }>;
+    } | undefined;
+    if (llm === undefined) return false;
+    try {
+      const info = await llm.resolveModelInfo(provider, model);
+      return info.inputModalities?.includes('image') ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 记录一条因平台限制未送达的文本，等下一次用户消息时提示模型补发 */
+  addUnsent(sessionKey: string, text: string): void {
+    const trimmed = text.trim();
+    if (trimmed.length === 0) return;
+    const list = this.unsent.get(sessionKey) ?? [];
+    list.push(trimmed.slice(0, 8000));
+    while (list.length > 3) list.shift();
+    this.unsent.set(sessionKey, list);
+  }
+
+  /** 取出并清空该会话的未送达文本 */
+  takeUnsent(scope: ChatScope, peerId: string): string | undefined {
+    const key = this.sessionKey(scope, peerId);
+    const list = this.unsent.get(key);
+    if (list === undefined || list.length === 0) return undefined;
+    this.unsent.delete(key);
+    return list.join('\n\n---\n\n').slice(0, 8000);
+  }
+
+  /** /new 时捕获旧会话的 active 定时任务，等新会话第一条消息注入重建指令 */
+  private captureScheduleMigrations(sessionKey: string, oldSessionId: string): void {
+    try {
+      const tasks = readScheduleMigrations(scheduleStorageHome(), oldSessionId);
+      if (tasks.length > 0) this.pendingScheduleMigrations.set(sessionKey, tasks);
+      else this.pendingScheduleMigrations.delete(sessionKey);
+    } catch {
+      // 调度存储不可读时不阻塞 /new；用户仍可手动重建
+    }
+  }
+
+  /** 取走并格式化待迁移任务（只给新会话的第一条消息一次） */
+  takeScheduleMigration(scope: ChatScope, peerId: string): string | undefined {
+    const key = this.sessionKey(scope, peerId);
+    const tasks = this.pendingScheduleMigrations.get(key);
+    if (tasks === undefined) return undefined;
+    this.pendingScheduleMigrations.delete(key);
+    return formatScheduleMigrationHint(tasks);
   }
 
   getStatus(scope: ChatScope, peerId: string): SessionStatus {
@@ -543,7 +671,8 @@ export class SessionManager {
     for (const record of this.sessions.values()) {
       if (record.sessionId === sessionId) return record;
     }
-    return undefined;
+    const currentKey = this.retiredSessionIds.get(sessionId);
+    return currentKey === undefined ? undefined : this.sessions.get(currentKey);
   }
 
   findByAgent(agent: DshAgent): SessionRecord | undefined {
@@ -556,6 +685,16 @@ export class SessionManager {
   async remove(scope: ChatScope, peerId: string): Promise<void> {
     const key = this.sessionKey(scope, peerId);
     const record = this.sessions.get(key);
+    const oldSessionId = record?.sessionId ?? this.modelResolver.getSessionId(key);
+    if (oldSessionId !== undefined) {
+      this.captureScheduleMigrations(key, oldSessionId);
+      this.retiredSessionIds.set(oldSessionId, key);
+      while (this.retiredSessionIds.size > 100) {
+        const first = this.retiredSessionIds.keys().next().value;
+        if (first === undefined) break;
+        this.retiredSessionIds.delete(first);
+      }
+    }
     this.modelResolver.setSessionId(key, randomUUID());
 
     if (!record) return;

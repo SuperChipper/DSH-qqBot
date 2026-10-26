@@ -25,6 +25,7 @@ import type { Logger } from '../types.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
+import { accessPolicyFromConfig } from '../shared/permissions.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { appendGroupMessage } from '../features/group-memory.ts';
 
@@ -41,15 +42,10 @@ export function setupMiddlewares(
   bot.use(messageFilter({ skipSelfEcho: false }));
 
   // 3. 访问控制（白名单/开放/禁用）
+  //    allowlist 为空时 SDK 会 fail-closed；这里必须原样传列表，
+  //    不能 fallback 成 ['*']（否则「只允许白名单」会变成「允许所有人」）。
   bot.use(accessPolicy({
-    c2c: {
-      mode: config.access.c2cMode,
-      allow: config.access.c2cAllow.length > 0 ? config.access.c2cAllow : ['*'],
-    },
-    group: {
-      mode: config.access.groupMode,
-      allow: config.access.groupAllow.length > 0 ? config.access.groupAllow : ['*'],
-    },
+    ...accessPolicyFromConfig(config),
     onBlock: (_mCtx, reason) => {
       if (config.debug) {
         logger.debug(`Access blocked: ${reason}`);

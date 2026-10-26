@@ -8,8 +8,9 @@ tsdown.client.config.ts
 .env.example
 cordis.patch.local.yml
 .dsh-sessions/
-media/
-stickers/
+# 只排除仓库根目录的运行时素材，保留 dist/media/ 里的构建产物
+/media/
+/stickers/
 .git/
 .gitignore
 *.tsbuildinfo

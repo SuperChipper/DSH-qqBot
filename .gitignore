@@ -13,12 +13,13 @@ cordis.patch.local.yml
 
 # ── 本地运行态（会话、QQ 附件缓存）──
 .dsh-sessions/
-media/
+# 只忽略仓库根目录的运行时 media/，不能误伤 src/media/ 与 dist/media/
+/media/
 cordis.dev.yml
 
 # ── 本地表情包素材 ──
 # 含用户投稿/二创图片，默认不提交；确认版权与授权后可 git add -f 单独提交。
-stickers/
+/stickers/
 
 # ── 日志 / 系统 / 编辑器 ──
 *.log

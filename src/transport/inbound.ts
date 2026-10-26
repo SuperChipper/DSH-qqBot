@@ -107,7 +107,7 @@ export async function handleInbound(
   };
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(msg, mwState, scope, config, logger);
+  const agentBody = assembleAgentBody(msg, mwState, scope, config, logger, manager);
 
   if (!agentBody) return;
 
@@ -129,7 +129,37 @@ export async function handleInbound(
   }
 
   // ── 构建 UserMessage → followup ──
-  const content: ContentBlock[] = [{ type: 'text' as const, text: agentBody }];
+  let text = agentBody;
+  let nativeImages = false;
+  if (config.vision.native) {
+    // 旧会话可能仍是 text-only 路由；按会话实际 requestHeader 判断，不能只看全局 config。
+    const header = (record.agent as unknown as {
+      session?: { requestHeader?: () => { config?: { provider?: string; model?: string } } };
+    }).session?.requestHeader?.()?.config;
+    const provider = header?.provider ?? config.provider ?? '';
+    const model = header?.model ?? config.model ?? '';
+    nativeImages = await manager.supportsImageInput(provider, model);
+    if (!nativeImages) {
+      text += `\n[图片未原生注入：当前会话模型 ${provider}/${model} 不支持 image 输入；需要看图请调用 qqbot_describe_image。]`;
+    }
+  }
+  const content: ContentBlock[] = [{ type: 'text' as const, text }];
+
+  // 原生读图：主模型路由声明 image 输入时，直接把原图作为 ImageBlock 交给模型，
+  // 不再先经过 qqbot_describe_image 的「图片 → 文字描述」链路。
+  if (nativeImages) {
+    const seen = new Set<string>();
+    const images = [
+      ...(mwState.downloadedFiles ?? []),
+      ...(mwState.downloadedQuoteFiles ?? []),
+    ];
+    for (const file of images) {
+      if (file.contentType !== 'image' || seen.has(file.localPath)) continue;
+      seen.add(file.localPath);
+      const block = await manager.createImageBlock(file.localPath);
+      if (block !== undefined) content.push(block);
+    }
+  }
 
   const message = createUserMessage({
     content,
@@ -165,6 +195,7 @@ function assembleAgentBody(
   scope: ChatScope,
   config: ImQQBotConfig,
   logger: Logger,
+  manager: SessionManager,
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -178,8 +209,15 @@ function assembleAgentBody(
   const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
 
   const dynamicCtx = buildDynamicCtx(msg, state);
+  const stickerHints = buildStickerHints(state.downloadedFiles, manager);
+  const peerId = isGroup ? (msg.groupOpenid ?? msg.senderId) : msg.senderId;
+  const unsent = manager.takeUnsent(scope, peerId);
+  const unsentHint = unsent === undefined
+    ? ''
+    : `[上次未送达]\n上一次发给本会话的消息因平台限制失败，内容如下。现在用户重新说话了，可以把它作为回复补发（太长就发摘要）：\n${unsent}`;
+  const migrationHint = manager.takeScheduleMigration(scope, peerId);
 
-  const base = dynamicCtx ? `${dynamicCtx}${userMessage}` : userMessage;
+  const base = [dynamicCtx, stickerHints, unsentHint, migrationHint, userMessage].filter(Boolean).join('\n');
   const history = (isGroup && (wasMentioned || implicit))
     ? readRecentGroupMessages(config.appId, msg.groupOpenid ?? msg.senderId, config.historyLimit, msg.messageId)
     : state.history;
@@ -192,6 +230,22 @@ function assembleAgentBody(
  * 判断消息是否为空：无文本/语音/附件，且非群聊 @。
  * 群聊被 @ 视为有效触发信号，即使内容为空也保留给 agent。
  */
+function buildStickerHints(files: DownloadedFile[] | undefined, manager: SessionManager): string {
+  if (files === undefined || files.length === 0) return '';
+  const lines: string[] = [];
+  for (const file of files) {
+    if (file.contentType !== 'image') continue;
+    const match = manager.matchSticker(file.localPath);
+    if (match === undefined) continue;
+    const note = match.note !== undefined ? `；备注：${match.note}` : '';
+    lines.push(
+      `[本地表情库] 命中「${match.emotion}」→ ${match.file}（${match.bytes} bytes${note}）。`
+      + '可直接用这个情绪，或用 qqbot_send_file 发出这张表情。',
+    );
+  }
+  return lines.join('\n');
+}
+
 function isEmptyMessage(
   userContent: string,
   attachments: RawAttachment[] | undefined,

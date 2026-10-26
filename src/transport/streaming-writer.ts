@@ -18,6 +18,8 @@ export interface StreamingWriterDeps {
   logger: Logger;
   /** 节流间隔（ms）：连续 append 累积后，停顿该间隔才 update */
   throttleMs: number;
+  /** 出站前清洗（去掉模型误写的伪工具调用标签，流式 update 用） */
+  sanitize?: (text: string) => string;
 }
 
 export class StreamingWriter {
@@ -133,10 +135,14 @@ export class StreamingWriter {
   private async pushUpdate(): Promise<void> {
     if (this.aborted || this.failed || !this.fullText) return;
 
+    // 流式 update 是全量替换：每帧都清洗，避免伪工具调用标签/半截标签被推给用户
+    const visible = this.deps.sanitize ? this.deps.sanitize(this.fullText) : this.fullText;
+    if (!visible.trim()) return;
+
     if (!this.session) {
       try {
         this.session = this.deps.bot.openStream(this.deps.target);
-        this.deps.logger.debug(`im-qqbot: stream opened (chars=${this.fullText.length})`);
+        this.deps.logger.debug(`im-qqbot: stream opened (chars=${visible.length})`);
       } catch (err) {
         // openStream 失败：标记 failed 避免重复尝试，后续走降级静态
         this.failed = true;
@@ -148,7 +154,7 @@ export class StreamingWriter {
     }
 
     try {
-      await this.session.update(this.fullText);
+      await this.session.update(visible);
       this.sentChunkCount++;
     } catch (err) {
       // update 失败：不标记 failed（session 已打开，finish 会 complete 关闭）

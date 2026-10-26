@@ -3,12 +3,20 @@
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
+import { isPrivilegedSender } from '../shared/permissions.ts';
 
 export function modelCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {
     name: 'model',
     category: 'agent',
     description: '查看或切换模型（用法: /model [provider/model]）',
+    authorized: (ctx) => {
+      // 无参数只是查看/列出模型，不限制；带参数才是修改
+      const raw = (ctx.command?.raw ?? '').trim();
+      if (raw === '') return true;
+      return isPrivilegedSender(ctx.message.senderId, config)
+        || '⚠️ 只有 bot 主人或管理员可以修改模型。';
+    },
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
       const args = (cmdCtx.command?.raw ?? '').trim();

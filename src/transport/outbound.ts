@@ -7,6 +7,10 @@
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
+import type { StickerStore } from '../media/sticker-store.ts';
+import { extractPseudoStickerCalls, sanitizePseudoToolText } from '../media/pseudo-sticker-call.ts';
+import { SEND_FILE_TOOL_NAME } from '../media/send-file-tool.ts';
+import { captionFromArgs, stripCaptionEcho } from './caption-echo.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
@@ -61,11 +65,14 @@ class OutboundRouter {
   private readonly toolCalls = new Map<string, ToolCallRecord>();
   /** 每会话当前流式 attemptId：LLM 重试会发布新 attempt，用于 reset 与迟到帧过滤 */
   private readonly streamAttempts = new Map<string, string>();
+  /** 每会话本轮已随 qqbot_send_file 发出的 caption（用于过滤复读），turn/end 清空 */
+  private readonly captions = new Map<string, string[]>();
   private readonly manager: SessionManager;
   private readonly bot: QQBotSender;
   private readonly config: ImQQBotConfig;
   private readonly logger: Logger;
   private readonly toolsRegistry: ToolsRegistryLike | undefined;
+  private readonly stickerStore: StickerStore | undefined;
 
   public constructor(
     manager: SessionManager,
@@ -73,12 +80,14 @@ class OutboundRouter {
     config: ImQQBotConfig,
     logger: Logger,
     toolsRegistry: ToolsRegistryLike | undefined,
+    stickerStore?: StickerStore,
   ) {
     this.manager = manager;
     this.bot = bot;
     this.config = config;
     this.logger = logger;
     this.toolsRegistry = toolsRegistry;
+    this.stickerStore = stickerStore;
   }
 
   /** 事件分发入口 */
@@ -100,7 +109,7 @@ class OutboundRouter {
         this.onToolCall(event);
         break;
       case 'tool/result':
-        this.onToolResult(record, event);
+        this.onToolResult(session.header.id, record, event);
         break;
       case 'turn/end':
         this.onTurnEnd(session.header.id, record, event);
@@ -147,7 +156,17 @@ class OutboundRouter {
   private appendChunk(sessionId: string, record: SessionRecord, text: string): void {
     let buffer = this.buffers.get(sessionId);
     if (buffer === undefined) {
-      buffer = new OutboundBuffer(record, this.bot, this.config.textChunkLimit, this.logger, this.shouldStream(record));
+      // 持有本轮 caption 列表的引用：flush 可能晚于 turn/end 清理才执行
+      const captions = this.captionsOf(sessionId);
+      buffer = new OutboundBuffer(
+        record,
+        this.bot,
+        this.config.textChunkLimit,
+        this.logger,
+        this.shouldStream(record),
+        (raw) => this.salvage(raw, captions),
+        (raw) => stripCaptionEcho(sanitizePseudoToolText(raw), captions),
+      );
       this.buffers.set(sessionId, buffer);
     }
     buffer.append(text);
@@ -176,8 +195,18 @@ class OutboundRouter {
     const fullText = textParts.join('\n');
     if (!fullText.trim()) return;
 
-    void this.send(record, fullText, 'sendMarkdown');
+    void this.send(record, fullText, 'sendMarkdown', this.captionsOf(sessionId));
     this.buffers.delete(sessionId);
+  }
+
+  /** 取本轮 caption 列表（不存在则创建；同一轮内始终是同一个数组） */
+  private captionsOf(sessionId: string): string[] {
+    let list = this.captions.get(sessionId);
+    if (list === undefined) {
+      list = [];
+      this.captions.set(sessionId, list);
+    }
+    return list;
   }
 
   /** 工具调用：仅记录，不发送（避免刷屏，等待结果） */
@@ -186,10 +215,16 @@ class OutboundRouter {
   }
 
   /** 工具结果：错误始终发送，成功结果按开关 */
-  private onToolResult(record: SessionRecord, event: ToolResultEvent): void {
+  private onToolResult(sessionId: string, record: SessionRecord, event: ToolResultEvent): void {
     const call = this.toolCalls.get(event.callId);
     this.toolCalls.delete(event.callId);
     if (call === undefined) return;
+
+    // caption 已随文件送达：记下来，过滤模型随后对它的复读
+    if (event.error === undefined && call.name === SEND_FILE_TOOL_NAME) {
+      const caption = captionFromArgs(call.args);
+      if (caption !== undefined) this.captionsOf(sessionId).push(caption);
+    }
 
     if (event.error === undefined && !this.config.showToolResults) return;
 
@@ -217,6 +252,7 @@ class OutboundRouter {
       this.buffers.delete(sessionId);
     }
     this.streamAttempts.delete(sessionId);
+    this.captions.delete(sessionId);
 
     const failure = extractTurnError(event.reason);
     if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {
@@ -226,15 +262,58 @@ class OutboundRouter {
     this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);
   }
 
+  /**
+   * 兜底：剥离模型误写的 <qqbot_save_sticker> / <qqbot_send_file> 文本块，并补执行收藏；
+   * 再去掉对本轮已发 caption 的复读。
+   */
+  private salvage(text: string, captions: readonly string[] = []): string {
+    const { calls } = extractPseudoStickerCalls(text);
+    const visible = stripCaptionEcho(sanitizePseudoToolText(text), captions);
+    for (const call of calls) {
+      if (this.stickerStore === undefined) {
+        this.logger.warn('im-qqbot: 收到伪 qqbot_save_sticker 文本，但表情收藏未启用，已忽略');
+        continue;
+      }
+      try {
+        const result = this.stickerStore.save({
+          source: call.image,
+          emotion: call.emotion,
+          ...(call.note !== undefined ? { note: call.note } : {}),
+          ...(call.file !== undefined ? { file: call.file } : {}),
+        });
+        this.logger.info(
+          result.saved
+            ? `im-qqbot: 从文本伪调用补存表情 ${result.file}（情绪「${result.emotion}」）`
+            : `im-qqbot: 文本伪调用命中重复表情 ${result.file}`,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `im-qqbot: 文本伪调用补存表情失败: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return visible;
+  }
+
   /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
-  private async send(record: SessionRecord, text: string, tag: string): Promise<void> {
-    const chunks = chunkMarkdownText(text, this.config.textChunkLimit);
+  private async send(record: SessionRecord, text: string, tag: string, captions: readonly string[] = []): Promise<void> {
+    const visible = this.salvage(text, captions);
+    if (!visible.trim()) return;
+    const chunks = chunkMarkdownText(visible, this.config.textChunkLimit);
+    let failed = false;
     for (const chunk of chunks) {
       try {
         await this.bot.sendMarkdown(record.replyTarget, chunk);
       } catch (err) {
+        failed = true;
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
+        break;
       }
+    }
+    if (failed) {
+      // 群主动消息无权限/被动窗口过期时，内容不能丢：等用户下次说话时注入提示补发
+      this.manager.addUnsent(record.sessionKey, text);
+      this.logger.warn(`im-qqbot: 消息未送达，已挂起到下一次用户消息 session=${record.sessionKey}`);
     }
   }
 }
@@ -252,8 +331,9 @@ export function createOutboundHandler(
   config: ImQQBotConfig,
   logger: Logger,
   toolsRegistry?: ToolsRegistryLike,
+  stickerStore?: StickerStore,
 ): OutboundHandlers {
-  const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry);
+  const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry, stickerStore);
   return {
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),

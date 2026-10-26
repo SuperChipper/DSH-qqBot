@@ -32,6 +32,12 @@ interface FileAccessWire {
   sensitivePaths: string[];
 }
 
+/** 表情收藏配置（与 src/config.ts 的 StickersConfig 对应的局部投影） */
+interface StickersWire {
+  enabled: boolean;
+  [key: string]: unknown;
+}
+
 /** GET 回显的生效配置（appSecret 已剔除） */
 type ConfigWire = {
   requireMention?: boolean;
@@ -47,8 +53,10 @@ type ConfigWire = {
   historyLimit?: number;
   sessionIdleTimeout?: number;
   ownerOpenid?: string;
+  adminOpenids?: string[];
   access?: AccessControlWire;
   fileAccess?: FileAccessWire;
+  stickers?: StickersWire;
   cwd?: string;
 };
 
@@ -323,6 +331,9 @@ export function ConfigPanel(): ReactNode {
     if (Object.keys(changed).length === 0) return;
 
     // 白名单编辑期间保留原始换行/空行（textarea 可正常回车），提交时才规范化
+    if (changed.adminOpenids !== undefined) {
+      changed.adminOpenids = changed.adminOpenids.map((s) => s.trim()).filter(Boolean);
+    }
     if (changed.access !== undefined) {
       const a = changed.access as AccessControlWire;
       changed.access = {
@@ -404,6 +415,11 @@ export function ConfigPanel(): ReactNode {
       help: '用于识别私聊主人；配合下方文件访问白名单限制敏感文件',
       onChange: (v) => { patch('ownerOpenid', v); },
     }),
+    createElement(AreaRow, {
+      label: '管理员 openid', help: '每行一个；除主人外，允许修改模型/preset 和点击审批按钮', rows: 2,
+      value: (form.adminOpenids ?? []).join('\n'),
+      onChange: (v) => { patch('adminOpenids', v.split('\n').map((s) => s.trim())); },
+    }),
     createElement(SwitchRow, {
       label: '仅主人可访问文件', checked: fileAccess.ownerOnly,
       help: '开启后，只有主人私聊或额外允许的 openid 能收发本地文件',
@@ -453,6 +469,13 @@ export function ConfigPanel(): ReactNode {
       min: 60000, max: 2592000000, step: 60000,
       help: '超过该时长未活动会回收会话；86400000 = 24 小时',
       onChange: (v) => { patch('sessionIdleTimeout', v); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '表情收藏'),
+    createElement(SwitchRow, {
+      label: '允许 bot 自动收藏表情', checked: form.stickers?.enabled ?? true,
+      help: '开启后 bot 可在看到喜欢的图时调用 qqbot_save_sticker；收藏会更新索引并进入后续对话的表情清单',
+      onChange: (v) => { patch('stickers', { ...(form.stickers ?? { enabled: true }), enabled: v }); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '模型'),

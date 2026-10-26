@@ -26,6 +26,8 @@ export interface MediaConfig {
 export interface VisionConfig {
   /** 是否启用视觉理解（qqbot_describe_image 工具） */
   enabled: boolean;
+  /** 是否把图片作为原生 ImageBlock 直接交给主模型（主模型路由必须声明 image 输入） */
+  native: boolean;
   /** 视觉模型 provider（dsh 注册的 llm adapter，如 pi-ai） */
   provider: string;
   /** 视觉模型 id（如 qwen-vl-max） */
@@ -54,6 +56,19 @@ export interface FileAccessConfig {
   extraAllow: string[];
   /** 敏感路径（拦截名单）：这些目录下的文件禁止访问/发送 */
   sensitivePaths: string[];
+}
+
+export interface StickersConfig {
+  /** 是否启用表情自动收藏（工具 + 动态表情清单） */
+  enabled: boolean;
+  /** 表情包目录；空字符串表示插件根目录下的 stickers/ */
+  root: string;
+  /** 除 media 目录外，额外允许作为收藏来源的根目录 */
+  extraRoots: string[];
+  /** 单张表情文件大小上限（字节） */
+  maxBytes: number;
+  /** 自动收藏条目上限（防止索引无限增长） */
+  maxAutoEntries: number;
 }
 
 export interface ImQQBotConfig {
@@ -105,8 +120,12 @@ export interface ImQQBotConfig {
   sendFile: SendFileConfig;
   /** bot 主人 QQ openid（私聊识别，用于文件访问白名单） */
   ownerOpenid?: string;
+  /** 额外的配置管理员 QQ openid（可修改模型/preset、点击审批） */
+  adminOpenids: string[];
   /** 文件访问白名单 */
   fileAccess: FileAccessConfig;
+  /** 表情自动收藏（qqbot_save_sticker + 动态表情清单） */
+  stickers: StickersConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -122,6 +141,15 @@ export const FileAccessSchema: Schema<FileAccessConfig> = Schema.object({
   ownerOnly: Schema.boolean().default(true).description('是否只有主人私聊能访问文件'),
   extraAllow: Schema.array(Schema.string()).default([]).description('额外允许访问文件的 openid'),
   sensitivePaths: Schema.array(Schema.string()).default([]).description('敏感路径（拦截访问）'),
+});
+
+/** 表情自动收藏子 Schema */
+export const StickersSchema: Schema<StickersConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否启用表情自动收藏'),
+  root: Schema.string().default('').description('表情包目录（空=插件根目录/stickers）'),
+  extraRoots: Schema.array(Schema.string()).default([]).description('额外允许的收藏来源目录'),
+  maxBytes: Schema.number().default(8 * 1024 * 1024).description('单张表情大小上限（字节）'),
+  maxAutoEntries: Schema.number().default(200).description('自动收藏条目上限'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -161,6 +189,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   }).description('富媒体理解配置'),
   vision: Schema.object({
     enabled: Schema.boolean().default(false).description('是否启用视觉理解（qqbot_describe_image 工具）'),
+    native: Schema.boolean().default(false).description('是否把图片作为原生 ImageBlock 交给主模型（主模型路由需声明 image 输入）'),
     provider: Schema.string().default('').description('视觉模型 provider（dsh 注册的 llm adapter，如 pi-ai）'),
     model: Schema.string().default('').description('视觉模型 id（如 qwen-vl-max）'),
     defaultPrompt: Schema.string().default('Describe this image in detail.').description('默认描述 prompt'),
@@ -169,6 +198,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     timeoutMs: Schema.number().default(120000).description('视觉调用超时(ms)'),
   }).default({
     enabled: false,
+    native: false,
     provider: '',
     model: '',
     defaultPrompt: 'Describe this image in detail.',
@@ -184,9 +214,17 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     extraRoots: [],
   }).description('附件发送工具配置'),
   ownerOpenid: Schema.string().description('bot 主人 QQ openid（私聊识别，文件访问白名单）'),
+  adminOpenids: Schema.array(Schema.string()).default([]).description('额外的配置管理员 openid（可修改模型/preset、点击审批）'),
   fileAccess: FileAccessSchema.default({
     ownerOnly: true,
     extraAllow: [],
     sensitivePaths: [],
   }).description('文件访问白名单'),
+  stickers: StickersSchema.default({
+    enabled: true,
+    root: '',
+    extraRoots: [],
+    maxBytes: 8 * 1024 * 1024,
+    maxAutoEntries: 200,
+  }).description('表情自动收藏配置'),
 });

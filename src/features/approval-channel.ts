@@ -114,15 +114,18 @@ export class ApprovalChannel {
   private readonly manager: ApprovalChannelManagerLike;
   private readonly sender: ApprovalChannelSenderLike;
   private readonly logger: Logger;
+  private readonly isPrivileged: (senderId: string | undefined) => boolean;
 
   public constructor(
     manager: ApprovalChannelManagerLike,
     sender: ApprovalChannelSenderLike,
     logger: Logger,
+    isPrivileged: (senderId: string | undefined) => boolean = () => true,
   ) {
     this.manager = manager;
     this.sender = sender;
     this.logger = logger;
+    this.isPrivileged = isPrivileged;
   }
 
   /**
@@ -162,14 +165,51 @@ export class ApprovalChannel {
     if (!peerId) return false;
     const scope: ChatScope = event.group_openid ? 'group' : 'c2c';
     const record = this.manager.getSessionRecord(scope, peerId);
-    if (!record) return false;
-    const entry = this.pending.get(record.sessionKey);
-    if (!entry) return false;
+    if (!record) {
+      // 会话已经不存在（常见于插件重载/会话回收后点旧卡片）：消费事件并 ack 成功，
+      // 避免 QQ 侧显示“审批失败”；旧审批已经无法结算。
+      this.logger.warn(`im-qqbot: approval click ignored, session not found scope=${scope} peer=${peerId}`);
+      return true;
+    }
 
     const data = event.data?.resolved?.button_data;
     if (!data) return false;
     const button = decodeButtonData(data);
     if (!button || button.t !== 'approval') return false;
+
+    const entry = this.pending.get(record.sessionKey);
+    if (!entry) {
+      // 卡片还在，但 pending 已经因超时/插件重载/会话回收消失：给用户一个明确提示，
+      // 而不是让 QQ 显示“审批失败”。
+      this.logger.warn(
+        `im-qqbot: approval click ignored, no pending key=${record.sessionKey} sender=${event.user_openid ?? 'unknown'}`,
+      );
+      void this.sender
+        .sendMarkdown(record.replyTarget, '这条审批已失效或已被处理了。请让发起人重新发起请求，我再弹一次审批。')
+        .catch((err) => {
+          this.logger.warn(`im-qqbot: approval stale notice failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      return true;
+    }
+
+    // 审批是拒绝/放行工具调用的开关：
+    // - c2c：会话本人可以审批自己的操作；
+    // - group：只允许主人/管理员，避免任意群成员放行影响群/配置的操作。
+    // 未授权点击直接消费但不 settle，审批保持等待，真正的审批人仍可操作。
+    const selfApproval = record.scope === 'c2c'
+      && event.user_openid !== undefined
+      && event.user_openid === record.replyTarget.targetId;
+    if (!selfApproval && !this.isPrivileged(event.user_openid)) {
+      this.logger.warn(
+        `im-qqbot: approval click denied sender=${event.user_openid ?? 'unknown'} key=${record.sessionKey}`,
+      );
+      void this.sender
+        .sendMarkdown(record.replyTarget, '只有 bot 主人或管理员可以审批这条操作。')
+        .catch((err) => {
+          this.logger.warn(`im-qqbot: approval denied notice failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      return true;
+    }
 
     this.pending.delete(record.sessionKey);
     this.removeAbort(entry);
@@ -184,20 +224,11 @@ export class ApprovalChannel {
     if (request.signal?.aborted) return 'cancelled';
 
     const command = commandOf(request);
-    try {
-      await this.sender.sendMarkdown(
-        record.replyTarget,
-        buildApprovalText(request, command),
-        { keyboard: buildApprovalKeyboard() },
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`im-qqbot: approval send failed key=${key}: ${msg}`);
-      return 'unavailable'; // 无法呈现审批，fail-closed
-    }
-
     return new Promise<ApprovalOutcome>((resolve) => {
+      // 先登记 pending 再发卡片：用户可能在 sendMarkdown 返回前就点了按钮。
       const entry: PendingApproval = { record, request, resolve };
+      this.pending.set(key, entry);
+
       if (request.signal) {
         const onAbort = (): void => {
           if (this.pending.get(key) !== entry) return;
@@ -207,8 +238,21 @@ export class ApprovalChannel {
         entry.onAbort = onAbort;
         request.signal.addEventListener('abort', onAbort, { once: true });
       }
-      this.pending.set(key, entry);
-      this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
+
+      void this.sender
+        .sendMarkdown(record.replyTarget, buildApprovalText(request, command), { keyboard: buildApprovalKeyboard() })
+        .then(() => {
+          this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
+        })
+        .catch((err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.logger.error(`im-qqbot: approval send failed key=${key}: ${msg}`);
+          if (this.pending.get(key) === entry) {
+            this.pending.delete(key);
+            this.removeAbort(entry);
+            resolve('unavailable');
+          }
+        });
     });
   }
 

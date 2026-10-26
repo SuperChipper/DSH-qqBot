@@ -19,7 +19,7 @@ import {
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { AccessControlSchema, FileAccessSchema } from '../config.ts';
+import { AccessControlSchema, FileAccessSchema, StickersSchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
   BIND_MANUAL_PATH,
@@ -99,7 +99,8 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
   'groupReplyProbability', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
-  'access', 'fileAccess',
+  'adminOpenids',
+  'access', 'fileAccess', 'stickers',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
@@ -117,8 +118,10 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   historyLimit: (v) => integerSchema(v, 'historyLimit', 0, 200),
   sessionIdleTimeout: (v) => integerSchema(v, 'sessionIdleTimeout', 60_000, 30 * 24 * 60 * 60 * 1000),
   ownerOpenid: stringSchema('ownerOpenid'),
+  adminOpenids: (v) => stringArraySchema(v, 'adminOpenids'),
   access: (v) => AccessControlSchema(v as never),
   fileAccess: (v) => FileAccessSchema(v as never),
+  stickers: (v) => StickersSchema(v as never),
 };
 
 function booleanSchema(value: unknown, name: string): boolean {
@@ -134,6 +137,13 @@ function stringSchema(name: string): (value: unknown) => unknown {
   };
 }
 
+function stringArraySchema(value: unknown, name: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new TypeError(`${name} 必须是字符串数组`);
+  }
+  return (value as string[]).map((item) => item.trim()).filter(Boolean);
+}
+
 function numberSchema(value: unknown, name: string, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) throw new TypeError(`${name} 必须是数字`);
   if (value < min || value > max) throw new TypeError(`${name} 必须在 ${min} 到 ${max} 之间`);
@@ -146,8 +156,8 @@ function integerSchema(value: unknown, name: string, min: number, max: number): 
   return value;
 }
 
-/** manual 请求体大小上限（appId + appSecret 远小于此值） */
-const MAX_MANUAL_BODY_BYTES = 4096;
+/** 手动凭据 / 配置面板请求体上限（配置含两条完整 system prompt，4KB 不够） */
+const MAX_MANUAL_BODY_BYTES = 256 * 1024;
 
 /**
  * 注册绑定路由（状态查询 / 刷新二维码 / 手动凭据）。

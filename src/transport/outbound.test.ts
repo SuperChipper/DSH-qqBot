@@ -169,6 +169,85 @@ describe('OutboundRouter.routeStreamFrame', () => {
     expect(bot.sendMarkdown).not.toHaveBeenCalled();
   });
 
+  describe('caption 复读去重', () => {
+    const sess = { header: { id: 'sess-qq' } };
+    const caption = '才不是大肥鱼！这张给你';
+    const sendWithCaption = (outbound: ReturnType<typeof setup>['outbound'], callId = 'c1') => {
+      outbound.routeSessionEvent(sess, {
+        type: 'tool/call',
+        data: { callId, name: 'qqbot_send_file', arguments: JSON.stringify({ file_path: 'C:/a.png', caption }) },
+      });
+      outbound.routeSessionEvent(sess, { type: 'tool/result', data: { message: { source: { callId } } } });
+    };
+
+    it('群聊：发图后复读 caption 的 assistant/message 不再发送', async () => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget) });
+
+      sendWithCaption(outbound);
+      outbound.routeStreamFrame('sess-qq', start('a1'));
+      outbound.routeStreamFrame('sess-qq', delta('a1', caption));
+      outbound.routeSessionEvent(sess, {
+        type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: caption }] } },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it('私聊流式：复读不开流式气泡', async () => {
+      const { outbound, bot } = setup();
+
+      sendWithCaption(outbound);
+      outbound.routeStreamFrame('sess-qq', start('a1'));
+      outbound.routeStreamFrame('sess-qq', delta('a1', '才不是大肥鱼'));
+      await vi.advanceTimersByTimeAsync(200);
+      outbound.routeStreamFrame('sess-qq', delta('a1', '！这张给你'));
+      outbound.routeSessionEvent(sess, { type: 'turn/end', data: { reason: {} } });
+      await vi.advanceTimersByTimeAsync(200);
+
+      expect(bot.openStream).not.toHaveBeenCalled();
+      expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it('caption 之外的新内容照常发送', async () => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget) });
+
+      sendWithCaption(outbound);
+      outbound.routeSessionEvent(sess, {
+        type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: `${caption}\n\n顺便说下明天放假` }] } },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(bot.sendMarkdown).toHaveBeenCalledWith(groupTarget, '顺便说下明天放假');
+    });
+
+    it('发送失败的 caption 不参与去重；turn/end 后清空', async () => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget) });
+      const message = { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: caption }] } } };
+
+      outbound.routeSessionEvent(sess, {
+        type: 'tool/call',
+        data: { callId: 'bad', name: 'qqbot_send_file', arguments: JSON.stringify({ file_path: 'C:/a.png', caption }) },
+      });
+      outbound.routeSessionEvent(sess, {
+        type: 'tool/result',
+        data: { message: { source: { callId: 'bad' } }, error: { name: 'Error', code: 'TOOL_FAILED' } },
+      });
+      outbound.routeSessionEvent(sess, message);
+      await vi.advanceTimersByTimeAsync(0);
+      const captionSends = () => vi.mocked(bot.sendMarkdown).mock.calls.filter(([, text]) => text === caption).length;
+      expect(captionSends()).toBe(1);
+
+      sendWithCaption(outbound);
+      outbound.routeSessionEvent(sess, { type: 'turn/end', data: { reason: {} } });
+      outbound.routeSessionEvent(sess, message);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(captionSends()).toBe(2);
+    });
+  });
+
   it('旧通道回归：durable assistant/chunk 事件仍进 buffer', async () => {
     const { outbound, bot, session } = setup();
 

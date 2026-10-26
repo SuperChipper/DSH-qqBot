@@ -80,6 +80,48 @@ describe('OutboundBuffer', () => {
     expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, 'hello');
   });
 
+  it('静态发送前调用 salvage，只发送清洗后的文本', async () => {
+    const bot = createBot();
+    const salvaged: string[] = [];
+    const buffer = new OutboundBuffer(
+      createRecord(c2cTarget),
+      bot,
+      4500,
+      createLogger(),
+      false,
+      (text) => { salvaged.push(text); return text.replace('<x>', ''); },
+      (text) => text,
+    );
+
+    buffer.append('hello <x>');
+    await buffer.flush();
+
+    expect(salvaged).toHaveLength(1);
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, 'hello ');
+  });
+
+  it('流式 update 使用 sanitize，finish 后用原文执行 salvage', async () => {
+    const session = createSession();
+    const bot = createBot(() => session);
+    const salvaged: string[] = [];
+    const buffer = new OutboundBuffer(
+      createRecord(c2cTarget),
+      bot,
+      4500,
+      createLogger(),
+      true,
+      (text) => { salvaged.push(text); return text; },
+      (text) => text.replace(/<qqbot_save_sticker>[\s\S]*$/i, ''),
+    );
+
+    buffer.append('正文<qqbot_save_sticker>');
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenCalledWith('正文');
+
+    await buffer.flush();
+    expect(salvaged[0]).toContain('<qqbot_save_sticker>');
+  });
+
   it('cancel → abort 关闭会话', async () => {
     const session = createSession();
     const bot = createBot(() => session);

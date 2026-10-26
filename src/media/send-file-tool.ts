@@ -24,7 +24,10 @@ const DESCRIPTION =
   'Send a local file (image, video, voice, or generic file) to the QQ user or group '
   + 'of the current conversation. Pass the absolute path of a file that already exists on disk. '
   + 'Use this when the user asks you to deliver a generated file (chart, report, exported data, '
-  + 'screenshot, etc.) or to send an existing media/file back to them.';
+  + 'screenshot, etc.) or to send an existing media/file back to them. '
+  + 'If you want text together with an image/video/file, put the ENTIRE reply text in `caption` and do not '
+  + 'write the same text as a separate reply; QQ sends the caption in the same rich-media message. '
+  + 'After a captioned send, an empty final reply is fine: end the turn unless you have something new to say.';
 
 /** 发送器最小接口（QQBot 实例满足） */
 interface MediaSendResult {
@@ -33,10 +36,14 @@ interface MediaSendResult {
 }
 
 export interface MediaSenderLike {
-  sendImage(target: ReplyTarget, source: { localPath?: string }): Promise<MediaSendResult>;
-  sendVideo(target: ReplyTarget, source: { localPath?: string }): Promise<MediaSendResult>;
+  sendImage(target: ReplyTarget, source: { localPath?: string }, opts?: { content?: string }): Promise<MediaSendResult>;
+  sendVideo(target: ReplyTarget, source: { localPath?: string }, opts?: { content?: string }): Promise<MediaSendResult>;
   sendVoice(target: ReplyTarget, source: { localPath?: string }): Promise<MediaSendResult>;
-  sendFile(target: ReplyTarget, source: { localPath?: string }, opts?: { fileName?: string }): Promise<MediaSendResult>;
+  sendFile(
+    target: ReplyTarget,
+    source: { localPath?: string },
+    opts?: { fileName?: string; content?: string },
+  ): Promise<MediaSendResult>;
 }
 
 /** tools 服务最小接口 */
@@ -48,6 +55,7 @@ interface ToolsRegistryLike {
 interface SendFileArgs {
   file_path: string;
   target?: string;
+  caption?: string;
 }
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
@@ -107,6 +115,10 @@ export function registerSendFileTool(
           type: 'string',
           description: 'Optional send target as "c2c:openid" or "group:openid". Omit to send to the current conversation.',
         },
+        caption: {
+          type: 'string',
+          description: 'Optional text to send in the SAME rich-media message. Put the whole reply here; do not write it again as separate text.',
+        },
       },
       required: ['file_path'],
       additionalProperties: false,
@@ -124,16 +136,23 @@ export function registerSendFileTool(
         required: ['fileName', 'fileSize', 'target', 'fileUuid'],
         additionalProperties: false,
       },
-      render: (_args: unknown, value: unknown): ContentBlock[] => {
+      render: (args: unknown, value: unknown): ContentBlock[] => {
         const v = value as { fileName: string; target: string };
-        return [{ type: 'text', text: `已发送 ${v.fileName} → ${v.target}` }];
+        const caption = (args as { caption?: unknown } | undefined)?.caption;
+        const captionSent = typeof caption === 'string' && caption.trim().length > 0;
+        return [{
+          type: 'text',
+          text: `已发送 ${v.fileName} → ${v.target}`
+            + (captionSent ? '（caption 已随文件发出，用户已经看到；不要再复述，没有新内容就直接结束本轮，不输出文字）' : ''),
+        }];
       },
     },
     async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
-      const { file_path, target } = args as SendFileArgs;
+      const { file_path, target, caption } = args as SendFileArgs;
       if (typeof file_path !== 'string' || file_path.length === 0) {
         throw new Error('qqbot_send_file: `file_path` must be a non-empty string');
       }
+      const captionText = typeof caption === 'string' && caption.trim().length > 0 ? caption.trim() : undefined;
 
       // 1. 解析发送目标：显式 target > 当前会话（exec.agent → SessionRecord）
       let replyTarget: ReplyTarget | undefined;
@@ -172,16 +191,25 @@ export function registerSendFileTool(
 
       let result: MediaSendResult;
       if (IMAGE_EXTS.has(ext)) {
-        result = await bot.sendImage(replyTarget, source);
+        result = await bot.sendImage(replyTarget, source, captionText !== undefined ? { content: captionText } : undefined);
       } else if (VIDEO_EXTS.has(ext)) {
-        result = await bot.sendVideo(replyTarget, source);
+        result = await bot.sendVideo(replyTarget, source, captionText !== undefined ? { content: captionText } : undefined);
       } else if (VOICE_EXTS.has(ext)) {
+        if (captionText !== undefined) {
+          logger.warn('im-qqbot: qqbot_send_file 语音消息不支持 caption，已忽略');
+        }
         result = await bot.sendVoice(replyTarget, source);
       } else {
-        result = await bot.sendFile(replyTarget, source, { fileName });
+        result = await bot.sendFile(replyTarget, source, {
+          fileName,
+          ...(captionText !== undefined ? { content: captionText } : {}),
+        });
       }
 
-      logger.info(`im-qqbot: qqbot_send_file 发送 ${fileName} (${info.size} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`);
+      logger.info(
+        `im-qqbot: qqbot_send_file 发送 ${fileName} (${info.size} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`
+        + (captionText !== undefined ? `，caption ${captionText.length} 字` : ''),
+      );
 
       return {
         fileName,

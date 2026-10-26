@@ -33,6 +33,8 @@ export class OutboundBuffer {
   private readonly bot: QQBotSender;
   private readonly limit: number;
   private readonly logger: Logger;
+  /** 最终文本的兜底处理：剔除伪工具调用并补执行（只在 flush 调用一次） */
+  private readonly salvage: (text: string) => string;
 
   public constructor(
     record: SessionRecord,
@@ -40,13 +42,16 @@ export class OutboundBuffer {
     limit: number,
     logger: Logger,
     streamingEnabled: boolean,
+    salvage: (text: string) => string = (text) => text,
+    sanitize: (text: string) => string = (text) => text,
   ) {
     this.record = record;
     this.bot = bot;
     this.limit = limit;
     this.logger = logger;
+    this.salvage = salvage;
     this.writer = streamingEnabled
-      ? new StreamingWriter({ bot, target: record.replyTarget, logger, throttleMs: STREAM_THROTTLE_MS })
+      ? new StreamingWriter({ bot, target: record.replyTarget, logger, throttleMs: STREAM_THROTTLE_MS, sanitize })
       : null;
   }
 
@@ -75,12 +80,17 @@ export class OutboundBuffer {
     try {
       if (this.writer) {
         await this.writer.finish();
-        // 流式成功（未降级）→ 直接返回
-        if (!this.writer.shouldFallback) return;
+        // 流式成功（未降级）→ 补执行伪调用后直接返回
+        if (!this.writer.shouldFallback) {
+          this.salvage(this.writer.text);
+          return;
+        }
       }
 
       // 降级：静态发送（writer 不存在 or 流式失败）
-      const chunks = chunkMarkdownText(this.buffer, this.limit);
+      const visible = this.salvage(this.buffer);
+      if (!visible.trim()) return;
+      const chunks = chunkMarkdownText(visible, this.limit);
       for (const chunk of chunks) {
         await this.bot.sendMarkdown(this.record.replyTarget, chunk);
       }

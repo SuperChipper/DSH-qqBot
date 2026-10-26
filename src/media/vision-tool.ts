@@ -61,6 +61,13 @@ const DESCRIPTION =
   + 'instruction (e.g. "transcribe all text", "extract the table as CSV", "translate the text '
   + 'into Chinese") instead of relying on the generic default.';
 
+/** vision.native 时追加：主模型已直接看到本轮图片，这个工具只做兜底 */
+const NATIVE_NOTE =
+  ' Images in the current message are already given to you natively (unless the message says '
+  + '"[图片未原生注入"); look at those directly. Use this tool only for images outside the current '
+  + 'input (quoted/earlier messages, downloaded files, extracted frames) or for small/dense text '
+  + 'you cannot read reliably.';
+
 /** 图片 magic bytes 嗅探 → 标准 MIME（不信声明，安全底线） */
 function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {
   if (bytes.length < 12) return null;
@@ -238,7 +245,7 @@ export function registerDescribeImageTool(ctx: Context, vision: VisionConfig, lo
 
   const definition = {
     name: DESCRIBE_IMAGE_TOOL_NAME,
-    description: DESCRIPTION,
+    description: vision.native ? DESCRIPTION + NATIVE_NOTE : DESCRIPTION,
     parameters: {
       type: 'object',
       properties: {

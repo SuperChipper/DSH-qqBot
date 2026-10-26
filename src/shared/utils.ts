@@ -10,7 +10,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const PLUGIN_ROOT = resolve(__dirname, '../..');
+export const PLUGIN_ROOT = resolve(__dirname, '../..');
 
 /** 插件版本号（从 package.json 读取，供 help/version 等展示真实版本） */
 export const PLUGIN_VERSION = readPluginVersion();

@@ -97,6 +97,7 @@ Install the bot into the profile your DSH Web GUI is using, then manage it from 
 | `preset` | string | - | Agent preset id |
 | `cwd` | string | `process.cwd()` | Agent working directory |
 | `ownerOpenid` | string | - | Bot owner QQ openid (used by the file-access allowlist) |
+| `adminOpenids` | string[] | `[]` | Extra config admins (may change model/preset and click approvals) |
 | `requireMention` | boolean | `true` | Whether group messages require @bot to trigger |
 | `groupReplyProbability` | number | `0` | Chance (0–1) of replying to a group message without @bot; 0 disables |
 | `groupPrompt` | string | - | Extra system prompt for group chats |
@@ -155,6 +156,106 @@ Install the bot into the profile your DSH Web GUI is using, then manage it from 
 |------|------|--------|------|
 | `sendFile.restrictPaths` | boolean | `true` | Enable path allowlist (media + cwd + extraRoots only) |
 | `sendFile.extraRoots` | string[] | `[]` | Extra allowed root directories |
+
+### Sticker collection (stickers)
+
+| Config | Type | Default | Description |
+|------|------|--------|------|
+| `stickers.enabled` | boolean | `true` | Enable `qqbot_save_sticker` and the dynamic sticker catalog |
+| `stickers.root` | string | `''` | Sticker directory; empty = `stickers/` under the plugin root |
+| `stickers.extraRoots` | string[] | `[]` | Extra source directories allowed for collection (besides media) |
+| `stickers.maxBytes` | number | `8388608` | Max size per sticker (8 MB) |
+| `stickers.maxAutoEntries` | number | `200` | Max auto-saved entries |
+
+## Automatic sticker collection
+
+When the bot sees an image from a user, it understands the image first and then decides — based on how it feels — whether the image is worth keeping. Collection is done by the `qqbot_save_sticker` tool:
+
+- Called only when the bot genuinely thinks "this captures a mood I would use later"; ordinary screenshots and long text images are skipped.
+- SHA-256 deduplication means the same image is never stored twice; the default name is `fish_<emotion>.png`, with a numeric suffix on collisions.
+- Saving updates `stickers/index.json` and injects the new entry into the **current session's next turn** system prompt — no need to edit the fixed table in the persona.
+- If the model occasionally writes the call as `<qqbot_save_sticker>...` text, the outbound layer strips the tags and executes the collection; users never see the XML.
+- Files go to `stickers/` under the plugin root by default; set `stickers.root` to a writable directory if needed. Auto-saved images are local runtime data and are excluded by `.gitignore`.
+- If `stickers.root` is outside the agent cwd, add it to `sendFile.extraRoots`; otherwise `qqbot_send_file` refuses to send from there.
+
+> If you keep the old `stickers/save-sticker.ps1` locally, it still works manually and shares the same `index.json` with the in-plugin tool.
+
+## Image/video/file with caption
+
+`qqbot_send_file` now accepts `caption`: put the entire reply text in it and QQ sends it together with the media as one rich-media message.
+
+- The QQ-session prompt asks the model to use `caption` when sending an image with text and not to repeat the text separately.
+- This is the low-risk path: normal text replies keep streaming; if the model still writes separate text, two bubbles can still happen.
+- A guaranteed single bubble requires deferring the turn's text to the end and sending it as the caption with the image (losing streaming on media turns); this is not enabled yet.
+- If the model writes `<qqbot_send_file>...` as plain text, the outbound layer strips the tags instead of sending XML; pseudo tags do not trigger a second send.
+
+## Bilibili read-only tools
+
+The plugin registers six read-only tools so the bot can search Bilibili, inspect videos, read comments and subtitles:
+
+- `bili_search`: search videos (title/BVID/author/plays/date)
+- `bili_video`: one video's title, author, stats, description, pages
+- `bili_comments`: top public comments
+- `bili_subtitle`: video subtitles (**login required**)
+- `bili_login` / `bili_login_check`: QR login and status check
+
+Search, video info and comments use public endpoints and need no login. The subtitle endpoint returns `need_login_subtitle`, so subtitles require a one-time QR login. Tell the bot "log in to Bilibili"; it calls `bili_login`, sends the QR to the current conversation, and after you scan (choose "remember me / long-term") and confirm, it calls `bili_login_check` to save the credential.
+
+The credential is stored only at `~/.dsh/bili-read/credential.json` on this machine; it is never committed or logged. No write tools (comment, upload, DM, favorite, coin) are registered.
+
+**Login permission**: `bili_login` / `bili_login_check` are allowed only for the **owner/admin in a c2c chat**; calls from a group are rejected, so an arbitrary group member cannot bind their Bilibili account or grab the QR. `bili_subtitle` uses the login, so when a credential exists it is also c2c owner/admin-only; groups can still use `bili_search` / `bili_video` / `bili_comments` (guest mode, no owner account usage).
+
+> Based on the interface/login approach of the `bilibili-mcp` bundled with [dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll) (MIT); this implementation keeps only the read-only parts and is pure Node, with no Python/uv dependency.
+
+## Meme/sticker matching
+
+New `qqbot_match_sticker`: when the user sends an image, first check the bot's own sticker library (`stickers/index.json`) by **SHA-256** for an identical file. On a hit it returns the emotion, note and file name; send it with `qqbot_send_file` or use the emotion in the reply. On a miss it returns `matched: false`.
+
+The `meme-recognition` skill handles misses:
+
+1. `qqbot_match_sticker` checks the local library first;
+2. `qqbot_describe_image` transcribes the meme text and describes the template;
+3. `web_search` checks KnowYourMeme, Moegirlpedia, Baidu Baike, Bilibili/Weibo/Xiaohongshu and cross-checks the name, origin and usage;
+4. Answers with high/medium/low confidence; says “not found” instead of inventing an origin.
+
+Limitation: this is **exact-hash only**, so it matches bit-identical files; QQ recompresses images, so the hit rate is limited. A perceptual hash (pHash/dHash) with `sharp` would handle recompressed/resized copies. No reverse-image upload for memes by default; trace.moe/SauceNAO are for anime, not memes.
+
+## Native image input (deepseek-native)
+
+The Web profile now has a pi-ai route `deepseek-native`:
+
+- provider: `deepseek-native`
+- model: `deepseek-flash` (DeepSeek V4.1 Flash)
+- `defaultInput: [text, image]`, 1M context / 256K maxTokens
+- The QQ bot is switched to `deepseek-native/deepseek-flash` with `vision.native: true`
+
+With this enabled, inbound images are committed through `ctx.attachments.saveImage` and inserted into the user message as `ImageBlock`s, so the main model sees the original image directly instead of going through the `qqbot_describe_image` “image -> text description” chain. `qqbot_describe_image` remains for verbatim OCR, charts/tables, long screenshots, and other cases where native vision is not enough.
+
+Notes:
+
+- **Existing sessions do not switch automatically.** Send `/new` in QQ, or use `/model` to select `DeepSeek V4.1 Native`; only new sessions use native image input. Old sessions stay on `deepseek-official`.
+- The Web GUI default model is still `deepseek-official/deepseek-flash`; to use native vision there, select `DeepSeek V4.1 Native` in the model picker.
+- This route uses the generic pi-ai OpenAI adapter, not the official DeepSeek adapter. Tool calls and reasoning were smoke-tested with a subagent (`read_image` saw the image directly), but observe it for a few turns before relying on it long-term.
+- To roll back: set `im-qqbot.provider` back to `deepseek-official` and `vision.native` to `false`; the original two-stage chain returns.
+
+## Schedules and /new
+
+DSH schedules are **session-local**: `/new` changes the sessionId, while old scheduled tasks remain bound to the old sessionId. The plugin now keeps a retired-session mapping (`old sessionId → current group record`) so a resumed old session can still route its output to the current QQ conversation; the old tasks themselves should still be recreated in the new session.
+
+Starting with this version, `/new` also **captures the old session's active schedules** (daily / weekly / every) and injects a `[SCHEDULE MIGRATION AFTER /new]` instruction plus a JSON list into the new session's first message, so the model can call `schedule_list` / `schedule_create` to rebuild them. One-shot `after` / `at` tasks are not auto-migrated, to avoid recreating an already-expired reminder.
+
+Group scheduled pushes also depend on QQ **proactive-message permission**: when the log says `主动消息失败, 无权限`, the group owner/admin must enable proactive push / full-message permission in the group bot settings. Failed sends are no longer lost: the plugin queues the text and injects an `[上次未送达]` hint on the next user message, so the model can resend within a fresh passive-reply window.
+
+> After `/new`, read `state/schedule-migration.md` (or use `schedule_list` in the current session) and recreate the tasks with `schedule_create`.
+
+## Permission model
+
+- **Message entry**: `access.c2cMode` / `access.groupMode` gate at the SDK middleware layer; an empty allowlist under `allowlist` mode **denies everyone** (fail-closed) and never degrades to allow-all.
+- **Config changes**: only `ownerOpenid` or `adminOpenids` may **modify** via `/model` and `/preset`; no-arg viewing/listing stays open. With neither configured, the legacy behavior is kept (a warning is logged); set `ownerOpenid` at minimum.
+- **Approval buttons**: in a c2c chat the user can approve their own operations; in a group only the owner/admins may click Allow/Reject. Other clicks are ignored and the approval stays pending. If the owner is absent from a group, add trusted members to `adminOpenids`.
+- **File access**: `fileAccess.ownerOnly` + `ownerOpenid`; `qqbot_send_file` also has its own path allowlist.
+- **Local config page**: `/qqbot/im-qqbot/config` is for the local Web/Desktop app and relies on same-origin/local trust; do not expose DSH Web directly to the public internet.
+- **Note**: `/new`, `/compact`, and `/stop` remain available to users who pass the access policy; ask if you want those locked down too.
 
 ## Built-in Commands
 
@@ -216,6 +317,8 @@ src/
 ├── media/                      # Media
 │   ├── vision-tool.ts          # Image vision understanding
 │   ├── send-file-tool.ts       # Send local files
+│   ├── sticker-store.ts        # Sticker collection / dedupe / index / dynamic catalog
+│   ├── save-sticker-tool.ts    # qqbot_save_sticker tool
 │   └── media-cleaner.ts        # Media TTL cleanup
 ├── middleware/                 # Middleware
 │   ├── question-answer.ts      # Q&A answer handling

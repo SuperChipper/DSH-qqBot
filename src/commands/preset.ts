@@ -5,12 +5,20 @@
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
 import { getScopePeer, sendMarkdownChunked } from '../shared/index.ts';
+import { isPrivilegedSender } from '../shared/permissions.ts';
 
 export function presetCommand({ manager, config }: CommandDeps): CategorizedCommand {
   return {
     name: 'preset',
     category: 'agent',
     description: '查看或切换 agent preset（用法: /preset [id]）',
+    authorized: (ctx) => {
+      // 无参数只是查看/列出 preset，不限制；reset/指定 id 才是修改
+      const raw = (ctx.command?.raw ?? '').trim();
+      if (raw === '') return true;
+      return isPrivilegedSender(ctx.message.senderId, config)
+        || '⚠️ 只有 bot 主人或管理员可以修改 preset。';
+    },
     handler: async (cmdCtx) => {
       const { scope, peerId } = getScopePeer(cmdCtx);
       const args = (cmdCtx.command?.raw ?? '').trim();
