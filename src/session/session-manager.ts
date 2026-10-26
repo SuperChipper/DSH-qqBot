@@ -24,6 +24,7 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import { resolveSessionCwd } from '../shared/file-access.ts';
 import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts';
+import { formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
 import { formatScheduleMigrationHint, readScheduleMigrations, scheduleStorageHome, type ScheduleMigrationTask } from './schedule-migration.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
@@ -91,6 +92,8 @@ export class SessionManager {
   public approvalChannel?: ApprovalChannel;
   /** 由 bootstrap 注入的表情收藏存储（动态 prompt 清单） */
   public stickerStore?: StickerStore;
+  /** 由 bootstrap 注入的共享笔记库（工具 + 自动召回） */
+  public notesStore?: NotesStore;
 
   constructor(
     ctx: Context,
@@ -153,6 +156,19 @@ export class SessionManager {
         } catch (err) {
           this.logger.warn(`im-qqbot: 注入表情清单失败: ${err instanceof Error ? err.message : String(err)}`);
         }
+      }
+
+      if (this.notesStore !== undefined) {
+        sections.push({
+          name: 'qqbot:shared-notes',
+          order: 92,
+          text: [
+            '【共享笔记】',
+            '你有一个所有群和私聊共享的笔记库，是你的长期记忆。消息前出现「[共享笔记 · 可能相关]」时，是按这条消息自动检索到的片段，相关就自然地用上，不相关就忽略，别生硬复述。',
+            '想不起来但可能记过的东西，用 qqbot_notes_search 查；看完/学到/群里沉淀下来值得长期记住的，用 qqbot_notes_save 记下（提炼后再记，别记隐私和闲聊）。',
+            '记笔记是你自己的事，不用每次都告诉用户「我记下了」。',
+          ].join('\n'),
+        });
       }
 
       // 媒体 caption：QQ 支持图片/视频/文件与文字同一条发出。
@@ -414,6 +430,22 @@ export class SessionManager {
       return this.stickerStore?.match(path);
     } catch {
       return undefined;
+    }
+  }
+
+  /** 按当前消息检索共享笔记，返回要注入的提示块（未启用/无相关结果/出错时返回空串） */
+  notesHint(query: string): string {
+    const notes = this.config.notes;
+    if (this.notesStore === undefined || !notes?.autoInject || query.trim().length === 0) return '';
+    try {
+      return formatNotesHint(this.notesStore.search(query, notes.injectTopK * 2), {
+        topK: notes.injectTopK,
+        maxChars: notes.injectMaxChars,
+        minCoverage: notes.injectMinCoverage,
+      });
+    } catch (err) {
+      this.logger.warn(`im-qqbot: 笔记检索失败: ${err instanceof Error ? err.message : String(err)}`);
+      return '';
     }
   }
 

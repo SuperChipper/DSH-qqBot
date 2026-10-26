@@ -20,6 +20,8 @@ cordis.dev.yml
 # ── 本地表情包素材 ──
 # 含用户投稿/二创图片，默认不提交；确认版权与授权后可 git add -f 单独提交。
 /stickers/
+# 共享笔记默认在 agent cwd/notes；未配置 cwd 时也不要把笔记提交/打包
+/notes/
 
 # ── 日志 / 系统 / 编辑器 ──
 *.log

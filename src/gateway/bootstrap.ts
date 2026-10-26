@@ -34,6 +34,8 @@ import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
 import { registerPetNativeBalance } from '../pet/native-balance.ts';
+import { NotesStore } from '../notes/notes-store.ts';
+import { registerNotesTools } from '../notes/notes-tools.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -87,6 +89,19 @@ function createStickerStore(config: ImQQBotConfig, logger: Logger): StickerStore
   return store;
 }
 
+/** 解析笔记目录，构建共享笔记库（关闭时返回 undefined）；默认放在 agent 工作目录下，不进插件仓库 */
+function createNotesStore(config: ImQQBotConfig, logger: Logger): NotesStore | undefined {
+  const notes = config.notes;
+  if (notes === undefined || !notes.enabled) return undefined;
+  const cwd = config.cwd || process.cwd();
+  const configuredRoot = notes.root.trim();
+  const root = configuredRoot === ''
+    ? resolve(cwd, 'notes')
+    : (isAbsolute(configuredRoot) ? configuredRoot : resolve(cwd, configuredRoot));
+  logger.info(`im-qqbot: 共享笔记库已启用 root=${root}`);
+  return new NotesStore(root, logger);
+}
+
 export async function bootstrapGateway(
   ctx: Context,
   agents: DshAgentRegistry,
@@ -103,6 +118,10 @@ export async function bootstrapGateway(
   // ── 表情收藏存储（工具 + 动态 prompt 清单共用） ──
   const stickerStore = createStickerStore(config, logger);
   manager.stickerStore = stickerStore;
+
+  // ── 共享笔记库（工具 + 自动召回共用） ──
+  const notesStore = createNotesStore(config, logger);
+  manager.notesStore = notesStore;
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -277,6 +296,11 @@ export async function bootstrapGateway(
   if (stickerStore !== undefined) {
     registerSaveStickerTool(ctx, stickerStore, logger);
     registerMatchStickerTool(ctx, stickerStore, logger);
+  }
+
+  // ── 共享笔记工具注册（qqbot_notes_search / qqbot_notes_save） ──
+  if (notesStore !== undefined) {
+    registerNotesTools(ctx, notesStore, manager, logger);
   }
 
   // ── 桌宠余额：自定义 deepseek-native 不在 dsh-pet 内置表里，补一个同接口 provider ──

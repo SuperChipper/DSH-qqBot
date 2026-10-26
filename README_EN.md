@@ -220,6 +220,17 @@ The `meme-recognition` skill handles misses:
 
 Limitation: this is **exact-hash only**, so it matches bit-identical files; QQ recompresses images, so the hit rate is limited. A perceptual hash (pHash/dHash) with `sharp` would handle recompressed/resized copies. No reverse-image upload for memes by default; trace.moe/SauceNAO are for anime, not memes.
 
+## Shared notes (long-term memory)
+
+Markdown files under `notes.root` (default: `notes/` in the agent working directory `cwd`) are the bot's long-term memory, **shared by every group, private chat and local session**:
+
+- **Auto recall**: each inbound message (including quoted text) is searched against the notes; when relevant enough, up to `injectTopK` sections / `injectMaxChars` characters are prepended as `[共享笔记 · 可能相关]`. Short messages that hit a single term ("哈哈", "随便") are not injected; a higher `injectMinCoverage` is more conservative.
+- **`qqbot_notes_search`**: the model searches on demand and gets the best sections.
+- **`qqbot_notes_save`**: the model writes things worth keeping; a new title creates a file, `file` appends a section, and the date and source (group/private/local) are recorded.
+- Retrieval is local: sections split on `#`/`##`/`###`, Chinese bigrams + BM25, no vector service; the index rebuilds when files change, so hand edits apply immediately.
+
+Note: anything saved is visible to all sessions, so something said in private may be recalled in a group. Don't let the bot store private data; group members can influence what it saves, so the owner should review `notes/` from time to time. `notes.enabled: false` turns it off; `notes.autoInject: false` keeps only the tools.
+
 ## Native image input (deepseek-native)
 
 The Web profile now has a pi-ai route `deepseek-native`:

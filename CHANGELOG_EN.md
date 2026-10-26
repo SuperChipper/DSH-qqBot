@@ -18,6 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Native image input**: added the `deepseek-native` pi-ai route (`deepseek-flash`, text+image) and `vision.native`; QQ inbound images are committed as attachments and passed as ImageBlocks to the main model, skipping the `qqbot_describe_image` transcription. The tool remains as the OCR/chart fallback.
 - **Automatic schedule migration after `/new`**: `/new` captures the old session's active daily/weekly/every schedules and injects a `schedule_list` / `schedule_create` rebuild instruction into the new session's first message; one-shot after/at tasks are not migrated.
 - **Meme/sticker matching**: added `qqbot_match_sticker` (SHA-256 against the local `stickers/index.json`) plus a `meme-recognition` skill that falls back to OCR + KnowYourMeme/Moegirlpedia/Baidu/Bilibili text search. Exact hash only for now; perceptual hash is a follow-up.
+- **Shared notes (long-term memory)**: Markdown under `notes.root` (default `cwd/notes`) is memory shared by all sessions; relevant sections are auto-recalled into each message, plus `qqbot_notes_search` / `qqbot_notes_save` tools. Local BM25 with Chinese bigrams, no vector service.
+- **Group history images**: group memory records image URLs; on a trigger the latest 4 history images are downloaded, tagged `[图片#n]` and injected natively, so the bot can see images posted earlier.
 
 ### Changed
 

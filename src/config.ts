@@ -71,6 +71,21 @@ export interface StickersConfig {
   maxAutoEntries: number;
 }
 
+export interface NotesConfig {
+  /** 是否启用共享笔记库（检索/记录工具 + 自动召回） */
+  enabled: boolean;
+  /** 笔记目录；空字符串表示 agent 工作目录（cwd）下的 notes/ */
+  root: string;
+  /** 是否在每条消息前自动注入相关笔记片段 */
+  autoInject: boolean;
+  /** 自动注入的最多片段数 */
+  injectTopK: number;
+  /** 自动注入的总字数上限 */
+  injectMaxChars: number;
+  /** 自动注入的最低查询词覆盖率（0-1），越高越保守 */
+  injectMinCoverage: number;
+}
+
 export interface ImQQBotConfig {
   /** QQ Bot AppID */
   appId: string;
@@ -126,6 +141,8 @@ export interface ImQQBotConfig {
   fileAccess: FileAccessConfig;
   /** 表情自动收藏（qqbot_save_sticker + 动态表情清单） */
   stickers: StickersConfig;
+  /** 共享笔记库（qqbot_notes_search / qqbot_notes_save + 自动召回） */
+  notes: NotesConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -150,6 +167,16 @@ export const StickersSchema: Schema<StickersConfig> = Schema.object({
   extraRoots: Schema.array(Schema.string()).default([]).description('额外允许的收藏来源目录'),
   maxBytes: Schema.number().default(8 * 1024 * 1024).description('单张表情大小上限（字节）'),
   maxAutoEntries: Schema.number().default(200).description('自动收藏条目上限'),
+});
+
+/** 共享笔记库子 Schema */
+export const NotesSchema: Schema<NotesConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否启用共享笔记库'),
+  root: Schema.string().default('').description('笔记目录（空=工作目录/notes）'),
+  autoInject: Schema.boolean().default(true).description('是否自动在消息前注入相关笔记'),
+  injectTopK: Schema.number().default(2).description('自动注入最多片段数'),
+  injectMaxChars: Schema.number().default(600).description('自动注入总字数上限'),
+  injectMinCoverage: Schema.number().default(0.4).description('自动注入最低查询词覆盖率(0-1)'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -227,4 +254,12 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     maxBytes: 8 * 1024 * 1024,
     maxAutoEntries: 200,
   }).description('表情自动收藏配置'),
+  notes: NotesSchema.default({
+    enabled: true,
+    root: '',
+    autoInject: true,
+    injectTopK: 2,
+    injectMaxChars: 600,
+    injectMinCoverage: 0.4,
+  }).description('共享笔记库配置'),
 });
