@@ -58,6 +58,19 @@ describe('StickerStore', () => {
     expect(sections[1]?.text).toContain(root);
   });
 
+  it('扩展名撒谎时按文件头命名（.png 里装 GIF）', () => {
+    const { media, root, store } = setup();
+    const gifBytes = Buffer.concat([Buffer.from('GIF89a', 'ascii'), Buffer.alloc(16, 0x20)]);
+    const source = join(media, 'meme.png');
+    writeFileSync(source, gifBytes);
+
+    const result = store.save({ source, emotion: '杂鱼' });
+
+    expect(result.file).toBe('fish_杂鱼.gif');
+    expect(existsSync(join(root, 'fish_杂鱼.gif'))).toBe(true);
+    expect(readFileSync(join(root, 'fish_杂鱼.gif'))).toEqual(gifBytes);
+  });
+
   it('相同内容按 SHA-256 去重，不重复写索引', () => {
     const { media, root, store } = setup();
     const source = writeImage(media, 'cat.png', 'same-bytes');

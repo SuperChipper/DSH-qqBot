@@ -110,5 +110,8 @@
     "tsdown": "^0.22.2",
     "typescript": "^5.5.0",
     "vitest": "^4.1.8"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.35.3"
   }
 }

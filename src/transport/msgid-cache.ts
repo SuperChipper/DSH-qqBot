@@ -52,6 +52,11 @@ function push(scope: ChatScope, targetId: string | undefined, target: CachedRepl
   }
 }
 
+/** 被动回复窗口（ms）：群 5 分钟，私聊 30 分钟 */
+export function replyWindowMs(scope: ChatScope): number {
+  return scope === 'group' ? TTL_GROUP : TTL_C2C;
+}
+
 /** 记录普通消息 msgId */
 export function cacheMsgId(scope: ChatScope, targetId: string | undefined, msgId: string | undefined): void {
   if (!msgId) return;
@@ -69,7 +74,7 @@ export function getCachedReplyIds(scope: ChatScope, targetId: string): CachedRep
   const list = cache.get(cacheKey(scope, targetId));
   if (!list || list.length === 0) return [];
   const now = Date.now();
-  const ttl = scope === 'group' ? TTL_GROUP : TTL_C2C;
+  const ttl = replyWindowMs(scope);
   const result: CachedReplyId[] = [];
   for (let i = list.length - 1; i >= 0; i -= 1) {
     if (now - list[i]!.timestamp < ttl) {

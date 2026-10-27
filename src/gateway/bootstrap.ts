@@ -7,7 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
@@ -35,7 +35,11 @@ import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
 import { registerPetNativeBalance } from '../pet/native-balance.ts';
 import { NotesStore } from '../notes/notes-store.ts';
+import { resolveTmpDir, startTmpDir } from '../media/tmp-dir.ts';
 import { registerNotesTools } from '../notes/notes-tools.ts';
+import { registerFanartPickTool } from '../fanart/fanart-tool.ts';
+import { createHttpGet } from '../fanart/http.ts';
+import { FanartSeenStore, markSentCandidate } from '../fanart/seen.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -243,6 +247,9 @@ export async function bootstrapGateway(
     startMediaCleanup(ctx, config.media.ttlHours, logger);
   }
 
+  // ── Agent 临时目录（cwd/tmp）：创建 + 过期清理；prompt 里要求模型把中间文件都放这里 ──
+  startTmpDir(ctx, resolveTmpDir(config), config.tmpTtlHours ?? 72, logger);
+
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
   registerDescribeImageTool(ctx, config.vision, logger);
@@ -256,7 +263,23 @@ export async function bootstrapGateway(
     sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
     sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
   };
-  registerSendFileTool(ctx, mediaSender, manager, config, logger);
+  // ── 搜图工具（qqbot_fanart_pick）：候选落在 tmp/fanart，发出去的那张才记进 media/fanart 的 seen ──
+  const fanartCandidatesDir = join(resolveTmpDir(config), 'fanart');
+  const fanartSeen = new FanartSeenStore(join(MEDIA_ROOT, 'fanart'));
+  if (config.fanart.enabled) {
+    const poolDir = config.fanart.poolDir.trim();
+    registerFanartPickTool(ctx, config, {
+      get: createHttpGet(config.fanart.proxy),
+      seen: fanartSeen,
+      poolDir: poolDir === '' ? resolve(PLUGIN_ROOT, 'scripts') : (isAbsolute(poolDir) ? poolDir : resolve(PLUGIN_ROOT, poolDir)),
+      candidatesDir: fanartCandidatesDir,
+    }, logger);
+  }
+  registerSendFileTool(ctx, mediaSender, manager, config, logger, (absPath) => {
+    if (config.fanart.enabled && markSentCandidate(fanartSeen, fanartCandidatesDir, absPath)) {
+      logger.info(`im-qqbot: 搜图候选已发，记为已发: ${absPath}`);
+    }
+  });
 
   // ── Bilibili 只读工具（搜索/视频/评论/字幕/扫码登录） ──
   const biliTools = ctx.get('tools') as { register(definition: unknown): unknown } | undefined;

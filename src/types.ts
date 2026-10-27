@@ -10,6 +10,8 @@ export interface ReplyTarget {
   scope: ChatScope;
   targetId: string;
   msgId?: string;
+  /** msgId 对应消息的接收时间（ms），用于判断被动回复窗口是否已过 */
+  receivedAt?: number;
   /** 互动事件 id（带 INTERACTION_CREATE 前缀），填 event_id 字段，与 msgId 互斥 */
   eventId?: string;
 }

@@ -51,9 +51,10 @@ function setup(opts?: { record?: SessionRecord | undefined; config?: ImQQBotConf
   const record = 'record' in (opts ?? {}) ? opts!.record : createRecord(c2cTarget);
   const manager = {
     findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
+    addUnsent: vi.fn(),
   } as unknown as SessionManager;
   const outbound = createOutboundHandler(manager, bot, opts?.config ?? createConfig(), createLogger());
-  return { outbound, bot, session };
+  return { outbound, bot, session, manager };
 }
 
 const delta = (attemptId: string, text: string) => ({ kind: 'text-delta' as const, attemptId, text });
@@ -150,6 +151,21 @@ describe('OutboundRouter.routeStreamFrame', () => {
 
     expect(bot.openStream).not.toHaveBeenCalled();
     expect(bot.sendMarkdown).toHaveBeenCalledWith(groupTarget, 'group reply');
+  });
+
+  it('群聊 buffer 静态发送失败：原文挂起到下一次用户消息', async () => {
+    const { outbound, bot, manager } = setup({ record: createRecord(groupTarget) });
+    vi.mocked(bot.sendMarkdown).mockRejectedValue(new Error('msg_id expired'));
+
+    outbound.routeStreamFrame('sess-qq', start('a1'));
+    outbound.routeStreamFrame('sess-qq', delta('a1', 'late reply'));
+    outbound.routeSessionEvent({ header: { id: 'sess-qq' } }, {
+      type: 'assistant/message',
+      data: { message: { content: [{ type: 'text', text: 'late reply' }] } },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(manager.addUnsent).toHaveBeenCalledWith('k', 'late reply');
   });
 
   it('assistant/message 到达时收尾流式：complete 且不重复静态发送', async () => {

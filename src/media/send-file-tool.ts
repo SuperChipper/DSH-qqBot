@@ -16,6 +16,19 @@ import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
 import { isSensitivePath } from '../shared/file-access.ts';
+import { replyWindowMs } from '../transport/msgid-cache.ts';
+
+/**
+ * 群聊被动回复窗口过期后清掉 msgId，降级为主动推送。
+ *
+ * 会话里保存的 replyTarget 是上一条入站消息的 msg_id；定时任务或长时间空闲后
+ * 该 id 早已超出 QQ 的被动回复窗口，直接发送会收到「回复消息msg_id已过期」。
+ */
+function withFreshReplyTarget(target: ReplyTarget): ReplyTarget {
+  if (target.scope !== 'group' || target.msgId === undefined) return target;
+  const age = target.receivedAt === undefined ? 0 : Date.now() - target.receivedAt;
+  return age >= replyWindowMs('group') ? { ...target, msgId: undefined } : target;
+}
 
 /** 工具名（qqbot 前缀避免与其他通道的同名工具冲突） */
 export const SEND_FILE_TOOL_NAME = 'qqbot_send_file';
@@ -92,6 +105,8 @@ export function registerSendFileTool(
   manager: SessionManager,
   config: ImQQBotConfig,
   logger: Logger,
+  /** 发送成功后的回调（搜图工具用它把发出去的候选记为已发） */
+  onSent?: (absPath: string) => void,
 ): void {
   const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
   if (!tools?.register) {
@@ -167,6 +182,7 @@ export function registerSendFileTool(
       if (replyTarget === undefined) {
         throw new Error('qqbot_send_file: 无法确定发送目标，请显式传 target 参数');
       }
+      replyTarget = withFreshReplyTarget(replyTarget);
 
       // 2. 校验文件 + 路径白名单
       const absPath = resolve(file_path);
@@ -210,6 +226,11 @@ export function registerSendFileTool(
         `im-qqbot: qqbot_send_file 发送 ${fileName} (${info.size} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`
         + (captionText !== undefined ? `，caption ${captionText.length} 字` : ''),
       );
+      try {
+        onSent?.(absPath);
+      } catch (err) {
+        logger.warn(`im-qqbot: qqbot_send_file 发送后回调失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
 
       return {
         fileName,

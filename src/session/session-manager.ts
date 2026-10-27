@@ -25,7 +25,16 @@ import { IdleEvictor } from './idle-evictor.ts';
 import { resolveSessionCwd } from '../shared/file-access.ts';
 import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts';
 import { formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
-import { formatScheduleMigrationHint, readScheduleMigrations, scheduleStorageHome, type ScheduleMigrationTask } from './schedule-migration.ts';
+import { resolveTmpDir } from '../media/tmp-dir.ts';
+import { join } from 'node:path';
+import {
+  formatScheduleMigrationHint,
+  readScheduleMigrations,
+  retireMigratedSchedules,
+  scheduleStorageHome,
+  type ScheduleMigrationTask,
+  type ScheduleServiceLike,
+} from './schedule-migration.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import type {
@@ -78,8 +87,8 @@ export class SessionManager {
   private unsent = new Map<string, string[]>();
   /** /new 或 fork 后的旧 sessionId → 当前会话 key，用于旧定时任务/旧审批卡片继续路由 */
   private retiredSessionIds = new Map<string, string>();
-  /** /new 后待新会话重建的定时任务（旧会话 key → 任务） */
-  private pendingScheduleMigrations = new Map<string, ScheduleMigrationTask[]>();
+  /** /new 后待新会话重建的定时任务（会话 key → 各旧 session 的任务批次） */
+  private pendingScheduleMigrations = new Map<string, Array<{ oldSessionId: string; tasks: ScheduleMigrationTask[] }>>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -185,6 +194,21 @@ export class SessionManager {
           ].join('\n'),
         });
       }
+
+      // 临时文件集中放 tmp/：不提示的话模型会把脚本、截图、抽帧直接写在工作目录根下
+      const tmpDir = resolveTmpDir(this.config);
+      const ttl = this.config.tmpTtlHours ?? 72;
+      sections.push({
+        name: 'qqbot:tmp-dir',
+        order: 95,
+        text: [
+          '【临时文件】',
+          `临时文件一律写到 ${tmpDir} 下（一次性脚本、截图、抽帧、下载的素材、pip/npm 依赖、转写音频等），按任务建子目录，例如 ${join(tmpDir, 'asr-video')}。不要写在工作目录 ${this.config.cwd || process.cwd()} 的根下。`,
+          ttl > 0
+            ? `${tmpDir} 里 ${ttl} 小时没动过的东西会被自动清理；要长期保留的成果（用户要的文件、笔记）放到用户指定的位置，或用 qqbot_notes_save 记进笔记。`
+            : '要长期保留的成果（用户要的文件、笔记）放到用户指定的位置，或用 qqbot_notes_save 记进笔记。',
+        ].join('\n'),
+      });
 
       // 媒体 caption：QQ 支持图片/视频/文件与文字同一条发出。
       // 这条优先于人设里的「先文字后图片」，避免用户看到两个气泡。
@@ -517,20 +541,44 @@ export class SessionManager {
   private captureScheduleMigrations(sessionKey: string, oldSessionId: string): void {
     try {
       const tasks = readScheduleMigrations(scheduleStorageHome(), oldSessionId);
-      if (tasks.length > 0) this.pendingScheduleMigrations.set(sessionKey, tasks);
-      else this.pendingScheduleMigrations.delete(sessionKey);
+      if (tasks.length === 0) return;
+      // 连续 /new 时保留之前还没交出去的批次，每批记住自己的旧 sessionId
+      const pending = this.pendingScheduleMigrations.get(sessionKey) ?? [];
+      pending.push({ oldSessionId, tasks });
+      this.pendingScheduleMigrations.set(sessionKey, pending);
     } catch {
       // 调度存储不可读时不阻塞 /new；用户仍可手动重建
     }
   }
 
-  /** 取走并格式化待迁移任务（只给新会话的第一条消息一次） */
+  /**
+   * 取走并格式化待迁移任务（只给新会话的第一条消息一次）。
+   * 同时删除旧会话里的这些任务：DSH 按原 sessionId 投递，不删会和新会话重建的任务重复触发。
+   */
   takeScheduleMigration(scope: ChatScope, peerId: string): string | undefined {
     const key = this.sessionKey(scope, peerId);
-    const tasks = this.pendingScheduleMigrations.get(key);
-    if (tasks === undefined) return undefined;
+    const pending = this.pendingScheduleMigrations.get(key);
+    if (pending === undefined) return undefined;
     this.pendingScheduleMigrations.delete(key);
-    return formatScheduleMigrationHint(tasks);
+    const schedule = this.getScheduleService();
+    if (schedule === undefined) {
+      this.logger.warn(`schedule service unavailable; old session tasks not retired: key=${key}`);
+    } else {
+      for (const { oldSessionId, tasks } of pending) {
+        void retireMigratedSchedules(schedule, oldSessionId, tasks)
+          .then((count) => this.logger.info(`retired ${count} migrated schedule task(s): key=${key} oldSessionId=${oldSessionId}`))
+          .catch((err: unknown) => this.logger.warn(`retire migrated schedules failed: key=${key} oldSessionId=${oldSessionId} err=${err instanceof Error ? err.message : String(err)}`));
+      }
+    }
+    return formatScheduleMigrationHint(pending.flatMap((batch) => batch.tasks));
+  }
+
+  private getScheduleService(): ScheduleServiceLike | undefined {
+    try {
+      return this.ctx.get('schedule') as ScheduleServiceLike | undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   getStatus(scope: ChatScope, peerId: string): SessionStatus {

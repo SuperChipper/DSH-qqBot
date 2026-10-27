@@ -25,6 +25,40 @@ describe('resolveReplyTarget', () => {
     expect(result.msgId).toBe('cached-1');
   });
 
+  it('skips explicit group msgId past the 5-minute passive window', () => {
+    const limiter = new ReplyLimiter({ limit: 4 });
+    cacheMsgId('group', 'grp-1', 'fresh');
+    const stale: ReplyTarget = {
+      scope: 'group', targetId: 'grp-1', msgId: 'stale', receivedAt: Date.now() - 5 * 60 * 1000 - 1,
+    };
+    expect(resolveReplyTarget(stale, limiter, true).msgId).toBe('fresh');
+  });
+
+  it('keeps explicit group msgId inside the passive window', () => {
+    const limiter = new ReplyLimiter({ limit: 4 });
+    cacheMsgId('group', 'grp-2', 'newer');
+    const target: ReplyTarget = {
+      scope: 'group', targetId: 'grp-2', msgId: 'own', receivedAt: Date.now() - 4 * 60 * 1000,
+    };
+    expect(resolveReplyTarget(target, limiter, true).msgId).toBe('own');
+  });
+
+  it('falls back to proactive when the only group msgId is stale', () => {
+    const limiter = new ReplyLimiter({ limit: 4 });
+    const stale: ReplyTarget = {
+      scope: 'group', targetId: 'grp-3', msgId: 'stale', receivedAt: Date.now() - 6 * 60 * 1000,
+    };
+    const result = resolveReplyTarget(stale, limiter, true);
+    expect(result.msgId).toBeUndefined();
+    expect(result.eventId).toBeUndefined();
+  });
+
+  it('does not age-check c2c msgIds', () => {
+    const limiter = new ReplyLimiter({ limit: 4 });
+    const target: ReplyTarget = { scope: 'c2c', targetId: 'peer-9', msgId: 'old', receivedAt: Date.now() - 6 * 60 * 1000 };
+    expect(resolveReplyTarget(target, limiter, true).msgId).toBe('old');
+  });
+
   it('skips event candidates when allowEvent is false', () => {
     const limiter = new ReplyLimiter({ limit: 4 });
     cacheEventId('c2c', 'peer-3', 'evt-1');

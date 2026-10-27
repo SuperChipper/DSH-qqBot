@@ -35,6 +35,8 @@ export class OutboundBuffer {
   private readonly logger: Logger;
   /** 最终文本的兜底处理：剔除伪工具调用并补执行（只在 flush 调用一次） */
   private readonly salvage: (text: string) => string;
+  /** 静态发送失败时交出原文（挂起到下一次用户消息补发） */
+  private readonly onUndelivered: ((text: string) => void) | undefined;
 
   public constructor(
     record: SessionRecord,
@@ -44,12 +46,14 @@ export class OutboundBuffer {
     streamingEnabled: boolean,
     salvage: (text: string) => string = (text) => text,
     sanitize: (text: string) => string = (text) => text,
+    onUndelivered?: (text: string) => void,
   ) {
     this.record = record;
     this.bot = bot;
     this.limit = limit;
     this.logger = logger;
     this.salvage = salvage;
+    this.onUndelivered = onUndelivered;
     this.writer = streamingEnabled
       ? new StreamingWriter({ bot, target: record.replyTarget, logger, throttleMs: STREAM_THROTTLE_MS, sanitize })
       : null;
@@ -96,6 +100,7 @@ export class OutboundBuffer {
       }
     } catch (err) {
       this.logger.error(`im-qqbot: flush failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.onUndelivered?.(this.buffer);
     } finally {
       this.buffer = '';
       this.flushing = false;

@@ -155,4 +155,32 @@ describe('OutboundBuffer', () => {
     expect(session.complete).toHaveBeenCalledTimes(1);
     expect(bot.sendMarkdown).not.toHaveBeenCalled(); // 不降级静态
   });
+
+  it('静态发送失败 → onUndelivered 拿到原文', async () => {
+    const bot = createBot();
+    vi.mocked(bot.sendMarkdown).mockRejectedValue(new Error('send failed'));
+    const onUndelivered = vi.fn();
+    const buffer = new OutboundBuffer(
+      createRecord(c2cTarget), bot, 4500, createLogger(), false, undefined, undefined, onUndelivered,
+    );
+
+    buffer.append('raw text');
+    await buffer.flush();
+
+    expect(onUndelivered).toHaveBeenCalledWith('raw text');
+    expect(buffer.text).toBe('');
+  });
+
+  it('发送成功不触发 onUndelivered', async () => {
+    const bot = createBot();
+    const onUndelivered = vi.fn();
+    const buffer = new OutboundBuffer(
+      createRecord(c2cTarget), bot, 4500, createLogger(), false, undefined, undefined, onUndelivered,
+    );
+
+    buffer.append('ok');
+    await buffer.flush();
+
+    expect(onUndelivered).not.toHaveBeenCalled();
+  });
 });

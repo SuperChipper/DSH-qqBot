@@ -71,6 +71,15 @@ export interface StickersConfig {
   maxAutoEntries: number;
 }
 
+export interface FanartConfig {
+  /** 是否注册 qqbot_fanart_pick 搜图工具 */
+  enabled: boolean;
+  /** 访问 pixiv / safebooru 的 HTTP 代理（空 = 环境变量 HTTPS_PROXY，再退到 Windows 系统代理） */
+  proxy: string;
+  /** CP 池目录（pixiv-tags.json / fanart-tags.json）；空 = 插件根目录下的 scripts/ */
+  poolDir: string;
+}
+
 export interface NotesConfig {
   /** 是否启用共享笔记库（检索/记录工具 + 自动召回） */
   enabled: boolean;
@@ -99,6 +108,10 @@ export interface ImQQBotConfig {
   preset?: string;
   /** Agent 工作目录（缺省回落到进程 cwd） */
   cwd?: string;
+  /** Agent 临时目录（空 = cwd/tmp）：脚本、截图、抽帧、下载等中间文件统一放这里 */
+  tmpDir: string;
+  /** 临时目录里多少小时没改动的条目自动清理（0 = 不清理） */
+  tmpTtlHours: number;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
   /** 群聊未 @bot 时随机回复概率（0-1），0=关闭 */
@@ -145,6 +158,8 @@ export interface ImQQBotConfig {
   stickers: StickersConfig;
   /** 共享笔记库（qqbot_notes_search / qqbot_notes_save + 自动召回） */
   notes: NotesConfig;
+  /** 搜图工具（qqbot_fanart_pick） */
+  fanart: FanartConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -181,6 +196,13 @@ export const NotesSchema: Schema<NotesConfig> = Schema.object({
   injectMinCoverage: Schema.number().default(0.4).description('自动注入最低查询词覆盖率(0-1)'),
 });
 
+/** 搜图工具子 Schema */
+export const FanartSchema: Schema<FanartConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否启用 qqbot_fanart_pick 搜图工具'),
+  proxy: Schema.string().default('').description('pixiv/safebooru 用的 HTTP 代理（空=HTTPS_PROXY 或系统代理）'),
+  poolDir: Schema.string().default('').description('CP 池目录（空=插件根目录/scripts）'),
+});
+
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   appId: Schema.string().default('').description('QQ 机器人 AppID'),
   appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
@@ -188,6 +210,8 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   model: Schema.string().description('Model name'),
   preset: Schema.string().description('Agent preset id'),
   cwd: Schema.string().description('Agent working directory'),
+  tmpDir: Schema.string().default('').description('Agent 临时目录（空=工作目录/tmp）'),
+  tmpTtlHours: Schema.number().default(72).description('临时目录条目多少小时未改动后自动清理（0=不清理）'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupReplyProbability: Schema.number().default(0).description('群聊未@时随机回复概率(0-1)，0=关闭'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
@@ -265,4 +289,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     injectMaxChars: 600,
     injectMinCoverage: 0.4,
   }).description('共享笔记库配置'),
+  fanart: FanartSchema.default({
+    enabled: true,
+    proxy: '',
+    poolDir: '',
+  }).description('搜图工具配置'),
 });

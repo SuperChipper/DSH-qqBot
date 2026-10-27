@@ -167,6 +167,7 @@ class OutboundRouter {
         this.shouldStream(record),
         (raw) => this.salvage(raw, captions),
         (raw) => stripCaptionEcho(sanitizePseudoToolText(raw), captions),
+        (raw) => this.markUnsent(record, raw),
       );
       this.buffers.set(sessionId, buffer);
     }
@@ -322,11 +323,13 @@ class OutboundRouter {
         break;
       }
     }
-    if (failed) {
-      // 群主动消息无权限/被动窗口过期时，内容不能丢：等用户下次说话时注入提示补发
-      this.manager.addUnsent(record.sessionKey, text);
-      this.logger.warn(`im-qqbot: 消息未送达，已挂起到下一次用户消息 session=${record.sessionKey}`);
-    }
+    if (failed) this.markUnsent(record, text);
+  }
+
+  /** 群主动消息无权限/被动窗口过期时，内容不能丢：等用户下次说话时注入提示补发 */
+  private markUnsent(record: SessionRecord, text: string): void {
+    this.manager.addUnsent(record.sessionKey, text);
+    this.logger.warn(`im-qqbot: 消息未送达，已挂起到下一次用户消息 session=${record.sessionKey}`);
   }
 }
 

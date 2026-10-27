@@ -83,6 +83,24 @@ const DEFAULT_MAX_PROMPT_ENTRIES = 80;
 const MAX_EMOTION_LENGTH = 32;
 const MAX_FILENAME_STEM = 48;
 
+/**
+ * 按文件头判断真实图片格式。
+ *
+ * QQ 下载的图片经常出现「.png 里装 GIF/JPG」的情况，扩展名不可信；
+ * 存表情时以文件头为准，避免库里的文件名和内容对不上。
+ */
+function sniffImageExt(bytes: Uint8Array): string | undefined {
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return '.png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return '.jpg';
+  if (bytes.length >= 6 && bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46) return '.gif';
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) return '.webp';
+  return undefined;
+}
+
 /** 路径是否位于 root 目录内（含 root 本身） */
 function isWithin(path: string, root: string): boolean {
   const rel = relative(resolve(root), resolve(path));
@@ -168,11 +186,12 @@ export class StickerStore {
     }
 
     const sourceExt = extname(source).toLowerCase();
-    if (!IMAGE_EXTS.has(sourceExt)) {
+    const bytes = readFileSync(source);
+    const sniffedExt = sniffImageExt(bytes);
+    if (!IMAGE_EXTS.has(sourceExt) && sniffedExt === undefined) {
       throw new Error(`不支持的图片格式: ${sourceExt || '(无扩展名)'}`);
     }
-
-    const bytes = readFileSync(source);
+    const saveExt = sniffedExt ?? sourceExt;
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const entries = this.readIndex();
     this.backfillHashes(entries);
@@ -195,7 +214,7 @@ export class StickerStore {
       throw new Error(`自动收藏已达上限（${this.maxAutoEntries} 条），请清理 index.json 或调大 stickers.maxAutoEntries`);
     }
 
-    const file = this.pickFileName(input.file, emotion, sourceExt);
+    const file = this.pickFileName(input.file, emotion, saveExt);
     mkdirSync(this.root, { recursive: true });
     writeFileSync(join(this.root, file), bytes);
 
@@ -354,10 +373,10 @@ export class StickerStore {
     if (changed) this.writeIndex(entries);
   }
 
-  /** 选择不覆盖已有文件的名字 */
-  private pickFileName(preferred: string | undefined, emotion: string, sourceExt: string): string {
+  /** 选择不覆盖已有文件的名字（扩展名以实际内容为准，preferred 只提供文件名主干） */
+  private pickFileName(preferred: string | undefined, emotion: string, contentExt: string): string {
     let stem: string;
-    let ext = sourceExt;
+    const ext = contentExt;
 
     if (preferred !== undefined && preferred.trim() !== '') {
       const requested = preferred.trim();
@@ -365,7 +384,6 @@ export class StickerStore {
       const requestedExt = extname(requested).toLowerCase();
       if (requestedExt !== '') {
         if (!IMAGE_EXTS.has(requestedExt)) throw new Error(`file 扩展名不支持: ${requestedExt}`);
-        ext = requestedExt;
         stem = safeStem(requested.slice(0, -requestedExt.length));
       } else {
         stem = safeStem(requested);

@@ -117,6 +117,7 @@ export async function handleInbound(
     scope,
     targetId: peerId,
     msgId: msg.messageId,
+    receivedAt: Date.now(),
   };
 
   // ── 群历史：被 @/随机触发时读持久化群记忆，并按需下载最近几张历史图片 ──

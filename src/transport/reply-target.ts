@@ -2,14 +2,14 @@
  * 出站回复目标解析与发送 — 被动回复三级兜底 + msg_id/event_id 区分。
  *
  * 从 gateway 层抽离，保持 bootstrap 只做组装。三级兜底：
- *   1. 优先显式 target.msgId；
+ *   1. 优先显式 target.msgId（群聊超过被动窗口则跳过——QQ 会拒，限额器的 TTL 管不到）；
  *   2. 超频/过期后，用缓存里「最近一条未超频未过期」的 target；
  *   3. 全部候选都超频/过期，才降级为主动推送（proactive）。
  */
 import { QQBot, MsgType } from '@tencent-connect/qqbot-nodejs';
 import type { InlineKeyboard } from '@tencent-connect/qqbot-nodejs';
 import type { ReplyTarget } from '../types.ts';
-import { getCachedReplyIds } from './msgid-cache.ts';
+import { getCachedReplyIds, replyWindowMs } from './msgid-cache.ts';
 import type { CachedReplyId } from './msgid-cache.ts';
 import type { ReplyLimiter } from './reply-limiter.ts';
 
@@ -26,7 +26,7 @@ export function resolveReplyTarget(
   allowEvent: boolean,
 ): ReplyTarget {
   const candidates: CachedReplyId[] = [];
-  if (target.msgId) candidates.push({ kind: 'msg', id: target.msgId });
+  if (target.msgId && !isExplicitMsgExpired(target)) candidates.push({ kind: 'msg', id: target.msgId });
   for (const c of getCachedReplyIds(target.scope, target.targetId)) {
     candidates.push(c);
   }
@@ -43,6 +43,12 @@ export function resolveReplyTarget(
   }
 
   return { ...target, msgId: undefined, eventId: undefined };
+}
+
+/** 群聊显式 msgId 是否已过被动回复窗口（无 receivedAt 时视为未过期） */
+function isExplicitMsgExpired(target: ReplyTarget): boolean {
+  if (target.scope !== 'group' || target.receivedAt === undefined) return false;
+  return Date.now() - target.receivedAt >= replyWindowMs('group');
 }
 
 /**
