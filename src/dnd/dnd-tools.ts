@@ -76,6 +76,7 @@ import {
   setChapter,
   setFlag,
   setQuestStatus,
+  shopLine,
   siteCard,
   updateNpc,
 } from './story.ts';
@@ -662,8 +663,9 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     + 'description (narrate from this) and DM-only notes (use for rulings, never read aloud). First visit reveals '
     + 'the room and spawns its monsters. In combat only the current-turn character can move (with `who`). '
     + 'Pass discover_hidden=true only after a successful check found a secret passage. Exits that need a check '
-    + '(climbing, swimming) are rolled by the tool for each mover; those who fail stay behind. From a site\'s entry '
-    + 'you can travel to another known site by its name or id.',
+    + '(climbing, swimming) are rolled by the tool for each mover; those who fail stay behind. In a town you can go '
+    + 'to any location the players know. From a dungeon\'s entry, or anywhere in a town, you can travel to another '
+    + 'known site by its name or id.',
     {
       room: { type: 'string', description: 'Room id or name, or another site\'s id/name (from that site\'s entry).' },
       who: { type: 'array', items: { type: 'string' }, description: 'Characters who move; omit for the whole party.' },
@@ -685,6 +687,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         if (result.firstSiteVisit && result.site.arrival) lines.push(`【抵达「${result.site.name}」，可以念】${result.site.arrival}`);
         if (result.firstSiteVisit && result.site.features) lines.push(`【DM】「${result.site.name}」通用规则：${result.site.features}`);
         lines.push(`【玩家视角，可以描述】${result.view.playerView}`, `【DM 机密，勿念】${result.view.dmNotes}`);
+        if (result.room.shop !== undefined) lines.push(`【店铺】${shopLine(result.room.shop)}`);
       }
       if (result.spawned.length > 0) {
         lines.push(`【DM 机密】本房间敌人：${result.spawned.map((m) => `${m.name} HP${m.hp} AC${m.ac} 命中+${m.attackBonus} 伤害${m.damage}${m.notes ? `（${m.notes}）` : ''}`).join('；')}`);

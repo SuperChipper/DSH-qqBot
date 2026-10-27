@@ -79,6 +79,10 @@ export interface DungeonRoom {
   /** 住在这个房间的具名 NPC id（Npc.home 指过来的也算） */
   npcs?: string[];
   knowledge?: KnowledgeBlock[];
+  /** 城镇地点：满足后玩家才知道这个地方（如打听到的强盗窝）；不写 = 一开始就知道 */
+  knownWhen?: Condition;
+  /** 城镇地点：店铺，卖什么、单价上限 */
+  shop?: { sells: string; maxPrice?: number };
 }
 
 /** 只要房间列表的地方（找房间、算出口）：单个地城和整本模组的全部房间都能传 */

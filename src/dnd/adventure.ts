@@ -109,10 +109,15 @@ export interface Chapter {
   next?: string;
 }
 
-/** 场景：一个地城 / 据点。第一阶段只有地城型（有坐标的房间图） */
+/**
+ * 场景。dungeon（默认）：有坐标的房间图，只能走相邻房间。
+ * hub：城镇，地点之间随便走（不用写 exits，坐标可省，加载时自动排版），
+ * 地点可以用 knownWhen 藏起来，从任何地点都能出发去别的场景。
+ */
 export interface Site {
   id: string;
   name: string;
+  kind?: 'dungeon' | 'hub';
   chapter?: string;
   /** DM 视角的一两句概述 */
   summary?: string;
@@ -267,6 +272,27 @@ export function findLead(adv: Adventure, id: string): Lead | undefined {
   return adv.leads.find((l) => l.id === id.trim());
 }
 
+export function isHub(site: Site | undefined): boolean {
+  return site?.kind === 'hub';
+}
+
+const HUB_COLUMNS = 4;
+
+/** 城镇地点没写坐标的按网格排开（地图用），没写 exits 的补空数组 */
+function layoutHub(site: Site): void {
+  site.rooms.forEach((room, i) => {
+    const r = room as Partial<DungeonRoom>;
+    if (typeof r.x !== 'number' || typeof r.y !== 'number') {
+      r.x = (i % HUB_COLUMNS) * 5;
+      r.y = Math.floor(i / HUB_COLUMNS) * 4;
+    }
+    r.w ??= 4;
+    r.h ??= 3;
+    r.exits ??= [];
+    r.dmNotes ??= '';
+  });
+}
+
 /** 所有触发器（连同它所在的房间） */
 export function allTriggers(adv: Adventure): Array<{ trigger: Trigger; room: DungeonRoom }> {
   return adv.sites.flatMap((s) => s.rooms.flatMap((room) => (room.triggers ?? []).map((trigger) => ({ trigger, room }))));
@@ -330,6 +356,8 @@ export function validateAdventure(input: unknown): Adventure {
   const siteIds = unique('场景', adv.sites.map((s) => s.id));
   for (const site of adv.sites) {
     if (typeof site.name !== 'string' || !Array.isArray(site.rooms) || site.rooms.length === 0) throw new Error(`场景 ${site.id} 缺少 name 或 rooms`);
+    if (site.kind !== undefined && site.kind !== 'dungeon' && site.kind !== 'hub') throw new Error(`场景 ${site.id} 的 kind 只能是 dungeon 或 hub`);
+    if (isHub(site)) layoutHub(site);
     validateRooms(`场景 ${site.id}`, site.rooms, roomIds);
     if (!site.rooms.some((r) => r.id === site.entry)) throw new Error(`场景 ${site.id} 的 entry 不是本场景的房间`);
   }
@@ -374,6 +402,9 @@ export function validateAdventure(input: unknown): Adventure {
     need(site.chapter === undefined || chapterIds.has(site.chapter), `场景 ${site.id} 的 chapter 不存在`);
     checkCondition(site.knownWhen, `场景 ${site.id}`);
     for (const room of site.rooms) {
+      need(room.knownWhen === undefined || isHub(site), `房间 ${room.id} 的 knownWhen 只用于城镇（hub）地点；地城里藏房间用暗门`);
+      need(room.knownWhen === undefined || room.id !== site.entry, `场景 ${site.id} 的入口不能藏起来（knownWhen）`);
+      checkCondition(room.knownWhen, `地点 ${room.id}`);
       for (const exit of room.exits) checkCondition(exit.requires, `${room.id} → ${exit.to} 的出口`);
       for (const variant of room.variants ?? []) checkCondition(variant.when, `房间 ${room.id} 的描述变体`);
       for (const id of room.npcs ?? []) need(npcIds.has(id), `房间 ${room.id} 列了不存在的 NPC ${id}`);
@@ -440,6 +471,7 @@ export function adventureWarnings(adv: Adventure): string[] {
   for (const site of adv.sites) {
     collect(site.knownWhen);
     for (const room of site.rooms) {
+      collect(room.knownWhen);
       room.exits.forEach((e) => collect(e.requires));
       room.variants?.forEach((v) => collect(v.when));
       room.triggers?.forEach((t) => collect(t.requires));

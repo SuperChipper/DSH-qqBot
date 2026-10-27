@@ -9,7 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { rollD20, type Roller, cryptoRoller } from './dice.ts';
-import { type Adventure, type QuestStatus, type Site, findSite, roomGraph, siteOfRoom } from './adventure.ts';
+import { type Adventure, type QuestStatus, type Site, findSite, isHub, roomGraph, siteOfRoom } from './adventure.ts';
 import {
   type DungeonExit,
   type DungeonMonster,
@@ -21,7 +21,7 @@ import {
   findRoom,
 } from './dungeon.ts';
 import { ABILITIES, type Ability, type Skill, abilityModifier, parseAbility, parseSkill, proficiencyBonus, SKILLS } from './rules.ts';
-import { type NpcState, afterChange, describeCondition, evalCondition, roomView, storySummaryLines } from './story.ts';
+import { type NpcState, afterChange, describeCondition, evalCondition, locationKnown, roomView, storySummaryLines } from './story.ts';
 
 export type CharacterKind = 'pc' | 'npc' | 'monster';
 
@@ -636,10 +636,19 @@ export interface MoveResult {
   exits: VisibleExit[];
 }
 
-/** 场景入口能去的其他已知场景（有 routes 时只算有路相连的） */
+/** 城镇里随便走：同一城镇里玩家知道的其他地点 */
+function hubExits(c: Campaign, adv: Adventure, roomId: string): DungeonExit[] {
+  const site = siteOfRoom(adv, roomId);
+  if (!isHub(site)) return [];
+  return site!.rooms
+    .filter((r) => r.id !== roomId && locationKnown(c, adv, r))
+    .map((r) => ({ to: r.id, label: `去${r.name}` }));
+}
+
+/** 能去的其他已知场景（有 routes 时只算有路相连的）：地城只能从入口走，城镇从哪儿都能走 */
 function crossSiteExits(c: Campaign, adv: Adventure, roomId: string): DungeonExit[] {
   const site = siteOfRoom(adv, roomId);
-  if (site === undefined || site.entry !== roomId) return [];
+  if (site === undefined || (site.entry !== roomId && !isHub(site))) return [];
   return adv.sites
     .filter((s) => s.id !== site.id && c.knownSites.includes(s.id))
     .filter((s) => adv.routes === undefined || adv.routes.some((r) => (r.from === site.id && r.to === s.id) || (r.from === s.id && r.to === site.id)))
@@ -649,7 +658,9 @@ function crossSiteExits(c: Campaign, adv: Adventure, roomId: string): DungeonExi
 /** 列出当前房间对玩家可见的出口（未发现的暗门不列，条件不满足的标 locked） */
 export function visibleExits(c: Campaign, adv: Adventure, roomId = c.currentRoom): VisibleExit[] {
   const graph = roomGraph(adv);
-  return [...exitsOf(graph, roomId), ...crossSiteExits(c, adv, roomId)]
+  const own = exitsOf(graph, roomId);
+  const hub = hubExits(c, adv, roomId).filter((e) => !own.some((o) => o.to === e.to));
+  return [...own, ...hub, ...crossSiteExits(c, adv, roomId)]
     .filter((e) => e.hidden !== true || c.discoveredExits.includes(exitKey(roomId, e.to)))
     .map((e) => ({
       to: e.to,
@@ -764,15 +775,16 @@ export function moveParty(
   const fromSite = siteOfRoom(adv, from)!;
   const site = siteOfRoom(adv, room.id)!;
   const exit = site.id === fromSite.id
-    ? exitBetween(graph, from, room.id)
+    ? exitBetween(graph, from, room.id) ?? hubExits(c, adv, from).find((e) => e.to === room.id)
     : crossSiteExits(c, adv, from).find((e) => e.to === room.id);
   if (exit === undefined) {
     if (site.id !== fromSite.id) {
       if (!c.knownSites.includes(site.id)) throw new Error(`玩家还不知道「${site.name}」在哪`);
-      if (from !== fromSite.entry) throw new Error(`要离开「${fromSite.name}」，先回到入口「${findRoom(graph, fromSite.entry)?.name ?? fromSite.entry}」`);
+      if (!isHub(fromSite) && from !== fromSite.entry) throw new Error(`要离开「${fromSite.name}」，先回到入口「${findRoom(graph, fromSite.entry)?.name ?? fromSite.entry}」`);
       if (room.id !== site.entry) throw new Error(`去「${site.name}」要从入口「${findRoom(graph, site.entry)?.name ?? site.entry}」进`);
       throw new Error(`「${fromSite.name}」和「${site.name}」之间没有路`);
     }
+    if (isHub(site)) throw new Error(`玩家还不知道「${room.name}」这个地方`);
     const names = visibleExits(c, adv, from).map((e) => e.name).join('、') || '无';
     throw new Error(`「${room.name}」和「${fromName}」不相邻。可去：${names}`);
   }
@@ -1130,7 +1142,8 @@ function hpTag(ch: Character): string {
 /** 队伍主位置所在的场景，以及这个场景探索了几个房间 */
 export function explored(c: Campaign, adv: Adventure): { site: Site | undefined; seen: number; total: number } {
   const site = siteOfRoom(adv, c.currentRoom);
-  const rooms = site?.rooms ?? [];
+  // 城镇只数玩家知道的地点，不然分母会泄露还有几个藏着的地方
+  const rooms = (site?.rooms ?? []).filter((r) => !isHub(site) || locationKnown(c, adv, r));
   return { site, seen: rooms.filter((r) => c.revealed.includes(r.id)).length, total: rooms.length };
 }
 
@@ -1139,7 +1152,9 @@ export function summarize(c: Campaign, adv: Adventure): string {
   const room = findRoom(graph, c.currentRoom);
   const { site, seen, total } = explored(c, adv);
   const lines: string[] = [];
-  const where = adv.sites.length > 1 ? `${adv.name}｜场景：${site?.name ?? '?'}` : `地城：${site?.name ?? adv.name}`;
+  const where = adv.sites.length > 1
+    ? `${adv.name}｜${isHub(site) ? '城镇' : '场景'}：${site?.name ?? '?'}`
+    : `${isHub(site) ? '城镇' : '地城'}：${site?.name ?? adv.name}`;
   lines.push(`${where}｜当前房间：${room?.name ?? c.currentRoom}（${c.currentRoom}）｜已探索 ${seen}/${total}`);
   const exits = visibleExits(c, adv).map((e) => `${e.name}(${e.to})${e.locked === true ? '[过不去]' : ''}`).join('、');
   lines.push(`可见出口：${exits || '无'}`);

@@ -14,6 +14,7 @@ import {
   CampaignStore,
   applyDamage,
   createCampaign,
+  explored,
   moveParty,
   parseCampaign,
   partyPositions,
@@ -23,6 +24,7 @@ import {
 } from './campaign.ts';
 import { DndService } from './dnd-service.ts';
 import { lookup, storyAction } from './dnd-tools.ts';
+import { buildMapSvg } from './map-render.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
 import { afterChange, evalCondition, npcAlive, roomView } from './story.ts';
 
@@ -45,13 +47,16 @@ function fixture(): Adventure {
       { id: 'town', name: '矿镇', mode: 'hub', goal: '打听矿坑的事', dmGuide: '让玩家和老矿工聊天。', exitWhen: { lead: 'mine-map' }, next: 'mine' },
       { id: 'mine', name: '矿坑', mode: 'dungeon', goal: '找到工头', dmGuide: '矿坑里很暗。' },
     ],
-    flags: [{ id: 'alarm' }, { id: 'vault-open', label: '金库已开' }, { id: 'mine-cleared', label: '矿坑清理完毕' }],
+    flags: [{ id: 'alarm' }, { id: 'vault-open', label: '金库已开' }, { id: 'mine-cleared', label: '矿坑清理完毕' }, { id: 'cellar-known' }],
     sites: [
       {
-        id: 'camp', name: '矿镇营地', chapter: 'town', entry: 'camp-gate',
+        // 城镇：地点不写坐标和出口，加载时自动排版，彼此随便走
+        id: 'camp', name: '矿镇营地', kind: 'hub', chapter: 'town', entry: 'camp-gate',
         rooms: [
-          { id: 'camp-gate', name: '营地大门', x: 0, y: 0, w: 3, h: 3, playerView: '木栅栏围着几顶帐篷。', dmNotes: '安全区。', exits: [{ to: 'camp-tavern', label: '东边的酒棚' }] },
-          { id: 'camp-tavern', name: '酒棚', x: 4, y: 0, w: 3, h: 3, playerView: '几张长凳。', dmNotes: '老矿工在角落喝酒。', exits: [] },
+          { id: 'camp-gate', name: '营地大门', playerView: '木栅栏围着几顶帐篷。', dmNotes: '安全区。' },
+          { id: 'camp-tavern', name: '酒棚', playerView: '几张长凳。', dmNotes: '老矿工在角落喝酒。' },
+          { id: 'camp-shop', name: '杂货铺', playerView: '货架上堆着绳子和火把。', shop: { sells: '绳子、火把、口粮', maxPrice: 25 } },
+          { id: 'camp-cellar', name: '地窖', playerView: '潮湿的地窖。', dmNotes: '侄子的日记。', knownWhen: 'cellar-known' },
         ],
       },
       {
@@ -81,6 +86,7 @@ function fixture(): Adventure {
         knows: [
           { id: 'mine-rumor', text: '矿坑在北边山腰上。', via: 'ask', leads: ['mine-map'] },
           { id: 'vault-word', text: '铁门口令是「灰岩」。', via: 'persuade', dc: 13, set: ['vault-open'] },
+          { id: 'cellar-hint', text: '酒棚底下有个地窖，侄子以前常躲在那。', via: 'ask', set: ['cellar-known'] },
         ],
       },
       {
@@ -175,21 +181,18 @@ describe('存档升级', () => {
 });
 
 describe('跨场景移动与出口', () => {
-  it('不知道的场景去不了；得到线索后从入口走过去', () => {
+  it('不知道的场景去不了；得到线索后从城镇任何地点出发，离开地城要回入口', () => {
     const adv = fixture();
     const c = party(adv);
     expect(c.knownSites).toEqual(['camp']);
-    expect(visibleExits(c, adv).map((e) => e.to)).toEqual(['camp-tavern']);
     expect(() => moveParty(c, adv, 'mine-mouth')).toThrow(/还不知道/);
 
     moveParty(c, adv, 'camp-tavern');
     const fact = storyAction(c, adv, 'fact', 'mine-rumor', {});
     expect(fact.join('\n')).toContain('玩家知道了「灰岩矿坑」');
     expect(afterChange(c, adv).join()).toContain('可以进入「矿坑」');
-    expect(() => moveParty(c, adv, '灰岩矿坑')).toThrow(/先回到入口/);
-
-    moveParty(c, adv, 'camp-gate');
     expect(visibleExits(c, adv).map((e) => e.label)).toContain('前往灰岩矿坑');
+
     const r = moveParty(c, adv, '灰岩矿坑');
     expect(r.room.id).toBe('mine-mouth');
     expect(r.firstSiteVisit).toBe(true);
@@ -197,6 +200,15 @@ describe('跨场景移动与出口', () => {
     expect(summarize(c, adv)).toContain('场景：灰岩矿坑');
     // 进过矿坑之后线索算解决了
     expect(summarize(c, adv)).not.toContain('未解决的线索');
+
+    // 地城只能从入口离开；回城镇落在城镇入口
+    c.characters.forEach((ch) => { ch.room = 'mine-shaft'; });
+    c.currentRoom = 'mine-shaft';
+    c.revealed.push('mine-shaft');
+    expect(() => moveParty(c, adv, '矿镇营地')).toThrow(/先回到入口/);
+    c.characters.forEach((ch) => { ch.room = 'mine-mouth'; });
+    c.currentRoom = 'mine-mouth';
+    expect(moveParty(c, adv, '矿镇营地').room.id).toBe('camp-gate');
   });
 
   it('上锁的出口要条件满足；检定出口没过的人留在原地', () => {
@@ -224,6 +236,53 @@ describe('跨场景移动与出口', () => {
     expect(c.characters.every((ch) => ch.room === undefined)).toBe(true);
     moveParty(c, adv, 'mine-shaft', false, undefined, fixed(10));
     expect(c.characters.map((ch) => ch.room)).toEqual(['mine-shaft', 'mine-mouth']);
+  });
+});
+
+describe('城镇（hub）', () => {
+  it('自动排版、地点随便走，藏着的地点问出来之后才能去', () => {
+    const adv = fixture();
+    const camp = adv.sites[0]!;
+    expect(camp.rooms.map((r) => [r.x, r.y])).toEqual([[0, 0], [5, 0], [10, 0], [15, 0]]);
+    const c = party(adv);
+    expect(visibleExits(c, adv).map((e) => e.to)).toEqual(['camp-tavern', 'camp-shop']);
+    expect(explored(c, adv)).toMatchObject({ seen: 1, total: 3 });
+    expect(() => moveParty(c, adv, '地窖')).toThrow(/还不知道「地窖」/);
+
+    moveParty(c, adv, 'camp-shop');
+    expect(summarize(c, adv)).toContain('城镇：矿镇营地');
+    expect(summarize(c, adv)).toContain('店铺：卖 绳子、火把、口粮（单价超过 25 gp 的不卖）');
+    // 杂货铺和地窖不相邻也能直接走，前提是知道地窖
+    storyAction(c, adv, 'fact', 'cellar-hint', {});
+    expect(afterChange(c, adv)).toEqual(['玩家知道了矿镇营地的「地窖」']);
+    expect(explored(c, adv)).toMatchObject({ seen: 2, total: 4 });
+    expect(moveParty(c, adv, '地窖').room.id).toBe('camp-cellar');
+  });
+
+  it('地图画出已知地点（没去过的虚线），不画藏着的地点和通道', () => {
+    const adv = fixture();
+    const c = party(adv);
+    const svg = buildMapSvg(c, adv);
+    expect(svg).toContain('杂货铺');
+    expect(svg).toContain('stroke-dasharray="8 6"');
+    expect(svg).not.toContain('地窖');
+    // 通道那一组是空的；画布只到第三个地点（地窖那一格不画进来）
+    expect(svg).toContain('<g stroke="#b9a77c" stroke-width="6" stroke-linecap="round"></g>');
+    expect(svg).toContain('width="576"');
+    expect(svg).toContain('已探索 1/3');
+  });
+
+  it('knownWhen 只能用在城镇地点，入口不能藏', () => {
+    const base = fixture();
+    const dungeonHidden = structuredClone(base);
+    dungeonHidden.sites[1]!.rooms[1]!.knownWhen = 'alarm';
+    expect(() => validateAdventure(dungeonHidden)).toThrow(/只用于城镇/);
+    const hiddenEntry = structuredClone(base);
+    hiddenEntry.sites[0]!.rooms[0]!.knownWhen = 'alarm';
+    expect(() => validateAdventure(hiddenEntry)).toThrow(/入口不能藏/);
+    const badKind = structuredClone(base) as unknown as { sites: Array<{ kind: string }> };
+    badKind.sites[0]!.kind = 'castle';
+    expect(() => validateAdventure(badKind)).toThrow(/kind 只能/);
   });
 });
 

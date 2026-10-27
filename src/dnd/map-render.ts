@@ -8,8 +8,9 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Campaign } from './campaign.ts';
-import { partyPositions, visibleExits } from './campaign.ts';
-import { type Adventure, siteOfRoom } from './adventure.ts';
+import { explored, partyPositions, visibleExits } from './campaign.ts';
+import { type Adventure, isHub, siteOfRoom } from './adventure.ts';
+import { locationKnown } from './story.ts';
 import { type DungeonRoom, exitKey, findRoom } from './dungeon.ts';
 
 const CELL = 36;
@@ -45,14 +46,18 @@ function stubEnd(from: Box, to: Box, extra: number): { x: number; y: number } {
 
 export function buildMapSvg(c: Campaign, adv: Adventure): string {
   const dungeon = siteOfRoom(adv, c.currentRoom) ?? adv.sites[0]!;
-  const ox = Math.min(...dungeon.rooms.map((r) => r.x)) - PAD;
-  const oy = Math.min(...dungeon.rooms.map((r) => r.y)) - PAD;
-  const maxX = Math.max(...dungeon.rooms.map((r) => r.x + r.w)) + PAD;
-  const maxY = Math.max(...dungeon.rooms.map((r) => r.y + r.h)) + PAD;
+  // 城镇：画出玩家知道的所有地点（没去过的虚线框），地点之间不画通道
+  const hub = isHub(dungeon);
+  const revealed = dungeon.rooms.filter((r) => (hub ? locationKnown(c, adv, r) : c.revealed.includes(r.id)));
+  // 城镇的画布只按已知地点算，免得尺寸暴露还藏着几个地方
+  const frame = hub ? revealed : dungeon.rooms;
+  const ox = Math.min(...frame.map((r) => r.x)) - PAD;
+  const oy = Math.min(...frame.map((r) => r.y)) - PAD;
+  const maxX = Math.max(...frame.map((r) => r.x + r.w)) + PAD;
+  const maxY = Math.max(...frame.map((r) => r.y + r.h)) + PAD;
   const width = (maxX - ox) * CELL;
   const height = (maxY - oy) * CELL + TITLE_H;
-
-  const revealed = dungeon.rooms.filter((r) => c.revealed.includes(r.id));
+  const { seen, total } = explored(c, adv);
   const parts: string[] = [];
   parts.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`);
   parts.push(`<rect width="${width}" height="${height}" fill="#1b1d22"/>`);
@@ -62,12 +67,12 @@ export function buildMapSvg(c: Campaign, adv: Adventure): string {
   for (let y = TITLE_H; y <= height; y += CELL) parts.push(`<line x1="0" y1="${y}" x2="${width}" y2="${y}"/>`);
   parts.push('</g>');
   parts.push(`<text x="16" y="29" font-family="${FONT}" font-size="20" font-weight="bold" fill="#e8dcc0">${esc(dungeon.name)}</text>`);
-  parts.push(`<text x="${width - 16}" y="29" font-family="${FONT}" font-size="14" fill="#9a927f" text-anchor="end">已探索 ${revealed.length}/${dungeon.rooms.length}</text>`);
+  parts.push(`<text x="${width - 16}" y="29" font-family="${FONT}" font-size="14" fill="#9a927f" text-anchor="end">已探索 ${seen}/${total}</text>`);
 
   // 通道画在房间下面，房间盖住中心那段，只露出房间之间的部分
   const drawn = new Set<string>();
   parts.push('<g stroke="#b9a77c" stroke-width="6" stroke-linecap="round">');
-  for (const room of revealed) {
+  for (const room of hub ? [] : revealed) {
     const from = boxOf(room, ox, oy);
     for (const exit of visibleExits(c, adv, room.id)) {
       const key = exitKey(room.id, exit.to);
@@ -92,7 +97,8 @@ export function buildMapSvg(c: Campaign, adv: Adventure): string {
     const x = (room.x - ox) * CELL;
     const y = (room.y - oy) * CELL + TITLE_H;
     const current = room.id === c.currentRoom;
-    parts.push(`<rect x="${x}" y="${y}" width="${room.w * CELL}" height="${room.h * CELL}" rx="4" fill="${current ? '#e9d9a8' : '#cfc2a0'}" stroke="${current ? '#d4552f' : '#6e6146'}" stroke-width="${current ? 4 : 2}"/>`);
+    const unvisited = !c.revealed.includes(room.id) ? ' stroke-dasharray="8 6" fill-opacity="0.55"' : '';
+    parts.push(`<rect x="${x}" y="${y}" width="${room.w * CELL}" height="${room.h * CELL}" rx="4" fill="${current ? '#e9d9a8' : '#cfc2a0'}" stroke="${current ? '#d4552f' : '#6e6146'}" stroke-width="${current ? 4 : 2}"${unvisited}/>`);
     parts.push(`<text x="${x + (room.w * CELL) / 2}" y="${y + 24}" font-family="${FONT}" font-size="15" font-weight="bold" fill="#3a3122" text-anchor="middle">${esc(room.name)}</text>`);
   }
 

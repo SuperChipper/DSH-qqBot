@@ -301,6 +301,17 @@ export function afterChange(c: Campaign, adv: Adventure): string[] {
       lines.push(`玩家知道了「${site.name}」这个地方`);
     }
   }
+  for (const site of adv.sites) {
+    if (site.kind !== 'hub') continue;
+    for (const room of site.rooms) {
+      const key = `loc:${room.id}`;
+      if (room.knownWhen === undefined || c.revealed.includes(room.id) || c.announced.includes(key)) continue;
+      if (evalCondition(c, adv, room.knownWhen)) {
+        c.announced.push(key);
+        lines.push(`玩家知道了${site.name}的「${room.name}」`);
+      }
+    }
+  }
   for (const quest of adv.quests) {
     const status = c.quests[quest.id];
     if (status !== 'offered' && status !== 'active') continue;
@@ -343,6 +354,11 @@ export function roomView(c: Campaign, adv: Adventure, room: DungeonRoom): { play
   return view;
 }
 
+/** 城镇地点玩家知不知道：去过的、没写 knownWhen 的、条件满足的都算 */
+export function locationKnown(c: Campaign, adv: Adventure, room: DungeonRoom): boolean {
+  return c.revealed.includes(room.id) || room.knownWhen === undefined || evalCondition(c, adv, room.knownWhen);
+}
+
 /** 在某个房间里、没入队也没在打的具名 NPC */
 export function npcsIn(c: Campaign, adv: Adventure, roomId: string): Npc[] {
   return adv.npcs.filter((npc) => npcRoom(c, npc) === roomId && npcAlive(c, npc.id) && npcCharacter(c, npc.id) === undefined);
@@ -352,6 +368,10 @@ export function npcsIn(c: Campaign, adv: Adventure, roomId: string): Npc[] {
 export function pendingTriggers(c: Campaign, adv: Adventure, roomId: string): Trigger[] {
   const room = siteOfRoom(adv, roomId)?.rooms.find((r) => r.id === roomId);
   return (room?.triggers ?? []).filter((t) => t.once === false || !c.firedTriggers.includes(t.id));
+}
+
+export function shopLine(shop: NonNullable<DungeonRoom['shop']>): string {
+  return `卖 ${shop.sells}${shop.maxPrice !== undefined ? `（单价超过 ${shop.maxPrice} gp 的不卖）` : ''}`;
 }
 
 function short(text: string, max: number): string {
@@ -375,6 +395,10 @@ export function storySummaryLines(c: Campaign, adv: Adventure, rooms: string[]):
     .map((id) => findLead(adv, id))
     .filter((l): l is NonNullable<typeof l> => l !== undefined && (l.resolvedWhen === undefined || !evalCondition(c, adv, l.resolvedWhen)));
   if (open.length > 0) lines.push(`未解决的线索：${open.slice(-5).map((l) => short(l.text, 30)).join('；')}`);
+  for (const id of rooms) {
+    const shop = siteOfRoom(adv, id)?.rooms.find((r) => r.id === id)?.shop;
+    if (shop !== undefined) lines.push(`店铺：${shopLine(shop)}；买卖用 dnd_character 的 add_items / gp_change`);
+  }
   const pending = rooms.flatMap((r) => pendingTriggers(c, adv, r));
   if (pending.length > 0) lines.push(`这里可能发生的事件（情况吻合时 dnd_story trigger）：${pending.map((t) => `${t.id}：${t.when}`).join('；')}`);
   const flags = adv.flags.filter((f) => f.label !== undefined && c.flags.includes(f.id));
@@ -451,6 +475,8 @@ export function roomCard(c: Campaign, adv: Adventure, room: DungeonRoom): string
     `【玩家视角】${view.playerView}`,
     `【DM】${view.dmNotes}`,
   ];
+  if (room.shop !== undefined) lines.push(`店铺：${shopLine(room.shop)}`);
+  if (room.knownWhen !== undefined) lines.push(`${locationKnown(c, adv, room) ? '玩家已知' : '玩家还不知道'}这个地方（需要 ${describeCondition(adv, room.knownWhen)}）`);
   for (const t of room.triggers ?? []) {
     lines.push(`事件 ${t.id}${c.firedTriggers.includes(t.id) ? '（已触发）' : ''}：当 ${t.when}${t.requires !== undefined ? `（需要 ${describeCondition(adv, t.requires)}）` : ''} → ${t.then}`);
   }
