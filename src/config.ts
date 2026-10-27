@@ -80,6 +80,15 @@ export interface FanartConfig {
   poolDir: string;
 }
 
+export interface DndConfig {
+  /** 是否启用跑团（/dnd 命令 + dnd_* 工具） */
+  enabled: boolean;
+  /** 跑团数据目录（campaigns/ 与自定义 dungeons/）；空 = 工作目录下的 dnd/ */
+  root: string;
+  /** 轮到 PC 时发「结束回合 / 查看状态」按钮（需要机器人有消息按钮权限） */
+  turnButtons: boolean;
+}
+
 export interface NotesConfig {
   /** 是否启用共享笔记库（检索/记录工具 + 自动召回） */
   enabled: boolean;
@@ -160,6 +169,8 @@ export interface ImQQBotConfig {
   notes: NotesConfig;
   /** 搜图工具（qqbot_fanart_pick） */
   fanart: FanartConfig;
+  /** 跑团（/dnd + dnd_* 工具） */
+  dnd: DndConfig;
 }
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -201,6 +212,13 @@ export const FanartSchema: Schema<FanartConfig> = Schema.object({
   enabled: Schema.boolean().default(true).description('是否启用 qqbot_fanart_pick 搜图工具'),
   proxy: Schema.string().default('').description('pixiv/safebooru 用的 HTTP 代理（空=HTTPS_PROXY 或系统代理）'),
   poolDir: Schema.string().default('').description('CP 池目录（空=插件根目录/scripts）'),
+});
+
+/** 跑团子 Schema */
+export const DndSchema: Schema<DndConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否启用跑团（/dnd 命令与 dnd_* 工具）'),
+  root: Schema.string().default('').description('跑团数据目录（空=工作目录/dnd）'),
+  turnButtons: Schema.boolean().default(true).description('轮到玩家时发「结束回合 / 查看状态」按钮'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -294,4 +312,9 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     proxy: '',
     poolDir: '',
   }).description('搜图工具配置'),
+  dnd: DndSchema.default({
+    enabled: true,
+    root: '',
+    turnButtons: true,
+  }).description('跑团配置'),
 });

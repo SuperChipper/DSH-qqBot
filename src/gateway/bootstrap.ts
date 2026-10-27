@@ -29,7 +29,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { MEDIA_ROOT, startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerSendFileTool, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { registerSendFileTool, withFreshReplyTarget, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
@@ -40,20 +40,28 @@ import { registerNotesTools } from '../notes/notes-tools.ts';
 import { registerFanartPickTool } from '../fanart/fanart-tool.ts';
 import { createHttpGet } from '../fanart/http.ts';
 import { FanartSeenStore, markSentCandidate } from '../fanart/seen.ts';
+import { CampaignStore } from '../dnd/campaign.ts';
+import { DungeonLibrary } from '../dnd/dungeon.ts';
+import { DndService } from '../dnd/dnd-service.ts';
+import { registerDndTools } from '../dnd/dnd-tools.ts';
+import { ACK, DndTurnButtons } from '../dnd/turn-buttons.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
  * channel（question / approval）。QQ 只有一个 interaction 入口，集中路由
  * 避免多通道各自 try 导致误判。
  */
-function dispatchInteraction(event: InteractionEvent, manager: SessionManager): boolean {
+function dispatchInteraction(event: InteractionEvent, manager: SessionManager, dndButtons?: DndTurnButtons): number {
   const raw = event.data?.resolved?.button_data;
-  if (!raw) return false;
+  if (!raw) return ACK.duplicate;
   const button = decodeButtonData(raw);
-  if (!button) return false;
-  if (button.t === 'question') return manager.questionChannel?.handleInteraction(event) ?? false;
-  if (button.t === 'approval') return manager.approvalChannel?.handleInteraction(event) ?? false;
-  return false;
+  if (!button) return ACK.duplicate;
+  // 跑团按钮自己决定返回码：不是本人点「结束回合」时回 denied，QQ 会弹无权限提示
+  if (button.t === 'dnd') return dndButtons?.handleInteraction(event) ?? ACK.duplicate;
+  const matched = button.t === 'question'
+    ? manager.questionChannel?.handleInteraction(event) ?? false
+    : manager.approvalChannel?.handleInteraction(event) ?? false;
+  return matched ? ACK.ok : ACK.duplicate;
 }
 
 /** 解析表情包目录与允许来源，构建 StickerStore（关闭时返回 undefined） */
@@ -106,6 +114,23 @@ function createNotesStore(config: ImQQBotConfig, logger: Logger): NotesStore | u
   return new NotesStore(root, logger);
 }
 
+/** 解析跑团目录，构建 DndService（关闭时返回 undefined）；数据放在 agent 工作目录下，不进插件仓库 */
+function createDndService(config: ImQQBotConfig, logger: Logger): DndService | undefined {
+  const dnd = config.dnd;
+  if (dnd === undefined || !dnd.enabled) return undefined;
+  const cwd = config.cwd || process.cwd();
+  const configuredRoot = dnd.root.trim();
+  const root = configuredRoot === ''
+    ? resolve(cwd, 'dnd')
+    : (isAbsolute(configuredRoot) ? configuredRoot : resolve(cwd, configuredRoot));
+  logger.info(`im-qqbot: 跑团已启用 root=${root}`);
+  return new DndService({
+    store: new CampaignStore(join(root, 'campaigns')),
+    library: new DungeonLibrary(join(root, 'dungeons'), logger),
+    mapDir: join(resolveTmpDir(config), 'dnd-maps'),
+  });
+}
+
 export async function bootstrapGateway(
   ctx: Context,
   agents: DshAgentRegistry,
@@ -126,6 +151,10 @@ export async function bootstrapGateway(
   // ── 共享笔记库（工具 + 自动召回共用） ──
   const notesStore = createNotesStore(config, logger);
   manager.notesStore = notesStore;
+
+  // ── 跑团（/dnd 命令、DM prompt 注入、dnd_* 工具共用） ──
+  const dndService = createDndService(config, logger);
+  manager.dndService = dndService;
 
   // ── 初始化 QQ Bot SDK ──
   const userAgent = buildUserAgent();
@@ -207,6 +236,11 @@ export async function bootstrapGateway(
   approvalChannel.install(ctx as unknown as ApprovalChannelContext);
 
   // ── 按钮点击回调（interaction）：统一分发到问答/审批通道 ──
+  // ── 跑团回合按钮（轮到 PC 时发「结束回合 / 查看状态」，点击者身份由 QQ 回调决定） ──
+  const dndButtons = dndService !== undefined && config.dnd?.turnButtons !== false
+    ? new DndTurnButtons(dndService, manager, sender, logger)
+    : undefined;
+
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
     // scope/targetId 推导对齐消息事件（inbound.ts）：按 scene 判定类型，群用 group_openid，私聊用 user_openid
     const scope: ChatScope = event.scene === 'group' ? 'group' : 'c2c';
@@ -214,8 +248,8 @@ export async function bootstrapGateway(
     // 记录互动事件 id，作为后续被动回复候选（event_id）
     cacheEventId(scope, targetId, event.id);
 
-    const matched = dispatchInteraction(event, manager);
-    await bot.acknowledgeInteraction(event.id, matched ? 0 : 3).catch(() => {});
+    const code = dispatchInteraction(event, manager, dndButtons);
+    await bot.acknowledgeInteraction(event.id, code).catch(() => {});
   });
 
   bot.on('error', (err: unknown) => {
@@ -324,6 +358,23 @@ export async function bootstrapGateway(
   // ── 共享笔记工具注册（qqbot_notes_search / qqbot_notes_save） ──
   if (notesStore !== undefined) {
     registerNotesTools(ctx, notesStore, manager, logger);
+  }
+
+  // ── 跑团工具注册（dnd_*） ──
+  if (dndService !== undefined) {
+    registerDndTools(ctx, {
+      service: dndService,
+      manager,
+      logger,
+      sendImage: async (record, path, caption) => {
+        await mediaSender.sendImage(
+          withFreshReplyTarget(record.replyTarget),
+          { localPath: path },
+          caption !== undefined ? { content: caption } : undefined,
+        );
+      },
+      onTurnChange: (record) => dndButtons?.schedule(record),
+    });
   }
 
   // ── 桌宠余额：自定义 deepseek-native 不在 dsh-pet 内置表里，补一个同接口 provider ──

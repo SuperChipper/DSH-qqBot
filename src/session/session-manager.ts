@@ -25,6 +25,7 @@ import { IdleEvictor } from './idle-evictor.ts';
 import { resolveSessionCwd } from '../shared/file-access.ts';
 import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts';
 import { formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
+import type { DndService } from '../dnd/dnd-service.ts';
 import { resolveTmpDir } from '../media/tmp-dir.ts';
 import { join } from 'node:path';
 import {
@@ -81,6 +82,20 @@ interface AssembledPrompt {
   [key: string]: unknown;
 }
 
+const RECENT_SENDERS_MAX = 12;
+
+function noteSender(record: SessionRecord, senderId: string): void {
+  const list = record.recentSenders ?? [];
+  list.push({ id: senderId, at: Date.now() });
+  if (list.length > RECENT_SENDERS_MAX) list.splice(0, list.length - RECENT_SENDERS_MAX);
+  record.recentSenders = list;
+}
+
+/** windowMs 内给这个会话发过消息的人 */
+export function recentSenderIds(record: SessionRecord, windowMs: number, now = Date.now()): string[] {
+  return [...new Set((record.recentSenders ?? []).filter((s) => now - s.at <= windowMs).map((s) => s.id))];
+}
+
 export class SessionManager {
   private sessions = new Map<string, SessionRecord>();
   /** 发送失败（常见于群主动消息无权限）的文本，等下一次用户消息时补发 */
@@ -103,6 +118,8 @@ export class SessionManager {
   public stickerStore?: StickerStore;
   /** 由 bootstrap 注入的共享笔记库（工具 + 自动召回） */
   public notesStore?: NotesStore;
+  /** 由 bootstrap 注入的跑团服务（/dnd 命令 + DM prompt 注入） */
+  public dndService?: DndService;
 
   constructor(
     ctx: Context,
@@ -191,8 +208,18 @@ export class SessionManager {
             '你有一个所有群和私聊共享的笔记库，是你的长期记忆。消息前出现「[共享笔记 · 可能相关]」时，是按这条消息自动检索到的片段，相关就自然地用上，不相关就忽略，别生硬复述。',
             '想不起来但可能记过的东西，用 qqbot_notes_search 查；看完/学到/群里沉淀下来值得长期记住的，用 qqbot_notes_save 记下（提炼后再记，别记隐私和闲聊）。',
             '记笔记是你自己的事，不用每次都告诉用户「我记下了」。',
+            '另外有一本《人类观察日记》，所有群和私聊共用：遇到人类的回复和你预测的不一样，就往里追加一条，用 qqbot_notes_save(file="人类观察日记.md")，格式固定「预测 / 实际 / 差在哪」，编号取文末最后一个 +1。只记判断失误，不记流水账。',
           ].join('\n'),
         });
+      }
+
+      // 跑团：开团的会话每回合注入 DM 守则 + 精简团况（不注入整份 campaign JSON）
+      if (this.dndService !== undefined) {
+        try {
+          sections.push(...this.dndService.promptSections(record.sessionKey));
+        } catch (err) {
+          this.logger.warn(`im-qqbot: 注入团况失败: ${err instanceof Error ? err.message : String(err)}`);
+        }
       }
 
       // 临时文件集中放 tmp/：不提示的话模型会把脚本、截图、抽帧直接写在工作目录根下
@@ -651,7 +678,7 @@ export class SessionManager {
 
   // ── Session 生命周期管理 ──
 
-  private sessionKey(scope: ChatScope, peerId: string): string {
+  sessionKey(scope: ChatScope, peerId: string): string {
     return `qqbot:${this.config.appId}:${scope}:${peerId}`;
   }
 
@@ -691,6 +718,11 @@ export class SessionManager {
     }
   }
 
+  /** 记一个发过消息的人（合并消息里除触发者以外的发送者） */
+  noteSender(record: SessionRecord, senderId: string): void {
+    noteSender(record, senderId);
+  }
+
   /** 获取或恢复或创建会话（get → resume → create） */
   async getOrCreate(
     scope: ChatScope,
@@ -704,6 +736,7 @@ export class SessionManager {
     if (existing) {
       existing.replyTarget = replyTarget;
       existing.lastActivity = Date.now();
+      noteSender(existing, senderId);
       return existing;
     }
 
@@ -763,6 +796,7 @@ export class SessionManager {
       lastActivity: Date.now(),
       agentPreset,
     };
+    noteSender(record, senderId);
 
     this.sessions.set(key, record);
     return record;

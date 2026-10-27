@@ -34,7 +34,15 @@ export interface ApprovalButtonData {
   d: 'allow' | 'deny';
 }
 
-export type ButtonData = QuestionButtonData | ApprovalButtonData;
+/** 跑团回合按钮：a=动作，n=角色名，r=轮次（防止点到过期的旧按钮） */
+export interface DndButtonData {
+  t: 'dnd';
+  a: 'end' | 'status';
+  n?: string;
+  r?: number;
+}
+
+export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData;
 
 /** 编码 button_data（JSON 字符串） */
 export function encodeButtonData(data: ButtonData): string {
@@ -45,7 +53,7 @@ export function encodeButtonData(data: ButtonData): string {
 export function decodeButtonData(raw: string): ButtonData | undefined {
   try {
     const parsed = JSON.parse(raw) as Partial<ButtonData>;
-    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval')) {
+    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd')) {
       return parsed as ButtonData;
     }
   } catch {

@@ -24,7 +24,7 @@ import { replyWindowMs } from '../transport/msgid-cache.ts';
  * 会话里保存的 replyTarget 是上一条入站消息的 msg_id；定时任务或长时间空闲后
  * 该 id 早已超出 QQ 的被动回复窗口，直接发送会收到「回复消息msg_id已过期」。
  */
-function withFreshReplyTarget(target: ReplyTarget): ReplyTarget {
+export function withFreshReplyTarget(target: ReplyTarget): ReplyTarget {
   if (target.scope !== 'group' || target.msgId === undefined) return target;
   const age = target.receivedAt === undefined ? 0 : Date.now() - target.receivedAt;
   return age >= replyWindowMs('group') ? { ...target, msgId: undefined } : target;

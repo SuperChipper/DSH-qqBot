@@ -22,6 +22,9 @@ cordis.dev.yml
 /stickers/
 # 共享笔记默认在 agent cwd/notes；未配置 cwd 时也不要把笔记提交/打包
 /notes/
+# 跑团数据（团的状态、快照、自定义地城）与 agent 临时目录，同样默认在 cwd 下
+/dnd/
+/tmp/
 
 # ── 日志 / 系统 / 编辑器 ──
 *.log

@@ -79,6 +79,8 @@ interface MiddlewareState {
   processedAttachments?: ProcessedAttachment[];
   downloadedFiles?: DownloadedFile[];
   downloadedQuoteFiles?: DownloadedFile[];
+  /** concurrencyGuard 合并多条消息时的全部发送者（见 mergeWithSenders） */
+  mergedSenders?: string[];
   [key: string]: unknown;
 }
 
@@ -152,6 +154,10 @@ export async function handleInbound(
   let record;
   try {
     record = await manager.getOrCreate(scope, peerId, msg.senderId, replyTarget);
+    // 排队合并进来的其他人也算这段时间说过话（跑团的 declared_by 校验要用）
+    for (const id of mwState.mergedSenders ?? []) {
+      if (id !== msg.senderId) manager.noteSender(record, id);
+    }
   } catch (err) {
     logger.error(`ERROR creating session: ${err instanceof Error ? err.message : String(err)}`);
     // 兜底回复：会话创建失败时告知用户，避免静默无响应

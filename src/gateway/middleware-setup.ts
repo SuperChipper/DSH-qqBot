@@ -4,7 +4,7 @@
  * 根据插件配置组装 SDK 内置中间件链（洋葱模型）。
  * 中间件负责过滤与上下文富化；最终消息统一由 bot.on('message') 处理转发。
  */
-import type { QQBot } from '@tencent-connect/qqbot-nodejs';
+import type { MiddlewareContext, QQBot } from '@tencent-connect/qqbot-nodejs';
 import {
   errorHandler,
   messageFilter,
@@ -29,6 +29,26 @@ import { questionAnswer } from '../middleware/question-answer.ts';
 import { accessPolicyFromConfig } from '../shared/permissions.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { appendGroupMessage } from '../features/group-memory.ts';
+
+/**
+ * 排队消息合并：SDK 默认把几条内容直接拼起来、全算在第一条的发送者头上，
+ * 群里几个人连着 @ 时，别人的话会被当成第一个人说的（跑团里就成了替别人宣告行动）。
+ * 这里给不是第一个发送者的行加上「[昵称 (openid)]」，并把所有发送者记到 state.mergedSenders。
+ */
+export function mergeWithSenders(buffered: MiddlewareContext[]): MiddlewareContext {
+  const first = buffered[0]!;
+  if (buffered.length === 1) return first;
+  const withContent = buffered.filter((ctx) => (ctx.message.content ?? '') !== '');
+  const lines = withContent.map((ctx) => {
+    const { senderId, senderName, content } = ctx.message as { senderId: string; senderName?: string; content?: string };
+    return senderId === first.message.senderId ? String(content) : `[${senderName ?? senderId} (${senderId})] ${String(content)}`;
+  });
+  if (lines.length > 0) (first.message as { content: string }).content = lines.join('\n');
+  const attachments = withContent.flatMap((ctx) => (ctx.message as { attachments?: unknown[] }).attachments ?? []);
+  if (attachments.length > 0) (first.message as { attachments?: unknown[] }).attachments = attachments;
+  first.state.mergedSenders = [...new Set(buffered.map((ctx) => ctx.message.senderId))];
+  return first;
+}
 
 export function setupMiddlewares(
   bot: QQBot,
@@ -93,7 +113,10 @@ export function setupMiddlewares(
     isImplicitMention: (ctx) => {
       if (ctx.message.kind !== 'group') return false;
       const p = config.groupReplyProbability ?? 0;
-      return p > 0 && Math.random() < p;
+      if (!(p > 0 && Math.random() < p)) return false;
+      // 跑团期间不随机冒泡：没 @ 的消息是闲聊，被当成行动宣告会让 DM 越界
+      const groupId = ctx.message.groupOpenid;
+      return groupId === undefined || manager.dndService?.active(manager.sessionKey('group', groupId)) === undefined;
     },
   }));
 
@@ -122,6 +145,7 @@ export function setupMiddlewares(
     strategy: 'merge',
     maxQueue: config.maxQueue,
     maxProcessingMs: config.processingTimeoutMs,
+    onMerge: mergeWithSenders,
   }));
 
   // 10. C2C 输入状态指示

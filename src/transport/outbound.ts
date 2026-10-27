@@ -14,6 +14,7 @@ import { captionFromArgs, stripCaptionEcho } from './caption-echo.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
+import { DND_TOOL_PREFIX } from '../dnd/dnd-tools.ts';
 import {
   parseEvent,
   extractTurnError,
@@ -234,6 +235,8 @@ class OutboundRouter {
     }
 
     if (event.error === undefined && !this.config.showToolResults) return;
+    // 跑团工具结果里有 DC、怪物数值和 DM 笔记：无论开关都不发到聊天里
+    if (call.name.startsWith(DND_TOOL_PREFIX)) return;
     // 群聊不刷工具报错：模型通常会自己换路子（如 web_fetch 被拦后改用 web_search），
     // 报错原文对群友只是噪音；私聊照常展示便于主人排查，开了 showToolResults 时群聊也展示。
     if (event.error !== undefined && record.replyTarget.scope === 'group' && !this.config.showToolResults) {

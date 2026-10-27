@@ -138,6 +138,8 @@ export interface SessionRecord {
   contextTokens?: number;
   /** 自动压缩进行中（防重入） */
   compacting?: boolean;
+  /** 最近把消息送进这个会话的发送者（新→旧追加在末尾），跑团工具据此核对「谁宣告的行动」 */
+  recentSenders?: Array<{ id: string; at: number }>;
 }
 
 /** 会话状态信息（/status 用） */
