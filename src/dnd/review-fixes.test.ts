@@ -20,13 +20,15 @@ import {
   useResource,
   woundLabel,
 } from './campaign.ts';
-import { DungeonLibrary } from './dungeon.ts';
 import { DndService } from './dnd-service.ts';
 import { srdMonsterInput } from './dnd-tools.ts';
 import { ACK, DndTurnButtons, buildTurnKeyboard } from './turn-buttons.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
+import { AdventureLibrary, adventureFromDungeon } from './adventure.ts';
 import { mergeWithSenders } from '../gateway/middleware-setup.ts';
 import { encodeButtonData } from '../features/button-utils.ts';
+
+const BELL = adventureFromDungeon(SUNKEN_BELL);
 
 function fixed(...values: number[]): Roller {
   let i = 0;
@@ -34,7 +36,7 @@ function fixed(...values: number[]): Roller {
 }
 
 function trio() {
-  const c = createCampaign('group:abc', SUNKEN_BELL);
+  const c = createCampaign('group:abc', BELL);
   upsertCharacter(c, { name: '刻德温 Kodwin', player: '玩家甲', playerId: 'P1', abilities: { con: 14 }, maxHp: 10, ac: 18 });
   upsertCharacter(c, { name: '恩佐', player: '玩家乙', playerId: 'P2', abilities: { dex: 16 }, maxHp: 10, ac: 14 });
   upsertCharacter(c, { name: '卡厄斯', player: '玩家丙', playerId: 'P3', abilities: { str: 16 }, maxHp: 12, ac: 16 });
@@ -54,8 +56,8 @@ describe('找角色', () => {
 describe('分头行动', () => {
   it('who 只移动说了要走的人，其他人留在原地', () => {
     const c = trio();
-    moveParty(c, SUNKEN_BELL, 'nave');
-    const r = moveParty(c, SUNKEN_BELL, 'vestry', false, ['恩佐']);
+    moveParty(c, BELL, 'nave');
+    const r = moveParty(c, BELL, 'vestry', false, ['恩佐']);
     expect(r.movers).toEqual(['恩佐']);
     expect(c.currentRoom).toBe('nave'); // 两个人还在残殿，主位置不变
     expect(findCharacter(c, '恩佐')?.room).toBe('vestry');
@@ -66,22 +68,22 @@ describe('分头行动', () => {
 
   it('不同房间的人不能一起移动；战斗中只能移动当前回合的角色', () => {
     const c = trio();
-    moveParty(c, SUNKEN_BELL, 'nave');
-    moveParty(c, SUNKEN_BELL, 'vestry', false, ['恩佐']);
-    expect(() => moveParty(c, SUNKEN_BELL, 'bellshaft', false, ['恩佐', '卡厄斯'])).toThrow(/不同房间/);
+    moveParty(c, BELL, 'nave');
+    moveParty(c, BELL, 'vestry', false, ['恩佐']);
+    expect(() => moveParty(c, BELL, 'bellshaft', false, ['恩佐', '卡厄斯'])).toThrow(/不同房间/);
 
     startInitiative(c, fixed(10), ['卡厄斯', '刻德温 Kodwin']);
     const current = c.initiative!.order[0]!.name;
     const other = current === '卡厄斯' ? '刻德温 Kodwin' : '卡厄斯';
-    expect(() => moveParty(c, SUNKEN_BELL, 'bellshaft')).toThrow(/战斗中不能整队移动/);
-    expect(() => moveParty(c, SUNKEN_BELL, 'bellshaft', false, [other])).toThrow(/当前回合/);
-    expect(() => moveParty(c, SUNKEN_BELL, 'bellshaft', false, [current])).not.toThrow();
+    expect(() => moveParty(c, BELL, 'bellshaft')).toThrow(/战斗中不能整队移动/);
+    expect(() => moveParty(c, BELL, 'bellshaft', false, [other])).toThrow(/当前回合/);
+    expect(() => moveParty(c, BELL, 'bellshaft', false, [current])).not.toThrow();
   });
 
   it('先攻默认只拉在场的人，room 可以指定打架的房间', () => {
     const c = trio();
-    moveParty(c, SUNKEN_BELL, 'nave');
-    moveParty(c, SUNKEN_BELL, 'vestry', false, ['恩佐']);
+    moveParty(c, BELL, 'nave');
+    moveParty(c, BELL, 'vestry', false, ['恩佐']);
     const rolls = startInitiative(c, fixed(10), undefined, 'vestry');
     const names = rolls.map((r) => r.name);
     expect(names).toContain('恩佐');
@@ -130,7 +132,7 @@ describe('怪物特性与伤势', () => {
     const change = applyDamage(c, '地精', 6);
     expect(change.wound).toBe('摇摇欲坠');
     expect(woundLabel(findCharacter(c, '地精')!)).toBe('摇摇欲坠');
-    const view = playerStatus(c, SUNKEN_BELL);
+    const view = playerStatus(c, BELL);
     expect(view).toContain('地精（摇摇欲坠）');
     expect(view).not.toMatch(/地精\s*\d+\/7/);
   });
@@ -201,7 +203,7 @@ describe('合并消息保留发送者', () => {
 describe('回合按钮', () => {
   function setup() {
     const root = mkdtempSync(join(tmpdir(), 'dnd-buttons-'));
-    const service = new DndService({ store: new CampaignStore(join(root, 'campaigns')), library: new DungeonLibrary(), mapDir: root });
+    const service = new DndService({ store: new CampaignStore(join(root, 'campaigns')), library: new AdventureLibrary(), mapDir: root });
     const key = 'group:G1';
     service.start(key, 'sunken-bell', false);
     service.store.update(key, (c) => {

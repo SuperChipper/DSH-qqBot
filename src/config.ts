@@ -83,7 +83,7 @@ export interface FanartConfig {
 export interface DndConfig {
   /** 是否启用跑团（/dnd 命令 + dnd_* 工具） */
   enabled: boolean;
-  /** 跑团数据目录（campaigns/ 与自定义 dungeons/）；空 = 工作目录下的 dnd/ */
+  /** 跑团数据目录（campaigns/、自定义 dungeons/ 与 adventures/）；空 = 工作目录下的 dnd/ */
   root: string;
   /** 轮到 PC 时发「结束回合 / 查看状态」按钮（需要机器人有消息按钮权限） */
   turnButtons: boolean;

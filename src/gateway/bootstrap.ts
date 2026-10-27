@@ -41,7 +41,7 @@ import { registerFanartPickTool } from '../fanart/fanart-tool.ts';
 import { createHttpGet } from '../fanart/http.ts';
 import { FanartSeenStore, markSentCandidate } from '../fanart/seen.ts';
 import { CampaignStore } from '../dnd/campaign.ts';
-import { DungeonLibrary } from '../dnd/dungeon.ts';
+import { AdventureLibrary } from '../dnd/adventure.ts';
 import { DndService } from '../dnd/dnd-service.ts';
 import { registerDndTools } from '../dnd/dnd-tools.ts';
 import { ACK, DndTurnButtons } from '../dnd/turn-buttons.ts';
@@ -126,7 +126,7 @@ function createDndService(config: ImQQBotConfig, logger: Logger): DndService | u
   logger.info(`im-qqbot: 跑团已启用 root=${root}`);
   return new DndService({
     store: new CampaignStore(join(root, 'campaigns')),
-    library: new DungeonLibrary(join(root, 'dungeons'), logger),
+    library: new AdventureLibrary({ dungeons: join(root, 'dungeons'), adventures: join(root, 'adventures') }, logger),
     mapDir: join(resolveTmpDir(config), 'dnd-maps'),
   });
 }

@@ -135,7 +135,7 @@ export class DndTurnButtons {
 
     if (button.a === 'status') {
       if (record !== undefined) {
-        void this.sender.sendMarkdown(record.replyTarget, `🎲 ${found.dungeon.name}\n${playerStatus(found.campaign, found.dungeon)}`)
+        void this.sender.sendMarkdown(record.replyTarget, `🎲 ${found.adventure.name}\n${playerStatus(found.campaign, found.adventure)}`)
           .catch((err: unknown) => this.logger.warn(`im-qqbot: 跑团状态发送失败: ${err instanceof Error ? err.message : String(err)}`));
       }
       return ACK.ok;

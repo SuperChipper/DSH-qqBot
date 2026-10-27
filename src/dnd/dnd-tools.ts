@@ -1,5 +1,5 @@
 /**
- * dnd_* 跑团工具：骰子、检定、伤害/治疗/状态、角色卡、先攻、移动、地图、结团、SRD 查询。
+ * dnd_* 跑团工具：骰子、检定、伤害/治疗/状态、角色卡、先攻、移动、地图、剧情、模组查询、结团、SRD 查询。
  *
  * 工具结果只给模型看（showToolResults 对 dnd_* 永远不展示），DM 机密留在这里，
  * 由模型决定哪些说给玩家。团按会话 key 区分：每个群一份。
@@ -10,6 +10,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { DshAgent, SessionManager, SessionRecord } from '../session/index.ts';
 import { recentSenderIds } from '../session/session-manager.ts';
 import type { Logger } from '../types.ts';
+import { ATTITUDES, type Adventure, type Attitude, QUEST_STATUSES, type QuestStatus, findNpc, findQuest, roomGraph } from './adventure.ts';
 import { type Advantage, rollD20, rollExpression } from './dice.ts';
 import {
   type Campaign,
@@ -28,6 +29,7 @@ import {
   checkModifier,
   deathSave,
   endInitiative,
+  explored,
   findCharacter,
   findWeapon,
   gotoTurn,
@@ -36,6 +38,7 @@ import {
   moveParty,
   nextTurn,
   partyPositions,
+  pushLog,
   recordDeathFailures,
   removeCharacter,
   requireCharacter,
@@ -44,6 +47,7 @@ import {
   restoreResource,
   roomOf,
   setResource,
+  spawnMonsters,
   startInitiative,
   summarize,
   upsertCharacter,
@@ -54,6 +58,27 @@ import {
 import type { DndService } from './dnd-service.ts';
 import { findRoom, resolveRoom } from './dungeon.ts';
 import { renderMapPng } from './map-render.ts';
+import {
+  type NpcState,
+  afterChange,
+  fireTrigger,
+  leadsCard,
+  learnLead,
+  npcAlive,
+  npcCard,
+  npcCharacterInput,
+  npcRoom,
+  npcsIn,
+  pendingTriggers,
+  questCard,
+  revealFact,
+  roomCard,
+  setChapter,
+  setFlag,
+  setQuestStatus,
+  siteCard,
+  updateNpc,
+} from './story.ts';
 import { ABILITIES, ABILITY_NAMES, type Ability, type Skill, SKILLS, parseAbility, parseSkill, skillLabel } from './rules.ts';
 
 export const DND_TOOL_PREFIX = 'dnd_';
@@ -193,11 +218,19 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     return record;
   };
 
-  /** 读写当前会话的团；fn 抛错时不落盘 */
-  const mutate = <T>(exec: Exec, fn: (c: Campaign, dungeon: ReturnType<DndService['require']>['dungeon']) => T): T => {
+  /**
+   * 读写当前会话的团；fn 抛错时不落盘。
+   * 每次改动后统一跑一遍 afterChange（任务达成、里程碑…），有提示就接在文字结果后面。
+   */
+  const mutate = <T>(exec: Exec, fn: (c: Campaign, adventure: Adventure) => T): T => {
     const key = recordOf(exec).sessionKey;
-    const { dungeon } = service.require(key);
-    return service.store.update(key, (c) => fn(c, dungeon), exec.label);
+    const { adventure } = service.require(key);
+    return service.store.update(key, (c) => {
+      const result = fn(c, adventure);
+      const story = afterChange(c, adventure);
+      for (const line of story) pushLog(c, line);
+      return (story.length > 0 && typeof result === 'string' ? `${result}\n【剧情】${story.join('；')}` : result) as T;
+    }, exec.label);
   };
 
   const sendersOf = (exec: Exec): string[] => recentSenderIds(recordOf(exec), SENDER_WINDOW_MS);
@@ -587,7 +620,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       dm_override: { type: 'boolean', description: 'For next: skip an absent player\'s turn. Say so in the reply.' },
     },
     ['action'],
-    (args, exec) => mutate(exec, (c, dungeon) => {
+    (args, exec) => mutate(exec, (c, adventure) => {
       const action = String(args.action);
       // 指针落到 PC 时，本轮回复发完后给他发「结束回合」按钮
       const turnChanged = (): void => {
@@ -596,7 +629,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       if (action === 'start') {
         if (c.initiative !== undefined) throw new Error('已经在战斗中了，用 next 推进或 end 结束');
         const roomArg = str(args.room);
-        const room = roomArg === undefined ? undefined : resolveRoom(dungeon, roomArg)?.id;
+        const room = roomArg === undefined ? undefined : resolveRoom(roomGraph(adventure), roomArg)?.id;
         if (roomArg !== undefined && room === undefined) throw new Error(`没有这个房间: ${roomArg}`);
         const rolls = startInitiative(c, service.roller, strList(args.participants), room);
         turnChanged();
@@ -628,30 +661,106 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     + '(scouting, sneaking, fetching something) pass `who` so the others stay put. Returns the player-facing '
     + 'description (narrate from this) and DM-only notes (use for rulings, never read aloud). First visit reveals '
     + 'the room and spawns its monsters. In combat only the current-turn character can move (with `who`). '
-    + 'Pass discover_hidden=true only after a successful check found a secret passage.',
+    + 'Pass discover_hidden=true only after a successful check found a secret passage. Exits that need a check '
+    + '(climbing, swimming) are rolled by the tool for each mover; those who fail stay behind. From a site\'s entry '
+    + 'you can travel to another known site by its name or id.',
     {
-      room: { type: 'string', description: 'Room id or name.' },
+      room: { type: 'string', description: 'Room id or name, or another site\'s id/name (from that site\'s entry).' },
       who: { type: 'array', items: { type: 'string' }, description: 'Characters who move; omit for the whole party.' },
       discover_hidden: { type: 'boolean' },
     },
     ['room'],
-    (args, exec) => mutate(exec, (c, dungeon) => {
-      const result = moveParty(c, dungeon, String(args.room ?? ''), args.discover_hidden === true, strList(args.who));
-      const lines = [
-        `${strList(args.who)?.length ? result.movers.join('、') : '队伍'}进入「${result.room.name}」${result.firstVisit ? '（首次）' : ''}`,
-        `【玩家视角，可以描述】${result.room.playerView}`,
-        `【DM 机密，勿念】${result.room.dmNotes}`,
-      ];
+    (args, exec) => mutate(exec, (c, adventure) => {
+      const result = moveParty(c, adventure, String(args.room ?? ''), args.discover_hidden === true, strList(args.who), service.roller);
+      const lines: string[] = [];
+      if (result.checks.length > 0) {
+        lines.push(`出口检定：${result.checks.map((r) => `${r.name} ${r.detail}`).join('；')}`);
+        if (result.failText !== undefined) lines.push(`【DM】没过的人留在原地，后果：${result.failText}（伤害用 dnd_apply）`);
+      }
+      if (result.movers.length === 0) {
+        lines.push('没有人过去。');
+      } else {
+        const someStayed = result.checks.some((r) => !r.passed);
+        lines.push(`${strList(args.who)?.length || someStayed ? result.movers.join('、') : '队伍'}进入「${result.room.name}」${result.firstVisit ? '（首次）' : ''}`);
+        if (result.firstSiteVisit && result.site.arrival) lines.push(`【抵达「${result.site.name}」，可以念】${result.site.arrival}`);
+        if (result.firstSiteVisit && result.site.features) lines.push(`【DM】「${result.site.name}」通用规则：${result.site.features}`);
+        lines.push(`【玩家视角，可以描述】${result.view.playerView}`, `【DM 机密，勿念】${result.view.dmNotes}`);
+      }
       if (result.spawned.length > 0) {
         lines.push(`【DM 机密】本房间敌人：${result.spawned.map((m) => `${m.name} HP${m.hp} AC${m.ac} 命中+${m.attackBonus} 伤害${m.damage}${m.notes ? `（${m.notes}）` : ''}`).join('；')}`);
       }
-      lines.push(`可见出口：${result.exits.map((e) => `${e.label} → ${e.known ? e.name : '未探索'}(${e.to})`).join('；') || '无'}`);
+      if (result.movers.length > 0) {
+        const npcs = npcsIn(c, adventure, result.room.id);
+        if (npcs.length > 0) lines.push(`【DM】这里的 NPC（dnd_lookup npc 看详情）：${npcs.map((n) => `${n.name}(${n.id})：${n.look}`).join('；')}`);
+        const pending = pendingTriggers(c, adventure, result.room.id);
+        if (pending.length > 0) lines.push(`【DM】这里可能发生（吻合时 dnd_story trigger）：${pending.map((t) => `${t.id}：${t.when}`).join('；')}`);
+      }
+      lines.push(`可见出口：${result.exits.map((e) => `${e.label} → ${e.known ? e.name : '未探索'}(${e.to})${e.locked === true ? '[暂时过不去]' : ''}`).join('；') || '无'}`);
       const positions = partyPositions(c);
       if (positions.size > 1) {
-        lines.push(`队伍现在分开了：${[...positions].map(([room, members]) => `${findRoom(dungeon, room)?.name ?? room}：${members.map((ch) => ch.name).join('、')}`).join('｜')}。没来的人看不到这里，别替他们行动。`);
+        lines.push(`队伍现在分开了：${[...positions].map(([room, members]) => `${findRoom(roomGraph(adventure), room)?.name ?? room}：${members.map((ch) => ch.name).join('、')}`).join('｜')}。没来的人看不到这里，别替他们行动。`);
       }
+      if (result.story.length > 0) lines.push(`【剧情】${result.story.join('；')}`);
       return lines.join('\n');
     }),
+  );
+
+  register(
+    'dnd_story',
+    'Change story state written into the adventure, by id (ids come from 【团况】 and dnd_lookup). '
+    + 'trigger: an event listed as "可能发生" now happens (applies its flags, leads, reinforcements). '
+    + 'fact: an NPC or captive reveals a piece of information (checks with a DC: dnd_check first, then passed=true); '
+    + 'say only what the tool returns. lead: players learn a lead. flag: set/clear a declared flag. '
+    + 'quest: offered/active/completed/rewarded/failed (rewarded pays gp/items to `to`). '
+    + 'npc: attitude/room/met, or join=true (joins the party) / fight=true (fights the party), which creates the '
+    + 'character sheet. chapter: move to another chapter.',
+    {
+      action: { type: 'string', enum: ['trigger', 'fact', 'lead', 'flag', 'quest', 'npc', 'chapter'] },
+      id: { type: 'string', description: 'Trigger / fact / lead / flag / quest / npc / chapter id.' },
+      on: { type: 'boolean', description: 'For flag: true sets (default), false clears.' },
+      passed: { type: 'boolean', description: 'For fact with a DC: the required check succeeded.' },
+      status: { type: 'string', enum: ['offered', 'active', 'completed', 'rewarded', 'failed'], description: 'For quest.' },
+      to: { type: 'string', description: 'For quest status=rewarded: character who receives the gp and items.' },
+      attitude: { type: 'string', enum: ['friendly', 'indifferent', 'hostile'], description: 'For npc.' },
+      room: { type: 'string', description: 'For npc: where the NPC is now (room id).' },
+      met: { type: 'boolean', description: 'For npc.' },
+      alive: { type: 'boolean', description: 'For npc that never entered play: dies (or survives) off-screen.' },
+      join: { type: 'boolean', description: 'For npc: joins the party (creates a companion sheet).' },
+      fight: { type: 'boolean', description: 'For npc: fights the party (creates a monster sheet in their room).' },
+    },
+    ['action', 'id'],
+    async (args, exec) => {
+      const action = String(args.action);
+      const id = String(args.id ?? '').trim();
+      // NPC 上场要 SRD 数据时先取回来（网络请求不能放进同步的 mutate 里）
+      let srdBase: Omit<CharacterInput, 'name'> | undefined;
+      if (action === 'npc' && (args.join === true || args.fight === true)) {
+        const { adventure } = service.require(recordOf(exec).sessionKey);
+        const stat = findNpc(adventure, id)?.stat;
+        if (stat !== undefined && !('hp' in stat)) srdBase = srdMonsterInput(await fetchSrd('monsters', stat.srd));
+      }
+      return mutate(exec, (c, adventure) => {
+        const lines = storyAction(c, adventure, action, id, args, srdBase);
+        for (const line of lines) pushLog(c, line);
+        return lines.join('\n');
+      });
+    },
+  );
+
+  register(
+    'dnd_lookup',
+    'Read adventure content (DM eyes only, never read it aloud wholesale): npc (who they are, what they know and '
+    + 'whether it was said, quests they offer), quest, site (rules, rooms, what groups there know), room (notes, '
+    + 'events, NPCs), leads (all leads and which the players know). Omit id to list everything of that kind.',
+    {
+      kind: { type: 'string', enum: ['npc', 'quest', 'site', 'room', 'leads'] },
+      id: { type: 'string', description: 'Id or name; omit to list.' },
+    },
+    ['kind'],
+    (args, exec) => {
+      const { campaign, adventure } = service.require(recordOf(exec).sessionKey);
+      return lookup(campaign, adventure, String(args.kind), str(args.id));
+    },
   );
 
   register(
@@ -661,12 +770,13 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     [],
     async (args, exec) => {
       const record = recordOf(exec);
-      const { campaign, dungeon } = service.require(record.sessionKey);
+      const { campaign, adventure } = service.require(record.sessionKey);
       const out = join(service.mapDir, `${record.sessionKey.replace(/[^a-zA-Z0-9_-]+/g, '_')}-${Date.now()}.png`);
-      const path = await renderMapPng(campaign, dungeon, out);
+      const path = await renderMapPng(campaign, adventure, out);
       if (path === undefined) throw new Error('dnd_map: 地图渲染需要 sharp，当前环境没装上');
       await deps.sendImage(record, path, str(args.caption));
-      return `地图已发到群里（已探索 ${campaign.revealed.length}/${dungeon.rooms.length} 个房间）。不用再复述地图内容。`;
+      const { site, seen, total } = explored(campaign, adventure);
+      return `「${site?.name ?? adventure.name}」地图已发到群里（已探索 ${seen}/${total} 个房间）。不用再复述地图内容。`;
     },
   );
 
@@ -680,9 +790,9 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       const record = recordOf(exec);
       const text = str(args.summary);
       if (text === undefined) throw new Error('dnd_end: summary 不能为空');
-      const state = mutate(exec, (c, dungeon) => {
+      const state = mutate(exec, (c, adventure) => {
         addSummary(c, text);
-        return summarize(c, dungeon);
+        return summarize(c, adventure);
       });
       service.stop(record.sessionKey);
       return `已结团并保存进度。下次发送 /dnd start 继续。\n${state}`;
@@ -701,11 +811,11 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     ['action'],
     (args, exec) => {
       const key = recordOf(exec).sessionKey;
-      const { dungeon } = service.require(key);
+      service.require(key);
       if (args.action === 'undo') {
         const undone = service.store.undo(key, int(args.steps) ?? 1);
-        const { campaign } = service.require(key);
-        return `已撤销 ${undone.length} 步：\n${undone.map((l, i) => `${i + 1}. ${l}`).join('\n')}\n\n现在的团况：\n${summarize(campaign, dungeon)}`;
+        const { campaign, adventure } = service.require(key);
+        return `已撤销 ${undone.length} 步：\n${undone.map((l, i) => `${i + 1}. ${l}`).join('\n')}\n\n现在的团况：\n${summarize(campaign, adventure)}`;
       }
       const list = service.store.snapshots(key).slice(-15).reverse();
       if (list.length === 0) return '没有可以撤销的改动。';
@@ -729,6 +839,105 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
   );
 
   deps.logger.info(`im-qqbot: 跑团工具已注册 campaigns=${service.store.root}`);
+}
+
+/** dnd_story 的各个动作；返回事件文字。抛错时 mutate 不落盘，所以先校验再改 */
+export function storyAction(
+  c: Campaign,
+  adventure: Adventure,
+  action: string,
+  id: string,
+  args: Record<string, unknown>,
+  srdBase?: Omit<CharacterInput, 'name'>,
+): string[] {
+  if (id.length === 0) throw new Error('dnd_story: id 不能为空');
+  if (action === 'trigger') {
+    const result = fireTrigger(c, adventure, id);
+    const lines = [...result.lines];
+    if (result.spawn.length > 0) {
+      const made = spawnMonsters(c, result.room.id, result.spawn);
+      lines.push(`【DM 机密】「${result.room.name}」出现：${made.map((m) => `${m.name} HP${m.hp} AC${m.ac} 命中+${m.attackBonus} 伤害${m.damage}`).join('；')}`);
+    }
+    return lines;
+  }
+  if (action === 'fact') return revealFact(c, adventure, id, args.passed === true).lines;
+  if (action === 'lead') return learnLead(c, adventure, id);
+  if (action === 'flag') return setFlag(c, adventure, id, args.on !== false);
+  if (action === 'chapter') return setChapter(c, adventure, id);
+  if (action === 'quest') {
+    const status = str(args.status) as QuestStatus | undefined;
+    if (status === undefined || !QUEST_STATUSES.includes(status)) throw new Error(`dnd_story quest 要传 status：${QUEST_STATUSES.join('/')}`);
+    const quest = findQuest(adventure, id);
+    const reward = quest?.reward;
+    const pays = status === 'rewarded' && reward !== undefined && ((reward.gp ?? 0) > 0 || (reward.items?.length ?? 0) > 0);
+    const to = pays ? requireCharacter(c, str(args.to) ?? '') : undefined;
+    const change = setQuestStatus(c, adventure, id, status);
+    if (to !== undefined && change.reward !== undefined) {
+      changeInventory(c, to.name, change.reward.items ?? [], [], change.reward.gp ?? 0);
+      change.lines.push(`${to.name} 拿到：${[change.reward.gp ? `${change.reward.gp} gp` : '', ...(change.reward.items ?? [])].filter(Boolean).join('、')}`);
+    }
+    return change.lines;
+  }
+  if (action === 'npc') {
+    const npc = findNpc(adventure, id);
+    if (npc === undefined) throw new Error(`模组里没有 NPC「${id}」。有：${adventure.npcs.map((n) => n.id).join('、') || '（无）'}`);
+    const attitude = str(args.attitude) as Attitude | undefined;
+    if (attitude !== undefined && !ATTITUDES.includes(attitude)) throw new Error(`attitude 只能是 ${ATTITUDES.join('/')}`);
+    if (args.join === true || args.fight === true) {
+      if (args.join === true && args.fight === true) throw new Error('join 和 fight 只能选一个');
+      const mode = args.join === true ? 'join' : 'fight';
+      if (!npcAlive(c, npc.id)) throw new Error(`${npc.name} 已经死了`);
+      const { character, created } = upsertCharacter(c, npcCharacterInput(c, npc, mode, srdBase));
+      const lines = updateNpc(c, adventure, npc.id, { met: true, attitude: attitude ?? (mode === 'fight' ? 'hostile' : 'friendly') }).lines;
+      lines.unshift(mode === 'join'
+        ? `${character.name} ${created ? '加入队伍（已建卡）' : '重新跟着队伍'}${npc.canJoin === true ? '' : '（模组没写他会入队，确认剧情说得通）'}`
+        : `${character.name} 和队伍敌对${created ? `（已建卡，HP${character.hp} AC${character.ac}，在 ${character.room}）` : '，转为敌人'}`);
+      return lines;
+    }
+    const patch: NpcState = {};
+    if (attitude !== undefined) patch.attitude = attitude;
+    const room = str(args.room);
+    if (room !== undefined) patch.room = resolveRoom(roomGraph(adventure), room)?.id ?? room;
+    if (typeof args.met === 'boolean') patch.met = args.met;
+    if (typeof args.alive === 'boolean') patch.alive = args.alive;
+    if (Object.keys(patch).length === 0) throw new Error('dnd_story npc 至少要传 attitude/room/met/alive/join/fight 之一');
+    return updateNpc(c, adventure, npc.id, patch).lines;
+  }
+  throw new Error(`dnd_story 不认识的 action: ${action}`);
+}
+
+/** dnd_lookup：模组内容的 DM 视角卡片；不传 id 时列出这一类 */
+export function lookup(c: Campaign, adventure: Adventure, kind: string, id: string | undefined): string {
+  if (kind === 'leads') return leadsCard(c, adventure);
+  if (kind === 'npc') {
+    if (id === undefined) {
+      if (adventure.npcs.length === 0) return '这个模组没有具名 NPC。';
+      return adventure.npcs.map((n) => `- ${n.id} ${n.name}：${n.role}（${npcRoom(c, n)}${npcAlive(c, n.id) ? '' : '，已死'}）`).join('\n');
+    }
+    const npc = findNpc(adventure, id);
+    if (npc === undefined) throw new Error(`没有这个 NPC: ${id}`);
+    return npcCard(c, adventure, npc);
+  }
+  if (kind === 'quest') {
+    if (id === undefined) {
+      if (adventure.quests.length === 0) return '这个模组没有任务。';
+      return adventure.quests.map((q) => `- ${q.id} ${q.name}：${c.quests[q.id] ?? '还没提出'}`).join('\n');
+    }
+    const quest = findQuest(adventure, id);
+    if (quest === undefined) throw new Error(`没有这个任务: ${id}`);
+    return questCard(c, adventure, quest);
+  }
+  if (kind === 'site') {
+    if (id !== undefined) return siteCard(c, adventure, adventure.sites.find((s) => s.name === id)?.id ?? id);
+    if (adventure.sites.length === 1) return siteCard(c, adventure, adventure.sites[0]!.id);
+    return adventure.sites.map((s) => `- ${s.id} ${s.name}${c.knownSites.includes(s.id) ? '' : '（玩家还不知道）'}${s.summary ? `：${s.summary}` : ''}`).join('\n');
+  }
+  if (kind === 'room') {
+    const room = resolveRoom(roomGraph(adventure), id ?? c.currentRoom);
+    if (room === undefined) throw new Error(`没有这个房间: ${id}`);
+    return roomCard(c, adventure, room);
+  }
+  throw new Error(`dnd_lookup 不认识的 kind: ${kind}`);
 }
 
 /** 轮到某角色时给模型的指引：怪物继续结算，PC 必须停下等玩家 */

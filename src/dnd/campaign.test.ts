@@ -24,10 +24,13 @@ import {
   upsertCharacter,
   visibleExits,
 } from './campaign.ts';
-import { DungeonLibrary, validateDungeon } from './dungeon.ts';
+import { validateDungeon } from './dungeon.ts';
 import { DndService } from './dnd-service.ts';
 import { buildMapSvg } from './map-render.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
+import { AdventureLibrary, adventureFromDungeon } from './adventure.ts';
+
+const BELL = adventureFromDungeon(SUNKEN_BELL);
 
 function fixed(...values: number[]): Roller {
   let i = 0;
@@ -35,7 +38,7 @@ function fixed(...values: number[]): Roller {
 }
 
 function party() {
-  const c = createCampaign('group:abc', SUNKEN_BELL);
+  const c = createCampaign('group:abc', BELL);
   upsertCharacter(c, {
     name: '艾琳', player: '小鱼', className: '游荡者', level: 1,
     abilities: { dex: 16, wis: 12 }, skills: ['perception', 'stealth'], saves: ['dex', 'int'], maxHp: 9, ac: 14,
@@ -107,40 +110,40 @@ describe('角色卡与 HP', () => {
 describe('移动与遭遇', () => {
   it('只能走相邻房间，首次进入揭示并刷怪', () => {
     const c = party();
-    expect(() => moveParty(c, SUNKEN_BELL, 'bellshaft')).toThrow(/不相邻/);
-    const r = moveParty(c, SUNKEN_BELL, '钟楼残殿');
+    expect(() => moveParty(c, BELL, 'bellshaft')).toThrow(/不相邻/);
+    const r = moveParty(c, BELL, '钟楼残殿');
     expect(r.firstVisit).toBe(true);
     expect(r.spawned.map((m) => m.name)).toEqual(['巨鼠1', '巨鼠2', '巨鼠3']);
     expect(c.revealed).toEqual(['gate', 'nave']);
 
-    moveParty(c, SUNKEN_BELL, 'gate');
-    const back = moveParty(c, SUNKEN_BELL, 'nave');
+    moveParty(c, BELL, 'gate');
+    const back = moveParty(c, BELL, 'nave');
     expect(back.firstVisit).toBe(false);
     expect(back.spawned).toHaveLength(0);
   });
 
   it('暗门要 discover_hidden 才能走，发现后出现在出口里', () => {
     const c = party();
-    moveParty(c, SUNKEN_BELL, 'nave');
-    moveParty(c, SUNKEN_BELL, 'ossuary');
-    expect(visibleExits(c, SUNKEN_BELL).map((e) => e.to)).toEqual(['nave']);
-    expect(() => moveParty(c, SUNKEN_BELL, 'reliquary')).toThrow(/没有可见的路/);
-    moveParty(c, SUNKEN_BELL, 'reliquary', true);
-    expect(visibleExits(c, SUNKEN_BELL).map((e) => e.to)).toContain('ossuary');
+    moveParty(c, BELL, 'nave');
+    moveParty(c, BELL, 'ossuary');
+    expect(visibleExits(c, BELL).map((e) => e.to)).toEqual(['nave']);
+    expect(() => moveParty(c, BELL, 'reliquary')).toThrow(/没有可见的路/);
+    moveParty(c, BELL, 'reliquary', true);
+    expect(visibleExits(c, BELL).map((e) => e.to)).toContain('ossuary');
   });
 
   it('战斗中不能整队移动', () => {
     const c = party();
-    moveParty(c, SUNKEN_BELL, 'nave');
+    moveParty(c, BELL, 'nave');
     startInitiative(c, fixed(10));
-    expect(() => moveParty(c, SUNKEN_BELL, 'gate')).toThrow(/战斗/);
+    expect(() => moveParty(c, BELL, 'gate')).toThrow(/战斗/);
   });
 });
 
 describe('先攻', () => {
   it('掷先攻排序，跳过死亡角色，结束时清理死怪', () => {
     const c = party();
-    moveParty(c, SUNKEN_BELL, 'nave');
+    moveParty(c, BELL, 'nave');
     // 艾琳 +3, 布洛克 +0, 巨鼠 +2 ×3
     const rolls = startInitiative(c, fixed(10, 18, 5, 12, 3));
     expect(rolls.map((r) => r.name)).toEqual(['布洛克', '巨鼠2', '艾琳', '巨鼠1', '巨鼠3']);
@@ -184,7 +187,7 @@ describe('行动界限', () => {
 
   it('战斗中只有当前回合的角色能主动行动', () => {
     const c = bound();
-    moveParty(c, SUNKEN_BELL, 'nave');
+    moveParty(c, BELL, 'nave');
     // 布洛克 18 最高，先行动
     startInitiative(c, fixed(10, 18, 5, 12, 3));
     expect(() => assertCanAct(c, brock(c), { declaredBy: 'P2' })).not.toThrow();
@@ -201,7 +204,7 @@ describe('回合结束、指针修正、武器', () => {
   function fight() {
     const c = party();
     upsertCharacter(c, { name: '布洛克', playerId: 'P2', weapons: [{ name: '巨斧', damage: '1d12' }] });
-    moveParty(c, SUNKEN_BELL, 'nave');
+    moveParty(c, BELL, 'nave');
     startInitiative(c, fixed(10, 18, 5, 12, 3)); // 布洛克先
     return c;
   }
@@ -243,7 +246,7 @@ describe('撤销', () => {
     const root = mkdtempSync(join(tmpdir(), 'dnd-undo-'));
     const service = new DndService({
       store: new CampaignStore(root),
-      library: new DungeonLibrary(join(root, 'dungeons')),
+      library: new AdventureLibrary({ dungeons: join(root, 'dungeons') }),
       mapDir: join(root, 'maps'),
     });
     service.start('group:u', undefined, false);
@@ -263,9 +266,9 @@ describe('撤销', () => {
 describe('摘要与地图', () => {
   it('摘要包含房间、队伍、敌人和战斗轮次', () => {
     const c = party();
-    moveParty(c, SUNKEN_BELL, 'nave');
+    moveParty(c, BELL, 'nave');
     startInitiative(c, fixed(10));
-    const text = summarize(c, SUNKEN_BELL);
+    const text = summarize(c, BELL);
     expect(text).toContain('钟楼残殿');
     expect(text).toContain('艾琳 9/9 AC14〈小鱼〉');
     expect(text).toContain('巨鼠1 7/7');
@@ -274,8 +277,8 @@ describe('摘要与地图', () => {
 
   it('地图只画已揭示的房间', () => {
     const c = party();
-    moveParty(c, SUNKEN_BELL, 'nave');
-    const svg = buildMapSvg(c, SUNKEN_BELL);
+    moveParty(c, BELL, 'nave');
+    const svg = buildMapSvg(c, BELL);
     expect(svg).toContain('塌陷门厅');
     expect(svg).toContain('钟楼残殿');
     expect(svg).not.toContain('藏骨堂');
@@ -290,7 +293,7 @@ describe('CampaignStore / DndService', () => {
     const root = mkdtempSync(join(tmpdir(), 'dnd-'));
     const service = new DndService({
       store: new CampaignStore(root),
-      library: new DungeonLibrary(join(root, 'dungeons')),
+      library: new AdventureLibrary({ dungeons: join(root, 'dungeons') }),
       mapDir: join(root, 'maps'),
     });
     const first = service.start('group:abc', undefined, false);
@@ -309,6 +312,6 @@ describe('CampaignStore / DndService', () => {
     const fresh = service.start('group:abc', undefined, true);
     expect(fresh.campaign.characters).toHaveLength(0);
     expect(readdirSync(root).filter((f) => f.endsWith('.json'))).toHaveLength(2);
-    expect(() => service.start('group:abc', 'nope', false)).toThrow(/没有这个地城/);
+    expect(() => service.start('group:abc', 'nope', false)).toThrow(/没有这个模组/);
   });
 });

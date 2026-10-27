@@ -1,5 +1,5 @@
 /**
- * 跑团命令：/dnd — 开团、结团、看团况、列地城
+ * 跑团命令：/dnd — 开团、结团、看团况、列模组
  *
  * 开团后这个会话每回合注入 DM 守则和团况，模型用 dnd_* 工具裁定；结团后恢复普通聊天。
  */
@@ -9,11 +9,11 @@ import { playerStatus } from '../dnd/campaign.ts';
 
 const USAGE = [
   '用法：',
-  '/dnd start [地城id] — 开团（同一地城的旧团会接着跑）',
-  '/dnd new [地城id] — 存档旧团，从头开新团',
+  '/dnd start [模组id] — 开团（同一模组的旧团会接着跑）',
+  '/dnd new [模组id] — 存档旧团，从头开新团',
   '/dnd status — 看团况',
   '/dnd end — 暂停（让 DM 写摘要请直接说「今天先到这」）',
-  '/dnd dungeons — 列出可用地城',
+  '/dnd dungeons — 列出可用模组',
   '/dnd 查 <词条> — 查 wiki（法术、技能、职业、专长、怪物…），如 /dnd 查 火球术',
   '/dnd 法表 [职业] — 职业法术列表，如 /dnd 法表 牧师',
   '/dnd help — 怎么玩',
@@ -91,16 +91,19 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
       }
 
       if (sub === 'dungeons') {
-        return ['可用地城：', ...service.library.list().map((d) => `- ${d.id}：${d.name}（${d.rooms.length} 个房间）`)].join('\n');
+        return ['可用模组：', ...service.library.list().map((a) => {
+          const rooms = a.sites.reduce((n, s) => n + s.rooms.length, 0);
+          return `- ${a.id}：${a.name}（${a.sites.length > 1 ? `${a.sites.length} 个场景，` : ''}${rooms} 个房间）`;
+        })].join('\n');
       }
 
       if (sub === 'start' || sub === 'new') {
         try {
-          const { dungeon, resumed, campaign } = service.start(key, arg, sub === 'new');
+          const { adventure, resumed, campaign } = service.start(key, arg, sub === 'new');
           const party = campaign.characters.filter((ch) => ch.kind === 'pc').map((ch) => ch.name);
           const lines = [
-            `🎲 ${resumed ? '继续' : '开团'}：${dungeon.name}`,
-            resumed ? `队伍：${party.join('、') || '还没有角色'}` : dungeon.hook,
+            `🎲 ${resumed ? '继续' : '开团'}：${adventure.name}`,
+            resumed ? `队伍：${party.join('、') || '还没有角色'}` : adventure.hook,
             '',
             scope === 'group' ? '跑团期间 @ 我说你的行动；还没有角色的先 @ 我说名字和职业来建卡。' : '直接说你的行动；还没有角色就先告诉我名字和职业。',
           ];
@@ -118,7 +121,7 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
       if (sub === 'status') {
         const found = service.active(key);
         if (found === undefined) return '现在没有进行中的团。';
-        return `🎲 ${found.dungeon.name}\n${playerStatus(found.campaign, found.dungeon)}`;
+        return `🎲 ${found.adventure.name}\n${playerStatus(found.campaign, found.adventure)}`;
       }
 
       if (sub === 'help') return HELP;

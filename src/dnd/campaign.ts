@@ -3,21 +3,25 @@
  *
  * 角色卡、HP、状态、先攻、当前房间、已揭示房间都只在这里改，模型通过工具读写；
  * 每回合只把 summarize() 的精简摘要注入 prompt，不注入整份 JSON。
+ * 剧情状态（flag、线索、任务、NPC）的读写在 story.ts，这里只存字段。
  * 写法参考 sticker-store：先写 .tmp 再 rename，避免写一半崩掉留下坏文件。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { rollD20, type Roller, cryptoRoller } from './dice.ts';
+import { type Adventure, type QuestStatus, type Site, findSite, roomGraph, siteOfRoom } from './adventure.ts';
 import {
-  type Dungeon,
+  type DungeonExit,
+  type DungeonMonster,
+  type ExitCheck,
   type DungeonRoom,
   exitBetween,
   exitKey,
   exitsOf,
   findRoom,
-  resolveRoom,
 } from './dungeon.ts';
-import { ABILITIES, type Ability, type Skill, abilityModifier, proficiencyBonus } from './rules.ts';
+import { ABILITIES, type Ability, type Skill, abilityModifier, parseAbility, parseSkill, proficiencyBonus, SKILLS } from './rules.ts';
+import { type NpcState, afterChange, describeCondition, evalCondition, roomView, storySummaryLines } from './story.ts';
 
 export type CharacterKind = 'pc' | 'npc' | 'monster';
 
@@ -48,6 +52,8 @@ export interface Character {
   /** 所在房间。怪物离开房间就不进先攻；PC/NPC 缺省时跟着队伍主位置（currentRoom） */
   room?: string;
   srd?: string;
+  /** 模组里的具名 NPC（入队或上场战斗时建的卡） */
+  npcId?: string;
   notes?: string;
   /** 武器：攻击时按名字取伤害和属性，避免模型临时编伤害骰 */
   weapons?: Weapon[];
@@ -99,9 +105,10 @@ export interface CampaignSummary {
 }
 
 export interface Campaign {
-  version: 1;
+  version: 2;
   key: string;
-  dungeonId: string;
+  /** v1 叫 dungeonId；旧的单地城会被包成同 id 的模组 */
+  adventureId: string;
   active: boolean;
   createdAt: number;
   updatedAt: number;
@@ -115,6 +122,21 @@ export interface Campaign {
   summaries: CampaignSummary[];
   /** 最近的关键事件（伤害、倒地、移动），摘要里展示最后几条 */
   log: string[];
+
+  // ── 剧情状态（story.ts 读写） ──
+  chapter: string;
+  flags: string[];
+  /** 玩家知道的线索，按得知顺序 */
+  leads: string[];
+  /** 已经透露过的信息 */
+  facts: string[];
+  firedTriggers: string[];
+  quests: Record<string, QuestStatus>;
+  npcs: Record<string, NpcState>;
+  /** 玩家知道的场景 */
+  knownSites: string[];
+  /** 只提示一次的事（里程碑、章节推进） */
+  announced: string[];
 }
 
 const MAX_LOG = 30;
@@ -127,25 +149,61 @@ export const KNOWN_CONDITIONS = [
   '目盲', '魅惑', '耳聋', '恐慌', '擒抱', '失能', '隐形', '麻痹', '石化', '中毒', '倒地', '束缚', '震慑', '昏迷', '力竭', '死亡', '稳定',
 ];
 
-export function createCampaign(key: string, dungeon: Dungeon, now = Date.now()): Campaign {
+export function createCampaign(key: string, adv: Adventure, now = Date.now()): Campaign {
+  const startSite = siteOfRoom(adv, adv.start);
   return {
-    version: 1,
+    version: 2,
     key,
-    dungeonId: dungeon.id,
+    adventureId: adv.id,
     active: true,
     createdAt: now,
     updatedAt: now,
-    currentRoom: dungeon.start,
-    revealed: [dungeon.start],
+    currentRoom: adv.start,
+    revealed: [adv.start],
     discoveredExits: [],
     spawned: [],
     characters: [],
     summaries: [],
     log: [],
+    chapter: startSite?.chapter ?? adv.chapters[0]?.id ?? '',
+    flags: [],
+    leads: [],
+    facts: [],
+    firedTriggers: [],
+    quests: {},
+    npcs: {},
+    knownSites: adv.sites.filter((s) => s.knownWhen === undefined || s.id === startSite?.id).map((s) => s.id),
+    announced: [],
   };
 }
 
-function pushLog(c: Campaign, line: string): void {
+/**
+ * 解析存档 JSON，旧版本就地升级。load 和 undo 都走这里：
+ * undo 恢复的快照可能是升级前存的 v1。
+ */
+export function parseCampaign(json: string): Campaign | undefined {
+  const data = JSON.parse(json) as Record<string, unknown>;
+  if (data.version === 2) return data as unknown as Campaign;
+  if (data.version !== 1) return undefined;
+  const { dungeonId, ...rest } = data;
+  return {
+    ...(rest as unknown as Campaign),
+    version: 2,
+    adventureId: String(dungeonId),
+    // 旧团只会是单地城，包出来的模组只有 main 一章、场景 id 就是地城 id
+    chapter: 'main',
+    flags: [],
+    leads: [],
+    facts: [],
+    firedTriggers: [],
+    quests: {},
+    npcs: {},
+    knownSites: [String(dungeonId)],
+    announced: [],
+  };
+}
+
+export function pushLog(c: Campaign, line: string): void {
   c.log.push(line);
   if (c.log.length > MAX_LOG) c.log.splice(0, c.log.length - MAX_LOG);
 }
@@ -194,6 +252,7 @@ export interface CharacterInput {
   srd?: string;
   room?: string;
   hitDie?: string;
+  npcId?: string;
 }
 
 /** 新建或更新角色卡；只覆盖传入的字段 */
@@ -241,6 +300,7 @@ export function upsertCharacter(c: Campaign, input: CharacterInput): { character
   if (input.srd !== undefined) next.srd = input.srd;
   if (input.room !== undefined) next.room = input.room;
   if (input.hitDie !== undefined) next.hitDie = input.hitDie;
+  if (input.npcId !== undefined) next.npcId = input.npcId;
   next.hp = Math.min(next.hp, next.maxHp);
 
   if (existing === undefined) c.characters.push(next);
@@ -539,34 +599,145 @@ export function endInitiative(c: Campaign): { rounds: number; defeated: string[]
 
 // ── 移动 ──
 
-export interface MoveResult {
-  /** 实际移动的角色名 */
-  movers: string[];
-  room: DungeonRoom;
-  firstVisit: boolean;
-  spawned: Character[];
-  /** 玩家现在能看到的出口 */
-  exits: Array<{ to: string; name: string; label: string; known: boolean }>;
+export interface VisibleExit {
+  to: string;
+  name: string;
+  label: string;
+  known: boolean;
+  /** 条件不满足、暂时过不去 */
+  locked?: boolean;
 }
 
-/** 列出当前房间对玩家可见的出口（未发现的暗门不列） */
-export function visibleExits(c: Campaign, dungeon: Dungeon, roomId = c.currentRoom): MoveResult['exits'] {
-  return exitsOf(dungeon, roomId)
+export interface ExitCheckRoll {
+  name: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface MoveResult {
+  /** 实际移动的角色名（出口检定失败的人留在原地，不在这里） */
+  movers: string[];
+  room: DungeonRoom;
+  site: Site;
+  /** 首次进入这个房间 */
+  firstVisit: boolean;
+  /** 首次进入这个场景（要念 Site.arrival） */
+  firstSiteVisit: boolean;
+  /** 套用描述变体之后的玩家视角 / DM 笔记 */
+  view: { playerView: string; dmNotes: string };
+  spawned: Character[];
+  /** 出口检定的结果；没过的人没动 */
+  checks: ExitCheckRoll[];
+  /** 出口检定失败的后果（DM 视角） */
+  failText?: string;
+  /** afterChange 产生的剧情提示 */
+  story: string[];
+  /** 玩家现在能看到的出口 */
+  exits: VisibleExit[];
+}
+
+/** 场景入口能去的其他已知场景（有 routes 时只算有路相连的） */
+function crossSiteExits(c: Campaign, adv: Adventure, roomId: string): DungeonExit[] {
+  const site = siteOfRoom(adv, roomId);
+  if (site === undefined || site.entry !== roomId) return [];
+  return adv.sites
+    .filter((s) => s.id !== site.id && c.knownSites.includes(s.id))
+    .filter((s) => adv.routes === undefined || adv.routes.some((r) => (r.from === site.id && r.to === s.id) || (r.from === s.id && r.to === site.id)))
+    .map((s) => ({ to: s.entry, label: `前往${s.name}` }));
+}
+
+/** 列出当前房间对玩家可见的出口（未发现的暗门不列，条件不满足的标 locked） */
+export function visibleExits(c: Campaign, adv: Adventure, roomId = c.currentRoom): VisibleExit[] {
+  const graph = roomGraph(adv);
+  return [...exitsOf(graph, roomId), ...crossSiteExits(c, adv, roomId)]
     .filter((e) => e.hidden !== true || c.discoveredExits.includes(exitKey(roomId, e.to)))
     .map((e) => ({
       to: e.to,
-      name: findRoom(dungeon, e.to)?.name ?? e.to,
+      name: findRoom(graph, e.to)?.name ?? e.to,
       label: e.label,
       known: c.revealed.includes(e.to),
+      ...(e.requires !== undefined && !evalCondition(c, adv, e.requires) ? { locked: true } : {}),
     }));
+}
+
+/** 按 id、本场景房间名、场景 id/名（→ 场景入口）、全模组房间名的顺序找目标 */
+function resolveTarget(adv: Adventure, from: string, query: string): DungeonRoom | undefined {
+  const q = query.trim();
+  const graph = roomGraph(adv);
+  const here = siteOfRoom(adv, from);
+  const site = findSite(adv, q) ?? adv.sites.find((s) => s.name === q);
+  return findRoom(graph, q)
+    ?? here?.rooms.find((r) => r.name === q)
+    ?? (site !== undefined ? findRoom(graph, site.entry) : undefined)
+    ?? graph.rooms.find((r) => r.name === q);
+}
+
+/** 新角色名：重名时加房间后缀，再重名就加序号 */
+function freeName(c: Campaign, name: string, roomId: string): string {
+  if (!c.characters.some((ch) => ch.name === name)) return name;
+  let candidate = `${name}-${roomId}`;
+  for (let n = 2; c.characters.some((ch) => ch.name === candidate); n++) candidate = `${name}-${roomId}-${n}`;
+  return candidate;
+}
+
+/** 把模组里的怪物刷进某个房间（房间遭遇、触发器援兵） */
+export function spawnMonsters(c: Campaign, roomId: string, monsters: readonly DungeonMonster[]): Character[] {
+  const spawned: Character[] = [];
+  for (const monster of monsters) {
+    for (let i = 1; i <= monster.count; i++) {
+      const ch: Character = {
+        name: freeName(c, monster.count > 1 ? `${monster.name}${i}` : monster.name, roomId),
+        kind: 'monster',
+        level: 1,
+        abilities: { str: 10, dex: 10 + monster.initBonus * 2, con: 10, int: 10, wis: 10, cha: 10, ...monster.abilities },
+        skills: [],
+        saves: [],
+        hp: monster.hp,
+        maxHp: monster.hp,
+        tempHp: 0,
+        ac: monster.ac,
+        conditions: [],
+        attackBonus: monster.attackBonus,
+        damage: monster.damage,
+        initBonus: monster.initBonus,
+        room: roomId,
+        ...(monster.srd !== undefined ? { srd: monster.srd } : {}),
+        ...(monster.notes !== undefined ? { notes: monster.notes } : {}),
+        ...(monster.traits !== undefined ? { traits: [...monster.traits] } : {}),
+      };
+      c.characters.push(ch);
+      spawned.push(ch);
+    }
+  }
+  return spawned;
+}
+
+/** 出口检定：skill 或 ability 都可以写中文或英文 */
+function rollExitCheck(ch: Character, check: ExitCheck, roller: Roller): ExitCheckRoll {
+  const skill = check.skill === undefined ? undefined : parseSkill(check.skill);
+  const ability = skill !== undefined ? SKILLS[skill].ability as Ability : parseAbility(check.ability ?? '');
+  if (ability === undefined) throw new Error(`出口检定写的技能/属性认不出来: ${check.skill ?? check.ability}`);
+  const r = rollD20(checkModifier(ch, skill !== undefined ? 'skill' : 'ability', ability, skill), 'none', roller);
+  const passed = r.total >= check.dc;
+  return { name: ch.name, passed, detail: `${r.detail}，${passed ? '成功' : '失败'}` };
 }
 
 /**
  * 移动到相邻房间。who 省略时整队（全部活着的 PC/NPC）一起走；传了只移动这几个人（分头行动）。
  * 暗门需要 discoverHidden=true（模型在检定成功后才传）。首次进入时揭示房间并刷出遭遇怪物。
  * 战斗中只能单独移动当前回合的角色。
+ * 跨场景：从场景入口走到另一个已知场景的入口（有 routes 时要有路）。
+ * 出口有 requires 时条件不满足就过不去；有 check 时工具给每个人掷骰，没过的留在原地。
  */
-export function moveParty(c: Campaign, dungeon: Dungeon, target: string, discoverHidden = false, who?: string[]): MoveResult {
+export function moveParty(
+  c: Campaign,
+  adv: Adventure,
+  target: string,
+  discoverHidden = false,
+  who?: string[],
+  roller: Roller = cryptoRoller,
+): MoveResult {
+  const graph = roomGraph(adv);
   const whole = who === undefined || who.length === 0;
   if (c.initiative !== undefined) {
     if (whole) throw new Error('战斗中不能整队移动；先结束战斗（dnd_initiative end），或用 who 只移动当前回合的角色');
@@ -574,25 +745,35 @@ export function moveParty(c: Campaign, dungeon: Dungeon, target: string, discove
     const others = who.map((n) => requireCharacter(c, n).name).filter((n) => n !== current);
     if (others.length > 0) throw new Error(`战斗中只能移动当前回合的角色（${current ?? '无'}）：${others.join('、')} 要等自己的回合`);
   }
-  const movers = whole
+  const candidates = whole
     ? c.characters.filter((ch) => ch.kind !== 'monster' && !isOut(ch))
     : [...new Set(who.map((n) => requireCharacter(c, n)))];
-  if (movers.length === 0) throw new Error('没有可以移动的角色');
-  const monster = movers.find((ch) => ch.kind === 'monster');
+  if (candidates.length === 0) throw new Error('没有可以移动的角色');
+  const monster = candidates.find((ch) => ch.kind === 'monster');
   if (monster !== undefined) throw new Error(`${monster.name} 是怪物，怪物位置不用 dnd_move`);
-  const from = roomOf(c, movers[0]!)!;
-  const fromName = findRoom(dungeon, from)?.name ?? from;
-  const split = movers.filter((ch) => roomOf(c, ch) !== from);
+  const from = roomOf(c, candidates[0]!)!;
+  const fromName = findRoom(graph, from)?.name ?? from;
+  const split = candidates.filter((ch) => roomOf(c, ch) !== from);
   if (split.length > 0) {
     throw new Error(`${split.map((ch) => ch.name).join('、')} 不在「${fromName}」，不同房间的人分开移动（who）`);
   }
 
-  const room = resolveRoom(dungeon, target);
+  const room = resolveTarget(adv, from, target);
   if (room === undefined) throw new Error(`没有这个房间: ${target}`);
-  if (room.id === from) throw new Error(`${whole ? '队伍' : movers.map((ch) => ch.name).join('、')}已经在「${room.name}」了`);
-  const exit = exitBetween(dungeon, from, room.id);
+  if (room.id === from) throw new Error(`${whole ? '队伍' : candidates.map((ch) => ch.name).join('、')}已经在「${room.name}」了`);
+  const fromSite = siteOfRoom(adv, from)!;
+  const site = siteOfRoom(adv, room.id)!;
+  const exit = site.id === fromSite.id
+    ? exitBetween(graph, from, room.id)
+    : crossSiteExits(c, adv, from).find((e) => e.to === room.id);
   if (exit === undefined) {
-    const names = visibleExits(c, dungeon, from).map((e) => e.name).join('、') || '无';
+    if (site.id !== fromSite.id) {
+      if (!c.knownSites.includes(site.id)) throw new Error(`玩家还不知道「${site.name}」在哪`);
+      if (from !== fromSite.entry) throw new Error(`要离开「${fromSite.name}」，先回到入口「${findRoom(graph, fromSite.entry)?.name ?? fromSite.entry}」`);
+      if (room.id !== site.entry) throw new Error(`去「${site.name}」要从入口「${findRoom(graph, site.entry)?.name ?? site.entry}」进`);
+      throw new Error(`「${fromSite.name}」和「${site.name}」之间没有路`);
+    }
+    const names = visibleExits(c, adv, from).map((e) => e.name).join('、') || '无';
     throw new Error(`「${room.name}」和「${fromName}」不相邻。可去：${names}`);
   }
   const key = exitKey(from, room.id);
@@ -601,47 +782,51 @@ export function moveParty(c: Campaign, dungeon: Dungeon, target: string, discove
     c.discoveredExits.push(key);
     pushLog(c, `发现暗门：${fromName} ↔ ${room.name}`);
   }
-
-  for (const ch of movers) ch.room = room.id;
-  c.currentRoom = whole ? room.id : mainRoom(c, room.id);
-  const firstVisit = !c.revealed.includes(room.id);
-  if (firstVisit) c.revealed.push(room.id);
-
-  const spawned: Character[] = [];
-  if (!c.spawned.includes(room.id)) {
-    c.spawned.push(room.id);
-    for (const monster of room.encounter ?? []) {
-      for (let i = 1; i <= monster.count; i++) {
-        const name = monster.count > 1 ? `${monster.name}${i}` : monster.name;
-        const unique = c.characters.some((ch) => ch.name === name) ? `${name}-${room.id}` : name;
-        const ch: Character = {
-          name: unique,
-          kind: 'monster',
-          level: 1,
-          abilities: { str: 10, dex: 10 + monster.initBonus * 2, con: 10, int: 10, wis: 10, cha: 10, ...monster.abilities },
-          skills: [],
-          saves: [],
-          hp: monster.hp,
-          maxHp: monster.hp,
-          tempHp: 0,
-          ac: monster.ac,
-          conditions: [],
-          attackBonus: monster.attackBonus,
-          damage: monster.damage,
-          initBonus: monster.initBonus,
-          room: room.id,
-          ...(monster.srd !== undefined ? { srd: monster.srd } : {}),
-          ...(monster.notes !== undefined ? { notes: monster.notes } : {}),
-          ...(monster.traits !== undefined ? { traits: [...monster.traits] } : {}),
-        };
-        c.characters.push(ch);
-        spawned.push(ch);
-      }
-    }
+  if (exit.requires !== undefined && !evalCondition(c, adv, exit.requires)) {
+    throw new Error(`过不去：${exit.lockedText ?? `需要 ${describeCondition(adv, exit.requires)}`}`);
   }
-  const names = movers.map((ch) => ch.name);
-  pushLog(c, `${whole ? '队伍' : names.join('、')}进入「${room.name}」`);
-  return { movers: names, room, firstVisit, spawned, exits: visibleExits(c, dungeon, room.id) };
+
+  const check = exit.check;
+  const checks = check === undefined ? [] : candidates.map((ch) => rollExitCheck(ch, check, roller));
+  const movers = candidates.filter((ch) => checks.find((r) => r.name === ch.name)?.passed !== false);
+  const failText = check !== undefined && checks.some((r) => !r.passed) ? check.fail : undefined;
+  if (checks.length > 0) pushLog(c, `${exit.label}检定：${checks.map((r) => `${r.name}${r.passed ? '成功' : '失败'}`).join('、')}`);
+
+  const everyone = whole && movers.length === candidates.length;
+  const firstSiteVisit = movers.length > 0 && site.id !== fromSite.id && !site.rooms.some((r) => c.revealed.includes(r.id));
+  const firstVisit = movers.length > 0 && !c.revealed.includes(room.id);
+  const spawned: Character[] = [];
+  if (movers.length > 0) {
+    // 没单独移动过的人跟着 currentRoom；它要变之前先把留下的人钉在原地，免得被一起带走
+    for (const ch of c.characters) {
+      if (ch.kind !== 'monster' && ch.room === undefined && !movers.includes(ch)) ch.room = c.currentRoom;
+    }
+    for (const ch of movers) ch.room = room.id;
+    // 有人检定没过留在原地时，队伍主位置按人数多的一边算
+    c.currentRoom = everyone ? room.id : mainRoom(c, room.id);
+    if (firstVisit) c.revealed.push(room.id);
+    if (!c.knownSites.includes(site.id)) c.knownSites.push(site.id);
+    if (!c.spawned.includes(room.id)) {
+      c.spawned.push(room.id);
+      spawned.push(...spawnMonsters(c, room.id, room.encounter ?? []));
+    }
+    pushLog(c, `${everyone ? '队伍' : movers.map((ch) => ch.name).join('、')}进入「${room.name}」`);
+  }
+  const story = afterChange(c, adv);
+  for (const line of story) pushLog(c, line);
+  return {
+    movers: movers.map((ch) => ch.name),
+    room,
+    site,
+    firstVisit,
+    firstSiteVisit,
+    view: roomView(c, adv, room),
+    spawned,
+    checks,
+    ...(failText !== undefined ? { failText } : {}),
+    story,
+    exits: visibleExits(c, adv, movers.length > 0 ? room.id : from),
+  };
 }
 
 /** 队伍主位置：活着的 PC/NPC 最多的房间（平手取 prefer） */
@@ -942,25 +1127,36 @@ function hpTag(ch: Character): string {
   return `${ch.name} ${ch.hp}${temp}/${ch.maxHp} AC${ch.ac}${cond}`;
 }
 
-export function summarize(c: Campaign, dungeon: Dungeon): string {
-  const room = findRoom(dungeon, c.currentRoom);
+/** 队伍主位置所在的场景，以及这个场景探索了几个房间 */
+export function explored(c: Campaign, adv: Adventure): { site: Site | undefined; seen: number; total: number } {
+  const site = siteOfRoom(adv, c.currentRoom);
+  const rooms = site?.rooms ?? [];
+  return { site, seen: rooms.filter((r) => c.revealed.includes(r.id)).length, total: rooms.length };
+}
+
+export function summarize(c: Campaign, adv: Adventure): string {
+  const graph = roomGraph(adv);
+  const room = findRoom(graph, c.currentRoom);
+  const { site, seen, total } = explored(c, adv);
   const lines: string[] = [];
-  lines.push(`地城：${dungeon.name}｜当前房间：${room?.name ?? c.currentRoom}（${c.currentRoom}）｜已探索 ${c.revealed.length}/${dungeon.rooms.length}`);
-  const exits = visibleExits(c, dungeon).map((e) => `${e.name}(${e.to})`).join('、');
+  const where = adv.sites.length > 1 ? `${adv.name}｜场景：${site?.name ?? '?'}` : `地城：${site?.name ?? adv.name}`;
+  lines.push(`${where}｜当前房间：${room?.name ?? c.currentRoom}（${c.currentRoom}）｜已探索 ${seen}/${total}`);
+  const exits = visibleExits(c, adv).map((e) => `${e.name}(${e.to})${e.locked === true ? '[过不去]' : ''}`).join('、');
   lines.push(`可见出口：${exits || '无'}`);
 
   const party = c.characters.filter((ch) => ch.kind !== 'monster');
   lines.push(`队伍：${party.length > 0 ? party.map((ch) => `${hpTag(ch)}${ch.player ? `〈${ch.player}〉` : ''}${resourceTag(ch)}`).join('；') : '还没有角色卡'}`);
   const positions = partyPositions(c);
   if (positions.size > 1) {
-    lines.push(`队伍分头行动：${[...positions].map(([room, members]) => `${findRoom(dungeon, room)?.name ?? room}：${members.map((ch) => ch.name).join('、')}`).join('｜')}`);
+    lines.push(`队伍分头行动：${[...positions].map(([room, members]) => `${findRoom(graph, room)?.name ?? room}：${members.map((ch) => ch.name).join('、')}`).join('｜')}`);
   }
 
-  for (const room of positions.size > 1 ? [...positions.keys()] : [c.currentRoom]) {
+  const occupied = positions.size > 1 ? [...positions.keys()] : [c.currentRoom];
+  for (const room of occupied) {
     const foes = c.characters.filter((ch) => ch.kind === 'monster' && ch.room === room && !isOut(ch));
     if (foes.length > 0) {
-      const where = room === c.currentRoom ? '本房间' : `「${findRoom(dungeon, room)?.name ?? room}」`;
-      lines.push(`${where}敌人（对玩家只说伤势词）：${foes.map((ch) => `${hpTag(ch)} ${woundLabel(ch)}`).join('；')}`);
+      const at = room === c.currentRoom ? '本房间' : `「${findRoom(graph, room)?.name ?? room}」`;
+      lines.push(`${at}敌人（对玩家只说伤势词）：${foes.map((ch) => `${hpTag(ch)} ${woundLabel(ch)}`).join('；')}`);
     }
   }
 
@@ -969,18 +1165,21 @@ export function summarize(c: Campaign, dungeon: Dungeon): string {
     const order = s.order.map((e, i) => (i === s.turn ? `▶${e.name}(${e.init})` : `${e.name}(${e.init})`)).join(' > ');
     lines.push(`战斗第 ${s.round} 轮：${order}`);
   }
+  lines.push(...storySummaryLines(c, adv, occupied));
   if (c.log.length > 0) lines.push(`最近：${c.log.slice(-SUMMARY_LOG_LINES).join('；')}`);
   return lines.join('\n');
 }
 
 /** 给玩家看的团况：PC 的 HP/资源、敌人只给伤势词、先攻顺序；不含 DM 笔记和怪物数值 */
-export function playerStatus(c: Campaign, dungeon: Dungeon): string {
+export function playerStatus(c: Campaign, adv: Adventure): string {
   const lines: string[] = [];
-  const room = findRoom(dungeon, c.currentRoom);
-  lines.push(`📍 ${room?.name ?? c.currentRoom}｜已探索 ${c.revealed.length}/${dungeon.rooms.length}`);
+  const graph = roomGraph(adv);
+  const room = findRoom(graph, c.currentRoom);
+  const { site, seen, total } = explored(c, adv);
+  lines.push(`📍 ${adv.sites.length > 1 && site !== undefined ? `${site.name} · ` : ''}${room?.name ?? c.currentRoom}｜已探索 ${seen}/${total}`);
   const positions = partyPositions(c);
   for (const [roomId, members] of positions) {
-    const where = positions.size > 1 ? `${findRoom(dungeon, roomId)?.name ?? roomId}：` : '';
+    const where = positions.size > 1 ? `${findRoom(graph, roomId)?.name ?? roomId}：` : '';
     lines.push(`${where}${members.map((ch) => `${ch.name} ${ch.hp}/${ch.maxHp}${ch.conditions.length > 0 ? `[${ch.conditions.join(',')}]` : ''}${resourceTag(ch)}`).join('；')}`);
   }
   const foes = c.characters.filter((ch) => ch.kind === 'monster' && !isOut(ch) && positions.has(ch.room ?? ''));
@@ -1021,8 +1220,7 @@ export class CampaignStore {
     const path = this.pathOf(key);
     if (!existsSync(path)) return undefined;
     try {
-      const data = JSON.parse(readFileSync(path, 'utf8')) as Campaign;
-      return data.version === 1 ? data : undefined;
+      return parseCampaign(readFileSync(path, 'utf8'));
     } catch {
       return undefined;
     }
@@ -1096,7 +1294,8 @@ export class CampaignStore {
     const n = Math.min(Math.max(1, Math.trunc(steps)), list.length);
     if (n === 0) throw new Error('没有可以撤销的改动');
     const undone = list.splice(list.length - n, n);
-    const restored = JSON.parse(undone[0]!.state) as Campaign;
+    const restored = parseCampaign(undone[0]!.state);
+    if (restored === undefined) throw new Error('快照格式不认识，没法撤销');
     restored.active = true;
     this.save(restored);
     this.writeSnapshots(key, list);

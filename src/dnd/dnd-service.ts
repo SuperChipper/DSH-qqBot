@@ -6,8 +6,10 @@
  */
 import type { Roller } from './dice.ts';
 import { cryptoRoller } from './dice.ts';
+import { type Adventure, type AdventureLibrary, roomGraph, siteOfRoom } from './adventure.ts';
 import { type Campaign, CampaignStore, createCampaign, summarize } from './campaign.ts';
-import { type Dungeon, DungeonLibrary, findRoom } from './dungeon.ts';
+import { findRoom } from './dungeon.ts';
+import { roomView } from './story.ts';
 
 export interface DndPromptSection {
   name: string;
@@ -51,6 +53,12 @@ const DM_RULES = [
   '- DM 机密不进群消息：DC、怪物 AC/HP、DM 笔记、暗门、没揭示的房间都不说。',
   '- 换房间调用 dnd_move，只用返回的「玩家视角」描述房间，DM 笔记用来裁定。暗门要先有人检定成功，再传 discover_hidden=true 走过去。',
   '',
+  '【剧情】',
+  '- 局面吻合【团况】里列出的「可能发生的事件」时，先 dnd_story trigger 再叙述结果；别自己编事件的后果。',
+  '- NPC 要透露模组里写好的信息前先 dnd_story fact（要检定的先 dnd_check，成功后传 passed=true），只说工具返回的内容。NPC 详情用 dnd_lookup npc 查。',
+  '- 接任务、交任务用 dnd_story quest；领奖时 status=rewarded 并用 to 指定拿钱拿东西的角色，不要另外 gp_change。',
+  '- NPC 入队或和队伍打起来时用 dnd_story npc join=true / fight=true，工具会建卡；只是聊天的 NPC 不建卡。',
+  '',
   '【战斗回合】',
   '- 遇到敌人就 dnd_initiative start，严格按先攻顺序，一次只结算当前这个角色。打架的地方不在队伍主位置时传 room，只有在场的人进先攻。',
   '- 新一轮开始时把这一轮的行动顺序列一遍。',
@@ -69,12 +77,12 @@ const DM_RULES = [
 
 export class DndService {
   public readonly store: CampaignStore;
-  public readonly library: DungeonLibrary;
+  public readonly library: AdventureLibrary;
   public readonly roller: Roller;
   /** 地图 PNG 输出目录 */
   public readonly mapDir: string;
 
-  public constructor(options: { store: CampaignStore; library: DungeonLibrary; mapDir: string; roller?: Roller }) {
+  public constructor(options: { store: CampaignStore; library: AdventureLibrary; mapDir: string; roller?: Roller }) {
     this.store = options.store;
     this.library = options.library;
     this.mapDir = options.mapDir;
@@ -82,41 +90,41 @@ export class DndService {
   }
 
   /** 进行中的团；没有或已结束时返回 undefined */
-  public active(key: string): { campaign: Campaign; dungeon: Dungeon } | undefined {
+  public active(key: string): { campaign: Campaign; adventure: Adventure } | undefined {
     const campaign = this.store.load(key);
     if (campaign === undefined || !campaign.active) return undefined;
-    const dungeon = this.library.get(campaign.dungeonId);
-    if (dungeon === undefined) return undefined;
-    return { campaign, dungeon };
+    const adventure = this.library.get(campaign.adventureId);
+    if (adventure === undefined) return undefined;
+    return { campaign, adventure };
   }
 
-  /** 进行中的团 + 地城，缺一个就抛给模型看的错误 */
-  public require(key: string): { campaign: Campaign; dungeon: Dungeon } {
+  /** 进行中的团 + 模组，缺一个就抛给模型看的错误 */
+  public require(key: string): { campaign: Campaign; adventure: Adventure } {
     const found = this.active(key);
-    if (found === undefined) throw new Error('这个群没有进行中的团（或地城文件丢失）。让玩家发送 /dnd start 开团');
+    if (found === undefined) throw new Error('这个群没有进行中的团（或模组文件丢失）。让玩家发送 /dnd start 开团');
     return found;
   }
 
   /**
-   * 开团：同一地城的旧团直接继续（保留角色卡和进度），换地城或 fresh 时把旧团存档后新开。
+   * 开团：同一模组的旧团直接继续（保留角色卡和进度），换模组或 fresh 时把旧团存档后新开。
    */
-  public start(key: string, dungeonId: string | undefined, fresh: boolean): { campaign: Campaign; dungeon: Dungeon; resumed: boolean } {
+  public start(key: string, adventureId: string | undefined, fresh: boolean): { campaign: Campaign; adventure: Adventure; resumed: boolean } {
     const existing = this.store.load(key);
-    const id = dungeonId ?? existing?.dungeonId ?? this.library.list()[0]?.id;
-    const dungeon = id === undefined ? undefined : this.library.get(id);
-    if (dungeon === undefined) {
-      const ids = this.library.list().map((d) => d.id).join('、');
-      throw new Error(`没有这个地城: ${id ?? '(空)'}。可用：${ids}`);
+    const id = adventureId ?? existing?.adventureId ?? this.library.list()[0]?.id;
+    const adventure = id === undefined ? undefined : this.library.get(id);
+    if (adventure === undefined) {
+      const ids = this.library.list().map((a) => a.id).join('、');
+      throw new Error(`没有这个模组: ${id ?? '(空)'}。可用：${ids}`);
     }
-    if (existing !== undefined && existing.dungeonId === dungeon.id && !fresh) {
+    if (existing !== undefined && existing.adventureId === adventure.id && !fresh) {
       existing.active = true;
       this.store.save(existing);
-      return { campaign: existing, dungeon, resumed: true };
+      return { campaign: existing, adventure, resumed: true };
     }
     if (existing !== undefined) this.store.archive(key);
-    const campaign = createCampaign(key, dungeon);
+    const campaign = createCampaign(key, adventure);
     this.store.save(campaign);
-    return { campaign, dungeon, resumed: false };
+    return { campaign, adventure, resumed: false };
   }
 
   public stop(key: string): Campaign | undefined {
@@ -132,11 +140,17 @@ export class DndService {
   public promptSections(key: string): DndPromptSection[] {
     const found = this.active(key);
     if (found === undefined) return [];
-    const { campaign, dungeon } = found;
-    const room = findRoom(dungeon, campaign.currentRoom);
-    const lines = ['【团况 · DM 视角】', summarize(campaign, dungeon)];
-    if (dungeon.intro) lines.push(`地城背景：${dungeon.intro.replace(/\n/g, ' ')}`);
-    if (room?.dmNotes) lines.push(`本房间 DM 笔记：${room.dmNotes}`);
+    const { campaign, adventure } = found;
+    const room = findRoom(roomGraph(adventure), campaign.currentRoom);
+    const site = siteOfRoom(adventure, campaign.currentRoom);
+    const chapter = adventure.chapters.find((ch) => ch.id === campaign.chapter);
+    const lines = ['【团况 · DM 视角】', summarize(campaign, adventure)];
+    // 只注入整本的真相、当前章的要点、当前场景的通用规则，不注入整本书
+    if (adventure.truth.length > 0) lines.push(`模组背景：${adventure.truth.join(' ')}`);
+    if (chapter?.dmGuide) lines.push(`本章要点：${chapter.dmGuide}`);
+    if (site?.features) lines.push(`「${site.name}」通用规则：${site.features}`);
+    const notes = room === undefined ? '' : roomView(campaign, adventure, room).dmNotes;
+    if (notes) lines.push(`本房间 DM 笔记：${notes}`);
     const last = campaign.summaries.at(-1);
     if (last !== undefined) lines.push(`上次进度：${last.text}`);
     return [

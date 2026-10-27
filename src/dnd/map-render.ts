@@ -2,13 +2,15 @@
  * 地图渲染：只画已揭示的房间，没揭示的部分就是迷雾（画布底色），不需要真正的迷雾机制。
  *
  * 先拼 SVG（纯函数，可测），再用可选依赖 sharp 转 PNG；sharp 装不上时返回 undefined。
- * 画布尺寸按整张地城算，房间位置始终一致，玩家每次看到的是同一张图逐渐展开。
+ * 画布尺寸按队伍所在场景的整张图算，房间位置始终一致，玩家每次看到的是同一张图逐渐展开。
+ * 别的场景的房间不画；从场景入口去别的场景的出口也不画（只在出口列表里）。
  */
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Campaign } from './campaign.ts';
 import { partyPositions, visibleExits } from './campaign.ts';
-import { type Dungeon, type DungeonRoom, exitKey, findRoom } from './dungeon.ts';
+import { type Adventure, siteOfRoom } from './adventure.ts';
+import { type DungeonRoom, exitKey, findRoom } from './dungeon.ts';
 
 const CELL = 36;
 const PAD = 1;
@@ -41,7 +43,8 @@ function stubEnd(from: Box, to: Box, extra: number): { x: number; y: number } {
   return { x: from.cx + ux * (t + extra), y: from.cy + uy * (t + extra) };
 }
 
-export function buildMapSvg(c: Campaign, dungeon: Dungeon): string {
+export function buildMapSvg(c: Campaign, adv: Adventure): string {
+  const dungeon = siteOfRoom(adv, c.currentRoom) ?? adv.sites[0]!;
   const ox = Math.min(...dungeon.rooms.map((r) => r.x)) - PAD;
   const oy = Math.min(...dungeon.rooms.map((r) => r.y)) - PAD;
   const maxX = Math.max(...dungeon.rooms.map((r) => r.x + r.w)) + PAD;
@@ -66,7 +69,7 @@ export function buildMapSvg(c: Campaign, dungeon: Dungeon): string {
   parts.push('<g stroke="#b9a77c" stroke-width="6" stroke-linecap="round">');
   for (const room of revealed) {
     const from = boxOf(room, ox, oy);
-    for (const exit of visibleExits(c, dungeon, room.id)) {
+    for (const exit of visibleExits(c, adv, room.id)) {
       const key = exitKey(room.id, exit.to);
       const target = findRoom(dungeon, exit.to);
       if (target === undefined || drawn.has(key)) continue;
@@ -121,10 +124,10 @@ async function loadSharp(): Promise<SharpFactory | undefined> {
 }
 
 /** 渲染 PNG 到 outPath；sharp 不可用时返回 undefined */
-export async function renderMapPng(c: Campaign, dungeon: Dungeon, outPath: string): Promise<string | undefined> {
+export async function renderMapPng(c: Campaign, adv: Adventure, outPath: string): Promise<string | undefined> {
   const sharp = await loadSharp();
   if (sharp === undefined) return undefined;
   mkdirSync(dirname(outPath), { recursive: true });
-  await sharp(Buffer.from(buildMapSvg(c, dungeon))).png().toFile(outPath);
+  await sharp(Buffer.from(buildMapSvg(c, adv))).png().toFile(outPath);
   return outPath;
 }
