@@ -623,6 +623,8 @@ export interface MoveResult {
   firstVisit: boolean;
   /** 首次进入这个场景（要念 Site.arrival） */
   firstSiteVisit: boolean;
+  /** 跨场景赶路时出发的场景 */
+  travelledFrom?: Site;
   /** 套用描述变体之后的玩家视角 / DM 笔记 */
   view: { playerView: string; dmNotes: string };
   spawned: Character[];
@@ -832,6 +834,7 @@ export function moveParty(
     site,
     firstVisit,
     firstSiteVisit,
+    ...(movers.length > 0 && site.id !== fromSite.id ? { travelledFrom: fromSite } : {}),
     view: roomView(c, adv, room),
     spawned,
     checks,

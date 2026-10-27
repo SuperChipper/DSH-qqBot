@@ -56,6 +56,25 @@ export function parseAbility(input: string): Ability | undefined {
   return full[key];
 }
 
+/** 其他常见中文译名（各版本规则书和模组译法不一） */
+const SKILL_ALIASES: Record<string, Skill> = {
+  生存: 'survival',
+  潜行: 'stealth',
+  杂技: 'acrobatics',
+  特技: 'acrobatics',
+  手上功夫: 'sleight_of_hand',
+  奥术: 'arcana',
+  侦查: 'investigation',
+  驯养动物: 'animal_handling',
+  动物驯养: 'animal_handling',
+  洞察: 'insight',
+  医疗: 'medicine',
+  侦察: 'perception',
+  欺骗: 'deception',
+  恐吓: 'intimidation',
+  说服: 'persuasion',
+};
+
 /** 「察觉」「perception」「Sleight of Hand」→ skill key */
 export function parseSkill(input: string): Skill | undefined {
   const key = normalizeKey(input);
@@ -64,7 +83,7 @@ export function parseSkill(input: string): Skill | undefined {
   for (const [skill, info] of Object.entries(SKILLS)) {
     if (info.name === trimmed) return skill as Skill;
   }
-  return undefined;
+  return SKILL_ALIASES[trimmed];
 }
 
 export function skillLabel(skill: Skill): string {

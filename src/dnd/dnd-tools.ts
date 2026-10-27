@@ -684,6 +684,9 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       } else {
         const someStayed = result.checks.some((r) => !r.passed);
         lines.push(`${strList(args.who)?.length || someStayed ? result.movers.join('、') : '队伍'}进入「${result.room.name}」${result.firstVisit ? '（首次）' : ''}`);
+        if (result.travelledFrom !== undefined) {
+          lines.push(`【DM】这是离开「${result.travelledFrom.name}」、在地面上赶路到「${result.site.name}」，不是暗道或捷径；按下面的抵达描述叙述。`);
+        }
         if (result.firstSiteVisit && result.site.arrival) lines.push(`【抵达「${result.site.name}」，可以念】${result.site.arrival}`);
         if (result.firstSiteVisit && result.site.features) lines.push(`【DM】「${result.site.name}」通用规则：${result.site.features}`);
         lines.push(`【玩家视角，可以描述】${result.view.playerView}`, `【DM 机密，勿念】${result.view.dmNotes}`);
@@ -786,7 +789,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
   register(
     'dnd_end',
     'End tonight\'s session when players want to stop. Write a story summary (what happened, party state, open '
-    + 'threads); it is saved and injected next time the game starts.',
+    + 'threads); it is saved and injected next time the game starts. Progress is saved automatically after every '
+    + 'change: do NOT call this when players only ask to save (存档) — it ends the game and every roll fails until /dnd start.',
     { summary: { type: 'string' } },
     ['summary'],
     (args, exec) => {
@@ -931,9 +935,11 @@ export function lookup(c: Campaign, adventure: Adventure, kind: string, id: stri
     return questCard(c, adventure, quest);
   }
   if (kind === 'site') {
-    if (id !== undefined) return siteCard(c, adventure, adventure.sites.find((s) => s.name === id)?.id ?? id);
+    const site = id === undefined ? undefined : adventure.sites.find((s) => s.id === id || s.name === id);
+    if (site !== undefined) return siteCard(c, adventure, site.id);
     if (adventure.sites.length === 1) return siteCard(c, adventure, adventure.sites[0]!.id);
-    return adventure.sites.map((s) => `- ${s.id} ${s.name}${c.knownSites.includes(s.id) ? '' : '（玩家还不知道）'}${s.summary ? `：${s.summary}` : ''}`).join('\n');
+    // 没找到（常见是传了模组 id）就列出全部场景
+    return (id === undefined ? '' : `没有场景「${id}」，模组里的场景：\n`) + adventure.sites.map((s) => `- ${s.id} ${s.name}${c.knownSites.includes(s.id) ? '' : '（玩家还不知道）'}${s.summary ? `：${s.summary}` : ''}`).join('\n');
   }
   if (kind === 'room') {
     const room = resolveRoom(roomGraph(adventure), id ?? c.currentRoom);

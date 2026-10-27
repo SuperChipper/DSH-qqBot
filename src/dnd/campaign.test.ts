@@ -309,9 +309,14 @@ describe('CampaignStore / DndService', () => {
     expect(again.resumed).toBe(true);
     expect(again.campaign.characters.map((ch) => ch.name)).toEqual(['艾琳']);
 
+    // 新开默认带上 PC 卡（位置清空），空卡才从零开始
+    service.store.update('group:abc', (c) => { c.characters[0]!.room = 'nave'; });
     const fresh = service.start('group:abc', undefined, true);
-    expect(fresh.campaign.characters).toHaveLength(0);
-    expect(readdirSync(root).filter((f) => f.endsWith('.json'))).toHaveLength(2);
+    expect(fresh.carried).toEqual(['艾琳']);
+    expect(fresh.campaign.characters[0]?.room).toBeUndefined();
+    const blank = service.start('group:abc', undefined, true, { keepParty: false });
+    expect(blank.campaign.characters).toHaveLength(0);
+    expect(readdirSync(root).filter((f) => f.endsWith('.json'))).toHaveLength(3);
     expect(() => service.start('group:abc', 'nope', false)).toThrow(/没有这个模组/);
   });
 });

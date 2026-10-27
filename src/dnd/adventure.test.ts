@@ -25,6 +25,7 @@ import {
 import { DndService } from './dnd-service.ts';
 import { lookup, storyAction } from './dnd-tools.ts';
 import { buildMapSvg } from './map-render.ts';
+import { parseSkill } from './rules.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
 import { afterChange, evalCondition, npcAlive, roomView } from './story.ts';
 
@@ -196,7 +197,11 @@ describe('跨场景移动与出口', () => {
     const r = moveParty(c, adv, '灰岩矿坑');
     expect(r.room.id).toBe('mine-mouth');
     expect(r.firstSiteVisit).toBe(true);
+    expect(r.travelledFrom?.id).toBe('camp');
     expect(r.site.arrival).toContain('矿口');
+    // 整队走进下一章的场景：自动翻章，回城不会翻回去
+    expect(r.story).toContain('进入章节「矿坑」：找到工头');
+    expect(c.chapter).toBe('mine');
     expect(summarize(c, adv)).toContain('场景：灰岩矿坑');
     // 进过矿坑之后线索算解决了
     expect(summarize(c, adv)).not.toContain('未解决的线索');
@@ -209,6 +214,15 @@ describe('跨场景移动与出口', () => {
     c.characters.forEach((ch) => { ch.room = 'mine-mouth'; });
     c.currentRoom = 'mine-mouth';
     expect(moveParty(c, adv, '矿镇营地').room.id).toBe('camp-gate');
+    expect(c.chapter).toBe('mine');
+  });
+
+  it('只有一人去了下一章的场景时不翻章', () => {
+    const adv = fixture();
+    const c = party(adv);
+    storyAction(c, adv, 'lead', 'mine-map', {});
+    moveParty(c, adv, '灰岩矿坑', false, ['艾琳']);
+    expect(c.chapter).toBe('town');
   });
 
   it('上锁的出口要条件满足；检定出口没过的人留在原地', () => {
@@ -311,6 +325,8 @@ describe('剧情动作', () => {
     expect(storyAction(c, adv, 'fact', 'vault-word', { passed: true })[0]).toContain('已经说过');
     expect(lookup(c, adv, 'npc', '老矿工')).toContain('[已说] vault-word');
     expect(lookup(c, adv, 'npc', 'old-miner')).toContain('[未说] mine-rumor');
+    // 传了模组 id 当场景 id：列出全部场景，不报错
+    expect(lookup(c, adv, 'site', 'grey-mine')).toContain('没有场景「grey-mine」，模组里的场景：\n- camp 矿镇营地');
   });
 
   it('任务：工头死了自动达成，领奖要 to，发钱发物品，里程碑只提示一次', () => {
@@ -395,5 +411,15 @@ describe('摘要、注入与加载', () => {
     expect(library.get('broken')).toBeUndefined();
     expect(library.get('sunken-bell')).toBeDefined();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('broken.json'));
+  });
+});
+
+describe('技能别名', () => {
+  it('常见的其他中文译名也认得', () => {
+    expect(parseSkill('生存')).toBe('survival');
+    expect(parseSkill('求生')).toBe('survival');
+    expect(parseSkill('潜行')).toBe('stealth');
+    expect(parseSkill('说服')).toBe('persuasion');
+    expect(parseSkill('不存在')).toBeUndefined();
   });
 });

@@ -10,7 +10,7 @@ import { playerStatus } from '../dnd/campaign.ts';
 const USAGE = [
   '用法：',
   '/dnd start [模组id] — 开团（同一模组的旧团会接着跑）',
-  '/dnd new [模组id] — 存档旧团，从头开新团',
+  '/dnd new [模组id] [空卡] — 存档旧团开新团（默认带上 PC 卡，加「空卡」从零建卡）',
   '/dnd status — 看团况',
   '/dnd end — 暂停（让 DM 写摘要请直接说「今天先到这」）',
   '/dnd dungeons — 列出可用模组',
@@ -99,14 +99,21 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
 
       if (sub === 'start' || sub === 'new') {
         try {
-          const { adventure, resumed, campaign } = service.start(key, arg, sub === 'new');
+          // 「空卡」「blank」不带旧角色卡；其余的词当模组 id
+          const words = [arg, ...more].filter((s): s is string => s !== undefined && s.length > 0);
+          const blank = words.some((w) => w === '空卡' || w === 'blank');
+          const id = words.find((w) => w !== '空卡' && w !== 'blank');
+          const { adventure, resumed, campaign, carried } = service.start(key, id, sub === 'new', { keepParty: !blank });
           const party = campaign.characters.filter((ch) => ch.kind === 'pc').map((ch) => ch.name);
           const lines = [
             `🎲 ${resumed ? '继续' : '开团'}：${adventure.name}`,
             resumed ? `队伍：${party.join('、') || '还没有角色'}` : adventure.hook,
+          ];
+          if (carried.length > 0) lines.push(`带上了 ${carried.length} 张角色卡：${carried.join('、')}（HP、资源、物品照旧）。想从空卡开始：/dnd new ${adventure.id} 空卡`);
+          lines.push(
             '',
             scope === 'group' ? '跑团期间 @ 我说你的行动；还没有角色的先 @ 我说名字和职业来建卡。' : '直接说你的行动；还没有角色就先告诉我名字和职业。',
-          ];
+          );
           return lines.join('\n');
         } catch (err) {
           return err instanceof Error ? err.message : String(err);

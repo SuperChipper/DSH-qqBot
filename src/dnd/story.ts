@@ -334,6 +334,13 @@ export function afterChange(c: Campaign, adv: Adventure): string[] {
     }
   }
   const chapter = adv.chapters.find((ch) => ch.id === c.chapter);
+  // 全队都走进了下一章的场景：自动翻章（只往前翻，回到旧场景不会翻回去；有人先去探路不算）
+  const party = c.characters.filter((ch) => ch.kind !== 'monster' && !ch.conditions.includes('死亡'));
+  const allThere = party.length > 0 && party.every((ch) => siteOfRoom(adv, ch.room ?? c.currentRoom)?.chapter === chapter?.next);
+  if (chapter?.next !== undefined && allThere) {
+    lines.push(...setChapter(c, adv, chapter.next));
+    return lines;
+  }
   if (chapter?.exitWhen !== undefined && chapter.next !== undefined && !c.announced.includes(`chapter:${chapter.id}`)
     && evalCondition(c, adv, chapter.exitWhen)) {
     c.announced.push(`chapter:${chapter.id}`);

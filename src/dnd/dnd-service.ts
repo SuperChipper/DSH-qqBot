@@ -58,6 +58,7 @@ const DM_RULES = [
   '- NPC 要透露模组里写好的信息前先 dnd_story fact（要检定的先 dnd_check，成功后传 passed=true），只说工具返回的内容。NPC 详情用 dnd_lookup npc 查。',
   '- 接任务、交任务用 dnd_story quest；领奖时 status=rewarded 并用 to 指定拿钱拿东西的角色，不要另外 gp_change。',
   '- NPC 入队或和队伍打起来时用 dnd_story npc join=true / fight=true，工具会建卡；只是聊天的 NPC 不建卡。',
+  '- 不要编模组里没有的暗道、捷径把房间或场景连起来。去别的场景是离开这里、赶路过去，按 dnd_move 返回的抵达描述叙述；检定成功也只能发现模组里写了的东西（暗门、信息、触发器）。',
   '',
   '【战斗回合】',
   '- 遇到敌人就 dnd_initiative start，严格按先攻顺序，一次只结算当前这个角色。打架的地方不在队伍主位置时传 room，只有在场的人进先攻。',
@@ -73,6 +74,7 @@ const DM_RULES = [
   '- 没有角色卡的玩家，问清名字和职业后用 dnd_character create 建卡，player 填昵称，player_id 填他的 openid（可按标准数组 15/14/13/12/10/8 帮他分配属性），同时填 weapons、hit_die，并用 dnd_resource set 记下法术位和职业资源。老角色卡缺这些的，用 dnd_character update / dnd_resource set 补上。',
   '- 玩家问规则、法术、技能时可以提醒他用 /dnd 查 <词条> 或 /dnd 法表 <职业> 查 wiki。',
   '- 玩家要看地图时调用 dnd_map。玩家说结束/散团/下次再玩时，调用 dnd_end 写一段剧情摘要（发生了什么、队伍状态、没解开的线索），下次开团会用到。',
+  '- 进度每次改动都自动存盘。玩家说「存档」「保存一下」只是要确认，告诉他已经存好了；不要为此调用 dnd_end，那会结团，之后掷骰都会失败。',
 ].join('\n');
 
 export class DndService {
@@ -107,8 +109,14 @@ export class DndService {
 
   /**
    * 开团：同一模组的旧团直接继续（保留角色卡和进度），换模组或 fresh 时把旧团存档后新开。
+   * 新开时默认把旧团的 PC 卡带过来（HP、资源、物品照旧，位置清空）；keepParty=false 从空卡开始。
    */
-  public start(key: string, adventureId: string | undefined, fresh: boolean): { campaign: Campaign; adventure: Adventure; resumed: boolean } {
+  public start(
+    key: string,
+    adventureId: string | undefined,
+    fresh: boolean,
+    options: { keepParty?: boolean } = {},
+  ): { campaign: Campaign; adventure: Adventure; resumed: boolean; carried: string[] } {
     const existing = this.store.load(key);
     const id = adventureId ?? existing?.adventureId ?? this.library.list()[0]?.id;
     const adventure = id === undefined ? undefined : this.library.get(id);
@@ -119,12 +127,19 @@ export class DndService {
     if (existing !== undefined && existing.adventureId === adventure.id && !fresh) {
       existing.active = true;
       this.store.save(existing);
-      return { campaign: existing, adventure, resumed: true };
+      return { campaign: existing, adventure, resumed: true, carried: [] };
     }
     if (existing !== undefined) this.store.archive(key);
     const campaign = createCampaign(key, adventure);
+    if (existing !== undefined && options.keepParty !== false) {
+      for (const ch of existing.characters.filter((x) => x.kind === 'pc')) {
+        const copy = structuredClone(ch);
+        delete copy.room;
+        campaign.characters.push(copy);
+      }
+    }
     this.store.save(campaign);
-    return { campaign, adventure, resumed: false };
+    return { campaign, adventure, resumed: false, carried: campaign.characters.map((ch) => ch.name) };
   }
 
   public stop(key: string): Campaign | undefined {
