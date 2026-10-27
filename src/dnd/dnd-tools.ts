@@ -895,7 +895,9 @@ export function storyAction(
       const mode = args.join === true ? 'join' : 'fight';
       if (!npcAlive(c, npc.id)) throw new Error(`${npc.name} 已经死了`);
       const { character, created } = upsertCharacter(c, npcCharacterInput(c, npc, mode, srdBase));
-      const lines = updateNpc(c, adventure, npc.id, { met: true, attitude: attitude ?? (mode === 'fight' ? 'hostile' : 'friendly') }).lines;
+      // 态度本来就对时 updateNpc 只回一句「已更新」，上场这里不用重复
+      const lines = updateNpc(c, adventure, npc.id, { met: true, attitude: attitude ?? (mode === 'fight' ? 'hostile' : 'friendly') }).lines
+        .filter((l) => l !== `${npc.name} 已更新`);
       lines.unshift(mode === 'join'
         ? `${character.name} ${created ? '加入队伍（已建卡）' : '重新跟着队伍'}${npc.canJoin === true ? '' : '（模组没写他会入队，确认剧情说得通）'}`
         : `${character.name} 和队伍敌对${created ? `（已建卡，HP${character.hp} AC${character.ac}，在 ${character.room}）` : '，转为敌人'}`);
