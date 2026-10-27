@@ -46,7 +46,7 @@ export type Condition =
 /** 模组里的 Developments：条件触发的状态变化 */
 export interface Trigger {
   id: string;
-  /** 自然语言的触发条件，模型判断，如「队伍在洞口大声喧哗」 */
+  /** 自然语言的触发条件，模型判断，如「队伍在门厅大声喧哗」 */
   when: string;
   /** 满足时才能触发 */
   requires?: Condition;
@@ -82,7 +82,7 @@ export interface Fact {
   set?: string[];
 }
 
-/** 无名群体掌握的信息，如「任意一只被俘的 Cragmaw 地精」 */
+/** 无名群体掌握的信息，如「任意一只被俘的地精」 */
 export interface KnowledgeBlock {
   holder: string;
   facts: Fact[];

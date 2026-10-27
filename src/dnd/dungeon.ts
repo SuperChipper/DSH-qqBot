@@ -24,7 +24,7 @@ export interface DungeonExit {
   check?: ExitCheck;
   /** 条件满足前过不去（锁着的门、塌方） */
   requires?: Condition;
-  /** 过不去时给模型的说明，如「铁门锁着，钥匙在 Klarg 身上」 */
+  /** 过不去时给模型的说明，如「铁门锁着，钥匙在头目身上」 */
   lockedText?: string;
 }
 

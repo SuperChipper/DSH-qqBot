@@ -147,7 +147,7 @@ NPC 只在两种情况下建角色卡：入队（`dnd_story npc join=true`，跟
 ### 信息（facts）与知识块
 
 ```json
-{ "id": "gob-leader", "text": "头目是熊地精 Klarg。", "via": "captured",
+{ "id": "gob-leader", "text": "头目是一只熊地精，住在最里面的洞。", "via": "captured",
   "dc": 12, "requires": { "flag": "..." }, "leads": ["..."], "set": ["..."] }
 ```
 
@@ -166,12 +166,12 @@ NPC 只在两种情况下建角色卡：入队（`dnd_story npc join=true`，跟
 
 ## 4. 触发器、变体和条件
 
-**触发器**是书里的 Developments：「如果玩家在洞口吵闹，哨兵就会放箭」。
+**触发器**是书里的 Developments：「如果玩家在门厅吵闹，隔壁的守卫就会赶过来」。
 
 ```json
-{ "id": "a1-noise", "when": "队伍在洞口大声争吵、砍灌木或扎营",
-  "then": "区域 2 的地精发现他们，隔着灌木放箭（四分之三掩护）",
-  "set": ["goblins-alerted"], "requires": "...", "leads": [], "spawn": [], "once": true }
+{ "id": "hall-noise", "when": "队伍在门厅大声争吵、砸东西或打起来",
+  "then": "隔壁营房的两个守卫听到动静，拔出武器冲进门厅",
+  "set": ["guards-alerted"], "requires": "...", "leads": [], "spawn": [], "once": true }
 ```
 
 - `when` 是自然语言，**由 DM（模型）判断**局面吻合时调用 `dnd_story trigger`；当前房间没触发的事件会列在团况里。
