@@ -32,6 +32,7 @@ import {
   numberHistoryImages,
   type HistoryImage,
 } from '../media/history-images.ts';
+import { createForwardTagger, type ForwardImage, type TaggedForwardImage } from '../media/forward-images.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -79,6 +80,8 @@ interface MiddlewareState {
   processedAttachments?: ProcessedAttachment[];
   downloadedFiles?: DownloadedFile[];
   downloadedQuoteFiles?: DownloadedFile[];
+  /** 合并转发（聊天记录）里的图片（attachmentProcessor 已下载） */
+  forwardImages?: ForwardImage[];
   /** concurrencyGuard 合并多条消息时的全部发送者（见 mergeWithSenders） */
   mergedSenders?: string[];
   [key: string]: unknown;
@@ -130,8 +133,17 @@ export async function handleInbound(
     }
   }
 
+  // ── 合并转发里的图片：附件行改写成 [图片#n: 路径]，编号接在历史图片后面 ──
+  const forward = createForwardTagger(mwState.forwardImages, historyImages.length);
+  const bodyMsg: ProcessedMessage = { ...msg, content: forward.rewrite(msg.content ?? '') };
+  const quoteText = mwState.quote?.text || mwState.quote?.entry?.content;
+  const bodyState: MiddlewareState = quoteText
+    ? { ...mwState, quote: { ...mwState.quote, text: forward.rewrite(quoteText) } }
+    : mwState;
+  const forwardImages = forward.tagged;
+
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(msg, mwState, scope, manager, history, historyImages);
+  const agentBody = assembleAgentBody(bodyMsg, bodyState, scope, manager, history, historyImages, forwardImages);
 
   if (!agentBody) return;
 
@@ -184,6 +196,7 @@ export async function handleInbound(
       [msg.content ?? '', mwState.quote?.text ?? mwState.quote?.entry?.content ?? ''].join('\n'),
     );
     const hasNativeImage = (attachHistory && historyImages.some((image) => image.localPath !== undefined))
+      || forwardImages.some((image) => image.localPath !== undefined)
       || [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]
         .some((file) => file.contentType === 'image');
     if (hasNativeImage) {
@@ -219,6 +232,15 @@ export async function handleInbound(
         currentLabeled = true;
       }
       content.push(block);
+    }
+
+    // 合并转发里的图片：用户主动转发/引用的，下载成功的都附上，标签和文本里的 [图片#n] 对应
+    for (const image of forwardImages) {
+      if (image.localPath === undefined || seen.has(image.localPath)) continue;
+      seen.add(image.localPath);
+      const block = await manager.createImageBlock(image.localPath);
+      if (block === undefined) continue;
+      content.push({ type: 'text', text: `[转发图片#${image.index}]` }, block);
     }
   }
 
@@ -264,6 +286,7 @@ function assembleAgentBody(
   manager: SessionManager,
   history: HistoryEntry[] | undefined,
   historyImages: HistoryImage[],
+  forwardImages: readonly TaggedForwardImage[],
 ): string | null {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
@@ -287,10 +310,27 @@ function assembleAgentBody(
   // 共享笔记自动召回：用当前消息（含引用原文）检索，命中才注入
   const notesHint = manager.notesHint([userContent, state.quote?.text ?? state.quote?.entry?.content ?? ''].join('\n'));
 
-  const base = [dynamicCtx, stickerHints, notesHint, unsentHint, migrationHint, userMessage].filter(Boolean).join('\n');
+  const forwardHint = buildForwardHint(forwardImages);
+
+  const base = [dynamicCtx, stickerHints, forwardHint, notesHint, unsentHint, migrationHint, userMessage].filter(Boolean).join('\n');
   const agentBody = buildAgentBody(base, history, isGroup, wasMentioned || implicit, historyImages);
 
   return agentBody;
+}
+
+/** 合并转发图片的说明：哪些已下载到本地、怎么看 */
+export function buildForwardHint(images: readonly TaggedForwardImage[]): string {
+  if (images.length === 0) return '';
+  const local = images.filter((image) => image.localPath !== undefined).map((image) => `#${image.index}`);
+  const remote = images.filter((image) => image.localPath === undefined).map((image) => `#${image.index}`);
+  const parts = ['[转发聊天记录里的图片] 文中 [图片#n: …] 是聊天记录里的图片'];
+  if (local.length > 0) {
+    parts.push(`${local.join(' ')} 已下载到本地，可直接看（原生附图时标为「[转发图片#n]」）或用 qqbot_describe_image 传路径查看`);
+  }
+  if (remote.length > 0) {
+    parts.push(`${remote.join(' ')} 未下载，只有 URL（可能已过期），需要时用 qqbot_describe_image 传 URL`);
+  }
+  return parts.join('；') + '。';
 }
 
 /**
