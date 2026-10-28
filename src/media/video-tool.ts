@@ -9,6 +9,7 @@
  * 临时文件放系统 tmp 目录，调用结束即删。ffmpeg 不可用时工具不注册。
  */
 import { execFile } from 'node:child_process';
+import { existsSync, readdirSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join } from 'node:path';
@@ -85,6 +86,48 @@ export function planFrames(duration: number, maxFrames: number, maxSeconds: numb
   const rows = Math.ceil(count / cols);
   const times = Array.from({ length: count }, (_, k) => Math.round((k * span / count) * 10) / 10);
   return { span, count, cols, rows, times };
+}
+
+/** winget 装的 ffmpeg 常常不在 PATH 里（Gyan.FFmpeg 只解压到 Packages 目录，不建 Links）：按固定布局找 */
+export function findWingetFfmpeg(localAppData: string | undefined = process.env.LOCALAPPDATA): string | undefined {
+  if (!localAppData) return undefined;
+  const winget = join(localAppData, 'Microsoft', 'WinGet');
+  const link = join(winget, 'Links', 'ffmpeg.exe');
+  if (existsSync(link)) return link;
+  const packages = join(winget, 'Packages');
+  const found: string[] = [];
+  for (const pkg of safeReaddir(packages).filter(name => /ffmpeg/i.test(name))) {
+    for (const build of safeReaddir(join(packages, pkg))) {
+      const exe = join(packages, pkg, build, 'bin', 'ffmpeg.exe');
+      if (existsSync(exe)) found.push(exe);
+    }
+  }
+  // 版本目录名带版本号，排序后取最后一个，多半是最新装的
+  return found.sort().at(-1);
+}
+
+function safeReaddir(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+/** 找一个能跑的 ffmpeg：配置了只认配置；没配先试 PATH，再试 winget 安装目录 */
+export async function locateFfmpeg(ffmpegPath: string): Promise<FfmpegBins | undefined> {
+  const candidates = ffmpegPath ? [ffmpegPath] : ['', findWingetFfmpeg()].filter((p): p is string => p !== undefined);
+  for (const candidate of candidates) {
+    const bins = resolveFfmpegBins(candidate);
+    try {
+      await execFileAsync(bins.ffmpeg, ['-version'], { timeout: 10_000 });
+      await execFileAsync(bins.ffprobe, ['-version'], { timeout: 10_000 });
+      return bins;
+    } catch {
+      // 试下一个
+    }
+  }
+  return undefined;
 }
 
 /** ffprobe：时长与是否有音轨 */

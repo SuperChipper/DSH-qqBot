@@ -7,7 +7,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
@@ -30,7 +30,7 @@ import { setupMiddlewares } from './middleware-setup.ts';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
 import { startCleanup } from '../media/cleanup.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
-import { registerDescribeVideoTool } from '../media/video-tool.ts';
+import { locateFfmpeg, registerDescribeVideoTool } from '../media/video-tool.ts';
 import { registerSendFileTool, withFreshReplyTarget, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
@@ -320,7 +320,25 @@ export async function bootstrapGateway(
   registerDescribeImageTool(ctx, config.vision, logger);
 
   // ── 视频理解工具（qqbot_describe_video：抽帧宫格 + 音轨 ASR；ffmpeg 不可用时跳过） ──
-  await registerDescribeVideoTool(ctx, config.video, config.vision, config.asr, logger);
+  // 先找 ffmpeg：winget 装的不在 PATH 里时，把它的目录补进本进程 PATH（终端工具会继承），并在 prompt 里点名路径
+  const ffmpegBins = await locateFfmpeg(config.video.ffmpegPath);
+  if (ffmpegBins !== undefined && isAbsolute(ffmpegBins.ffmpeg)) {
+    const binDir = dirname(ffmpegBins.ffmpeg);
+    const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH';
+    const entries = (process.env[pathKey] ?? '').split(delimiter);
+    if (!entries.some(e => e.toLowerCase() === binDir.toLowerCase())) {
+      process.env[pathKey] = [binDir, ...entries].filter(Boolean).join(delimiter);
+    }
+    manager.ffmpegPath = ffmpegBins.ffmpeg;
+    logger.info(`im-qqbot: 使用 ffmpeg ${ffmpegBins.ffmpeg}（目录已补进 PATH）`);
+  }
+  await registerDescribeVideoTool(
+    ctx,
+    ffmpegBins !== undefined ? { ...config.video, ffmpegPath: ffmpegBins.ffmpeg === 'ffmpeg' ? '' : ffmpegBins.ffmpeg } : config.video,
+    config.vision,
+    config.asr,
+    logger,
+  );
 
   // ── 附件发送工具注册（qqbot_send_file） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。

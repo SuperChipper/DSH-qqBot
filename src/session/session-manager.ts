@@ -123,6 +123,8 @@ export class SessionManager {
   public toolAccess?: ToolAccess;
   /** 由 bootstrap 注入的跑团服务（/dnd 命令 + DM prompt 注入） */
   public dndService?: DndService;
+  /** 由 bootstrap 探测到的 ffmpeg 绝对路径（配置的或 winget 目录里找到的；走 PATH 时为空），提示模型直接用 */
+  public ffmpegPath?: string;
 
   constructor(
     ctx: Context,
@@ -251,6 +253,9 @@ export class SessionManager {
           ttl > 0
             ? `${tmpDir} 里 ${ttl} 小时没动过的东西会被自动清理；要长期保留的成果（用户要的文件、笔记）放到用户指定的位置，或用 qqbot_notes_save 记进笔记。`
             : '要长期保留的成果（用户要的文件、笔记）放到用户指定的位置，或用 qqbot_notes_save 记进笔记。',
+          ...(this.ffmpegPath !== undefined
+            ? [`本机有 ffmpeg/ffprobe：${this.ffmpegPath}（同目录还有 ffprobe），终端里直接用这个路径，不用再找或重装。`]
+            : []),
         ].join('\n'),
       });
 

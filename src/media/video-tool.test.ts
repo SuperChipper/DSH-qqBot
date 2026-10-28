@@ -1,14 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer, type AddressInfo } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
 import type { StreamChunk } from '@deepseek-ai/dsh-llm';
 import {
   buildFramePrompt,
   composeVideoText,
+  findWingetFfmpeg,
   planFrames,
   registerDescribeVideoTool,
   resolveFfmpegBins,
@@ -37,6 +38,36 @@ describe('resolveFfmpegBins', () => {
   it('uses PATH by default and a sibling ffprobe for a configured path', () => {
     expect(resolveFfmpegBins('')).toEqual({ ffmpeg: 'ffmpeg', ffprobe: 'ffprobe' });
     expect(resolveFfmpegBins(join('C:', 'ff', 'ffmpeg.exe')).ffprobe).toBe(join('C:', 'ff', 'ffprobe.exe'));
+  });
+});
+
+describe('findWingetFfmpeg', () => {
+  let root: string;
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  function touch(...parts: string[]): string {
+    const file = join(root, ...parts);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, '');
+    return file;
+  }
+
+  it('finds the newest ffmpeg unpacked under WinGet\\Packages', () => {
+    root = mkdtempSync(join(tmpdir(), 'winget-'));
+    const pkg = ['Microsoft', 'WinGet', 'Packages', 'Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe'];
+    touch(...pkg, 'ffmpeg-8.0-full_build', 'bin', 'ffmpeg.exe');
+    const newest = touch(...pkg, 'ffmpeg-9.0.2-full_build', 'bin', 'ffmpeg.exe');
+    touch('Microsoft', 'WinGet', 'Packages', 'Other.Tool', 'x', 'bin', 'ffmpeg.exe');
+    expect(findWingetFfmpeg(root)).toBe(newest);
+  });
+
+  it('prefers the WinGet\\Links shim and returns undefined when nothing is installed', () => {
+    root = mkdtempSync(join(tmpdir(), 'winget-'));
+    expect(findWingetFfmpeg(root)).toBeUndefined();
+    const link = touch('Microsoft', 'WinGet', 'Links', 'ffmpeg.exe');
+    touch('Microsoft', 'WinGet', 'Packages', 'Gyan.FFmpeg', 'ffmpeg-9.0.2-full_build', 'bin', 'ffmpeg.exe');
+    expect(findWingetFfmpeg(root)).toBe(link);
+    expect(findWingetFfmpeg('')).toBeUndefined();
   });
 });
 
