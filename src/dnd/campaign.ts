@@ -560,6 +560,39 @@ export function startInitiative(c: Campaign, roller: Roller = cryptoRoller, name
   return rolls.map(({ name, init, detail }) => ({ name, init, detail }));
 }
 
+/**
+ * 战斗进行中加入新的参战者（赶到的队友、刚刷出来的怪）：只给他们掷先攻并插进现有顺序，
+ * 不重掷别人、不重置轮数——重开一场会把正在进行的回合和整张先攻表都打乱。
+ * 插在当前行动者前面的，本轮已经错过，下一轮才轮到。
+ */
+export function joinInitiative(c: Campaign, names: string[], roller: Roller = cryptoRoller): InitiativeRoll[] {
+  const state = requireInitiative(c);
+  if (names.length === 0) throw new Error('join 要给 participants');
+  const members = [...new Set(names.map((n) => requireCharacter(c, n)))];
+  const already = members.filter((ch) => state.order.some((e) => e.name === ch.name));
+  if (already.length > 0) throw new Error(`${already.map((ch) => ch.name).join('、')} 已经在先攻表里了`);
+  const out = members.filter((ch) => isOut(ch));
+  if (out.length > 0) throw new Error(`${out.map((ch) => ch.name).join('、')} 已经倒下，不能入战`);
+  const rolls = members.map((ch) => {
+    const r = rollD20(initBonusOf(ch), 'none', roller);
+    return { name: ch.name, init: r.total, detail: r.detail };
+  });
+  for (const r of rolls) {
+    // 同点数排在已有的人后面：先在场的先动
+    let idx = state.order.findIndex((e) => e.init < r.init);
+    if (idx === -1) idx = state.order.length;
+    state.order.splice(idx, 0, { name: r.name, init: r.init });
+    if (idx <= state.turn) state.turn++;
+  }
+  pushLog(c, `加入战斗：${rolls.map((r) => `${r.name}(${r.init})`).join('、')}`);
+  return rolls;
+}
+
+/** 已在先攻表里的角色名 */
+export function inInitiative(c: Campaign, name: string): boolean {
+  return c.initiative?.order.some((e) => e.name === name) ?? false;
+}
+
 function removeFromInitiative(state: InitiativeState, name: string): void {
   const idx = state.order.findIndex((e) => e.name === name);
   if (idx === -1) return;
@@ -766,7 +799,8 @@ export function moveParty(
   if (c.initiative !== undefined) {
     if (whole) throw new Error('战斗中不能整队移动；先结束战斗（dnd_initiative end），或用 who 只移动当前回合的角色');
     const current = c.initiative.order[c.initiative.turn]?.name;
-    const others = who.map((n) => requireCharacter(c, n).name).filter((n) => n !== current);
+    // 不在先攻表里的人（还在路上的队友）不受回合限制，否则他们永远等不到「自己的回合」、赶不过来
+    const others = who.map((n) => requireCharacter(c, n).name).filter((n) => n !== current && inInitiative(c, n));
     if (others.length > 0) throw new Error(`战斗中只能移动当前回合的角色（${current ?? '无'}）：${others.join('、')} 要等自己的回合`);
   }
   const candidates = whole

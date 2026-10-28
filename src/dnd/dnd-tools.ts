@@ -35,6 +35,8 @@ import {
   gotoTurn,
   grantTempHp,
   heal,
+  inInitiative,
+  joinInitiative,
   moveParty,
   nextTurn,
   partyPositions,
@@ -611,11 +613,14 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     'dnd_initiative',
     'Combat rounds. start: roll initiative for everyone alive in the current room (or the given participants) and '
     + 'sort. next: end the current creature\'s turn (on a PC turn only that player can end it: pass declared_by). '
+    + 'join: add late arrivals (teammates who caught up, newly spawned monsters) to the running fight: rolls '
+    + 'initiative only for `participants` and slots them in, keeping the round and everyone else\'s order; never '
+    + 'end+start just to add someone. '
     + 'goto: fix the pointer when it disagrees with the story (name, optional round). end: leave combat and clear '
     + 'defeated monsters. status: show the order.',
     {
-      action: { type: 'string', enum: ['start', 'next', 'goto', 'end', 'status'] },
-      participants: { type: 'array', items: { type: 'string' }, description: 'Optional for start.' },
+      action: { type: 'string', enum: ['start', 'join', 'next', 'goto', 'end', 'status'] },
+      participants: { type: 'array', items: { type: 'string' }, description: 'Optional for start; required for join.' },
       room: { type: 'string', description: 'For start: room id where the fight happens (default: the party\'s main room).' },
       name: { type: 'string', description: 'For goto.' },
       round: { type: 'integer', description: 'For goto.' },
@@ -638,6 +643,13 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         turnChanged();
         return `先攻：\n${rolls.map((r, i) => `${i + 1}. ${r.name} ${r.detail}`).join('\n')}\n第 1 轮，${turnPrompt(findCharacter(c, rolls[0]!.name), rolls[0]!.name)}`;
       }
+      if (action === 'join') {
+        const rolls = joinInitiative(c, strList(args.participants) ?? [], service.roller);
+        const state = requireInitiative(c);
+        const current = state.order[state.turn]!.name;
+        return `加入战斗：${rolls.map((r) => `${r.name} ${r.detail}`).join('；')}\n第 ${state.round} 轮：${orderLine(c)}\n`
+          + `仍是 ${current} 的回合；排在 ${current} 前面的新成员本轮已错过，下一轮才行动。`;
+      }
       if (action === 'next') {
         assertCanEndTurn(c, { declaredBy: str(args.declared_by), recentSenders: sendersOf(exec), dmOverride: args.dm_override === true });
         const { round, current, newRound } = nextTurn(c);
@@ -653,8 +665,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const { rounds, defeated } = endInitiative(c);
         return `战斗结束，共 ${rounds} 轮。${defeated.length > 0 ? `击败：${defeated.join('、')}` : ''}`;
       }
-      const state = requireInitiative(c);
-      return `第 ${state.round} 轮：${state.order.map((e, i) => (i === state.turn ? `▶${e.name}(${e.init})` : `${e.name}(${e.init})`)).join(' > ')}`;
+      return `第 ${requireInitiative(c).round} 轮：${orderLine(c)}`;
     }),
   );
 
@@ -663,7 +674,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     'Move characters to an adjacent room. Omit `who` only when the WHOLE party goes; when one or a few go ahead '
     + '(scouting, sneaking, fetching something) pass `who` so the others stay put. Returns the player-facing '
     + 'description (narrate from this) and DM-only notes (use for rulings, never read aloud). First visit reveals '
-    + 'the room and spawns its monsters. In combat only the current-turn character can move (with `who`). '
+    + 'the room and spawns its monsters. In combat, characters in the initiative order move only on their own turn (with `who`); '
+    + 'those not in the fight yet (catching up) can move any time, then join with dnd_initiative join. '
     + 'Pass discover_hidden=true only after a successful check found a secret passage. Exits that need a check '
     + '(climbing, swimming) are rolled by the tool for each mover; those who fail stay behind. In a town you can go '
     + 'to any location the players know. From a dungeon\'s entry, or anywhere in a town, you can travel to another '
@@ -709,6 +721,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         lines.push(`队伍现在分开了：${[...positions].map(([room, members]) => `${findRoom(roomGraph(adventure), room)?.name ?? room}：${members.map((ch) => ch.name).join('、')}`).join('｜')}。没来的人看不到这里，别替他们行动。`);
       }
       if (result.story.length > 0) lines.push(`【剧情】${result.story.join('；')}`);
+      const joinHint = combatJoinHint(c, result.room.id, result.movers, result.spawned.map((m) => m.name));
+      if (joinHint !== undefined) lines.push(joinHint);
       return lines.join('\n');
     }),
   );
@@ -960,6 +974,28 @@ export function lookup(c: Campaign, adventure: Adventure, kind: string, id: stri
     return roomCard(c, adventure, room);
   }
   throw new Error(`dnd_lookup 不认识的 kind: ${kind}`);
+}
+
+function orderLine(c: Campaign): string {
+  const state = requireInitiative(c);
+  return state.order.map((e, i) => (i === state.turn ? `▶${e.name}(${e.init})` : `${e.name}(${e.init})`)).join(' > ');
+}
+
+/**
+ * 战斗中有人走进交战房间、或者刷出了新怪时，提醒模型用 join 拉进先攻表；
+ * 不提醒的话模型要么让他们一直站着不动，要么 end 再 start 把整场重来。
+ */
+export function combatJoinHint(c: Campaign, room: string, movers: string[], spawned: string[]): string | undefined {
+  if (c.initiative === undefined) return undefined;
+  const fightRooms = new Set(c.initiative.order.map((e) => {
+    const ch = findCharacter(c, e.name);
+    return ch === undefined ? undefined : roomOf(c, ch);
+  }));
+  const arrivals = fightRooms.has(room) ? movers.filter((n) => !inInitiative(c, n)) : [];
+  const late = [...arrivals, ...spawned.filter((n) => !inInitiative(c, n))];
+  if (late.length === 0) return undefined;
+  return `【DM】战斗进行中，${late.join('、')} 还不在先攻表里。他们参战就调用 dnd_initiative join participants=[${late.join(', ')}]；`
+    + '不要 end 再 start。';
 }
 
 /** 轮到某角色时给模型的指引：怪物继续结算，PC 必须停下等玩家 */

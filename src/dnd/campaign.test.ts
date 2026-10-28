@@ -17,6 +17,7 @@ import {
   endInitiative,
   heal,
   grantTempHp,
+  joinInitiative,
   moveParty,
   nextTurn,
   startInitiative,
@@ -27,6 +28,7 @@ import {
 import { validateDungeon } from './dungeon.ts';
 import { DndService } from './dnd-service.ts';
 import { buildMapSvg } from './map-render.ts';
+import { combatJoinHint } from './dnd-tools.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
 import { AdventureLibrary, adventureFromDungeon } from './adventure.ts';
 
@@ -159,6 +161,68 @@ describe('先攻', () => {
     expect(ended.defeated).toEqual(['巨鼠2']);
     expect(c.characters.some((ch) => ch.name === '巨鼠2')).toBe(false);
     expect(c.initiative).toBeUndefined();
+  });
+});
+
+describe('中途入战', () => {
+  // 艾琳、布洛克先进中殿开打，卡拉留在门口
+  function lateFight() {
+    const c = party();
+    upsertCharacter(c, { name: '卡拉', className: '牧师', abilities: { dex: 10 }, maxHp: 10, ac: 15 });
+    moveParty(c, BELL, 'nave', false, ['艾琳', '布洛克']);
+    startInitiative(c, fixed(10, 18, 5, 12, 3)); // 布洛克18 > 巨鼠2 14 > 艾琳13 > 巨鼠1 7 > 巨鼠3 5
+    return c;
+  }
+  const names = (c: ReturnType<typeof lateFight>) => c.initiative!.order.map((e) => e.name);
+
+  it('不在先攻表里的队友战斗中也能赶路，表里的人仍要等自己回合', () => {
+    const c = lateFight();
+    expect(names(c)).not.toContain('卡拉');
+    expect(() => moveParty(c, BELL, 'nave', false, ['卡拉'])).not.toThrow();
+    expect(() => moveParty(c, BELL, 'gate', false, ['艾琳'])).toThrow(/要等自己的回合/);
+  });
+
+  it('join 只给新人掷先攻并插入，不重置轮数，当前行动者不变', () => {
+    const c = lateFight();
+    nextTurn(c); // 巨鼠2
+    const rolls = joinInitiative(c, ['卡拉'], fixed(16));
+    expect(rolls).toMatchObject([{ name: '卡拉', init: 16 }]);
+    expect(names(c)).toEqual(['布洛克', '卡拉', '巨鼠2', '艾琳', '巨鼠1', '巨鼠3']);
+    expect(c.initiative).toMatchObject({ round: 1, turn: 2 });
+    expect(c.initiative!.order[c.initiative!.turn]!.name).toBe('巨鼠2');
+    // 插在前面的本轮错过，下一轮才轮到
+    nextTurn(c);
+    nextTurn(c);
+    nextTurn(c);
+    expect(nextTurn(c)).toMatchObject({ newRound: true, current: { name: '布洛克' } });
+    expect(nextTurn(c).current.name).toBe('卡拉');
+  });
+
+  it('点数低的新人排到后面，本轮就能行动', () => {
+    const c = lateFight();
+    joinInitiative(c, ['卡拉'], fixed(1));
+    expect(names(c).at(-1)).toBe('卡拉');
+    expect(c.initiative).toMatchObject({ round: 1, turn: 0 });
+  });
+
+  it('同点数排在已在场的人后面；重复加入、空名单、不在战斗中都报错', () => {
+    const c = lateFight();
+    joinInitiative(c, ['卡拉'], fixed(13)); // 和艾琳同为 13
+    expect(names(c).indexOf('卡拉')).toBe(names(c).indexOf('艾琳') + 1);
+    expect(() => joinInitiative(c, ['艾琳'])).toThrow(/已经在先攻表里/);
+    expect(() => joinInitiative(c, [])).toThrow(/participants/);
+    endInitiative(c);
+    expect(() => joinInitiative(c, ['卡拉'])).toThrow(/不在战斗中/);
+  });
+
+  it('有人赶到交战房间、或刷出新怪时提示用 join', () => {
+    const c = lateFight();
+    expect(combatJoinHint(c, 'nave', ['卡拉'], [])).toMatch(/dnd_initiative join participants=\[卡拉\]/);
+    expect(combatJoinHint(c, 'gate', ['卡拉'], [])).toBeUndefined();
+    expect(combatJoinHint(c, 'gate', [], ['骷髅1'])).toMatch(/骷髅1/);
+    expect(combatJoinHint(c, 'nave', ['艾琳'], [])).toBeUndefined();
+    endInitiative(c);
+    expect(combatJoinHint(c, 'nave', ['卡拉'], [])).toBeUndefined();
   });
 });
 
