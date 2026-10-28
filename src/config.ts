@@ -84,6 +84,17 @@ export interface FileAccessConfig {
   sensitivePaths: string[];
 }
 
+export interface ToolAccessConfig {
+  /** 是否按会话限制工具（关闭 = 所有 QQ 会话都能用终端、读任意路径） */
+  enabled: boolean;
+  /** 能用终端、读写任意路径的群 openid（主人私聊始终可以） */
+  fullAccessGroups: string[];
+  /** 除主人外，私聊里能用终端、读写任意路径的 openid */
+  fullAccessUsers: string[];
+  /** 受限会话额外允许文件工具访问的目录（media、表情库、临时目录始终允许） */
+  readRoots: string[];
+}
+
 export interface StickersConfig {
   /** 是否启用表情自动收藏（工具 + 动态表情清单） */
   enabled: boolean;
@@ -195,6 +206,8 @@ export interface ImQQBotConfig {
   adminOpenids: string[];
   /** 文件访问白名单 */
   fileAccess: FileAccessConfig;
+  /** 工具权限：哪些会话能用终端、文件工具能碰哪些目录 */
+  toolAccess: ToolAccessConfig;
   /** 表情自动收藏（qqbot_save_sticker + 动态表情清单） */
   stickers: StickersConfig;
   /** 共享笔记库（qqbot_notes_search / qqbot_notes_save + 自动召回） */
@@ -211,6 +224,14 @@ export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
   c2cAllow: Schema.array(Schema.string()).default([]).description('C2C白名单'),
   groupMode: Schema.union(['open', 'allowlist', 'disabled']).default('open').description('群聊访问模式'),
   groupAllow: Schema.array(Schema.string()).default([]).description('群聊白名单'),
+});
+
+/** 工具权限子 Schema */
+export const ToolAccessSchema: Schema<ToolAccessConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否按会话限制工具'),
+  fullAccessGroups: Schema.array(Schema.string()).default([]).description('能用终端、读写任意路径的群 openid'),
+  fullAccessUsers: Schema.array(Schema.string()).default([]).description('除主人外能用终端的私聊 openid'),
+  readRoots: Schema.array(Schema.string()).default([]).description('受限会话额外允许访问的目录'),
 });
 
 /** 文件访问白名单子 Schema（独立导出：config 路由的服务端校验复用） */
@@ -351,6 +372,12 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     extraAllow: [],
     sensitivePaths: [],
   }).description('文件访问白名单'),
+  toolAccess: ToolAccessSchema.default({
+    enabled: true,
+    fullAccessGroups: [],
+    fullAccessUsers: [],
+    readRoots: [],
+  }).description('工具权限（终端白名单群、受限会话可访问的目录）'),
   stickers: StickersSchema.default({
     enabled: true,
     root: '',

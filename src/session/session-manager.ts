@@ -25,6 +25,7 @@ import { IdleEvictor } from './idle-evictor.ts';
 import { resolveSessionCwd } from '../shared/file-access.ts';
 import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts';
 import { chatKeyOf, formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
+import type { ToolAccess } from '../features/tool-access.ts';
 import type { DndService } from '../dnd/dnd-service.ts';
 import { resolveTmpDir } from '../media/tmp-dir.ts';
 import { join } from 'node:path';
@@ -118,6 +119,8 @@ export class SessionManager {
   public stickerStore?: StickerStore;
   /** 由 bootstrap 注入的共享笔记库（工具 + 自动召回） */
   public notesStore?: NotesStore;
+  /** 由 bootstrap 注入的工具权限（终端白名单） */
+  public toolAccess?: ToolAccess;
   /** 由 bootstrap 注入的跑团服务（/dnd 命令 + DM prompt 注入） */
   public dndService?: DndService;
 
@@ -197,6 +200,18 @@ export class SessionManager {
         } catch (err) {
           this.logger.warn(`im-qqbot: 注入表情清单失败: ${err instanceof Error ? err.message : String(err)}`);
         }
+      }
+
+      if (this.toolAccess !== undefined && !this.toolAccess.isFullAccess({ scope: record.scope, peerId: record.peerId })) {
+        sections.push({
+          name: 'qqbot:tool-access',
+          order: 91,
+          text: [
+            '【工具权限】',
+            '本会话不在终端白名单里：没有 pwsh/bash/终端，不能派生子 agent；文件工具只能用在 bot 的媒体、表情和临时目录。被拦就直接告诉用户做不到，别换工具绕，也别说出本机路径。',
+            '只有 bot 主人能把本群加入白名单：主人明确要求时调用 qqbot_tool_access(action="grant")，它会发确认按钮，主人点了才生效。',
+          ].join('\n'),
+        });
       }
 
       if (this.notesStore !== undefined) {

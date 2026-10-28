@@ -46,19 +46,28 @@ import { AdventureLibrary } from '../dnd/adventure.ts';
 import { DndService } from '../dnd/dnd-service.ts';
 import { registerDndTools } from '../dnd/dnd-tools.ts';
 import { ACK, DndTurnButtons } from '../dnd/turn-buttons.ts';
+import { ToolAccess, ToolAccessStore } from '../features/tool-access.ts';
+import { createToolGuard } from '../shared/tool-guard.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
  * channel（question / approval）。QQ 只有一个 interaction 入口，集中路由
  * 避免多通道各自 try 导致误判。
  */
-function dispatchInteraction(event: InteractionEvent, manager: SessionManager, dndButtons?: DndTurnButtons): number {
+function dispatchInteraction(
+  event: InteractionEvent,
+  manager: SessionManager,
+  dndButtons?: DndTurnButtons,
+  toolAccess?: ToolAccess,
+): number {
   const raw = event.data?.resolved?.button_data;
   if (!raw) return ACK.duplicate;
   const button = decodeButtonData(raw);
   if (!button) return ACK.duplicate;
   // 跑团按钮自己决定返回码：不是本人点「结束回合」时回 denied，QQ 会弹无权限提示
   if (button.t === 'dnd') return dndButtons?.handleInteraction(event) ?? ACK.duplicate;
+  // 终端白名单确认：只认主人点击，别人点回 denied
+  if (button.t === 'access') return toolAccess?.handleInteraction(event) ?? ACK.duplicate;
   const matched = button.t === 'question'
     ? manager.questionChannel?.handleInteraction(event) ?? false
     : manager.approvalChannel?.handleInteraction(event) ?? false;
@@ -242,6 +251,28 @@ export async function bootstrapGateway(
     ? new DndTurnButtons(dndService, manager, sender, logger)
     : undefined;
 
+  // ── 工具权限：非白名单会话不给终端、文件工具只能碰 bot 自己的目录；主人可在聊天里确认加白名单 ──
+  const toolAccess = new ToolAccess(config, new ToolAccessStore(), manager, sender, logger);
+  manager.toolAccess = toolAccess;
+  try {
+    const guardTools = ctx.get('tools') as { guard?: (guard: unknown) => unknown } | undefined;
+    if (guardTools?.guard === undefined) {
+      logger.warn('im-qqbot: tools.guard 不可用，工具权限拦截未启用');
+    } else {
+      guardTools.guard(createToolGuard({
+        config,
+        isFullAccess: (session) => toolAccess.isFullAccess(session),
+        findSession: (agent) => manager.findByAgent(agent as never),
+        roots: [MEDIA_ROOT, resolveTmpDir(config), ...(stickerStore !== undefined ? [stickerStore.root] : []), ...(config.toolAccess?.readRoots ?? [])],
+        cwd: config.cwd || process.cwd(),
+      }));
+      logger.info(`im-qqbot: 工具权限拦截已启用 白名单群=${config.toolAccess?.fullAccessGroups.length ?? 0}+${toolAccess.store.groups.length}`);
+    }
+  } catch (err) {
+    logger.warn(`im-qqbot: 工具权限拦截注册失败: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  toolAccess.register(ctx);
+
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
     // scope/targetId 推导对齐消息事件（inbound.ts）：按 scene 判定类型，群用 group_openid，私聊用 user_openid
     const scope: ChatScope = event.scene === 'group' ? 'group' : 'c2c';
@@ -249,7 +280,7 @@ export async function bootstrapGateway(
     // 记录互动事件 id，作为后续被动回复候选（event_id）
     cacheEventId(scope, targetId, event.id);
 
-    const code = dispatchInteraction(event, manager, dndButtons);
+    const code = dispatchInteraction(event, manager, dndButtons, toolAccess);
     await bot.acknowledgeInteraction(event.id, code).catch(() => {});
   });
 

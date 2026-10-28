@@ -42,7 +42,14 @@ export interface DndButtonData {
   r?: number;
 }
 
-export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData;
+/** 终端白名单确认按钮：p=待确认申请 id，d=决策（只认主人点击） */
+export interface AccessButtonData {
+  t: 'access';
+  p: string;
+  d: 'allow' | 'deny';
+}
+
+export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData | AccessButtonData;
 
 /** 编码 button_data（JSON 字符串） */
 export function encodeButtonData(data: ButtonData): string {
@@ -53,7 +60,7 @@ export function encodeButtonData(data: ButtonData): string {
 export function decodeButtonData(raw: string): ButtonData | undefined {
   try {
     const parsed = JSON.parse(raw) as Partial<ButtonData>;
-    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd')) {
+    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd' || parsed.t === 'access')) {
       return parsed as ButtonData;
     }
   } catch {
