@@ -21,6 +21,35 @@ export interface MediaConfig {
   maxMB: number;
   /** 富媒体存活时长（小时，TTL），默认 24，0 = 永不过期 */
   ttlHours: number;
+  /** media 目录总量上限（MB），超出时从最旧的删，默认 1024，0 = 不限 */
+  maxTotalMB?: number;
+}
+
+/** 用户自定义清理规则 */
+export interface CleanupRuleConfig {
+  /** 规则名（日志 / 报告用，空 = 用 dir） */
+  name: string;
+  /** 目录（相对路径按 cwd 解析；必须位于 cwd / 插件目录 / 系统临时目录之内） */
+  dir: string;
+  /** file = 每个文件单独判断；entry = 每个顶层条目整体判断（取子树最新 mtime） */
+  unit: 'file' | 'entry';
+  /** 超过多少小时未改动就删除（0 = 不按时间删） */
+  ttlHours: number;
+  /** unit=file 时是否进入子目录 */
+  recursive: boolean;
+  /** 永不删除的文件/条目名（支持 * ?） */
+  keep: string[];
+  /** 非空时只处理命中的文件/条目名 */
+  match: string[];
+  /** 总量上限（MB），超出从最旧的删（0 = 不限） */
+  maxTotalMB: number;
+}
+
+export interface CleanupConfig {
+  /** 只记日志不删除（先看看会删什么） */
+  dryRun: boolean;
+  /** 额外的清理规则（media / tmp / 视频工作目录是内置规则） */
+  rules: CleanupRuleConfig[];
 }
 
 export interface VisionConfig {
@@ -160,6 +189,10 @@ export interface ImQQBotConfig {
   tmpDir: string;
   /** 临时目录里多少小时没改动的条目自动清理（0 = 不清理） */
   tmpTtlHours: number;
+  /** 临时目录总量上限（MB），超出时从最旧的条目删（0 = 不限） */
+  tmpMaxTotalMB?: number;
+  /** 定期清理（内置 media / tmp 规则之外的额外目录） */
+  cleanup?: CleanupConfig;
   /** 是否启用群消息 @mention 门控 */
   requireMention: boolean;
   /** 群聊未 @bot 时随机回复概率（0-1），0=关闭 */
@@ -217,6 +250,24 @@ export interface ImQQBotConfig {
   /** 跑团（/dnd + dnd_* 工具） */
   dnd: DndConfig;
 }
+
+/** 清理规则子 Schema */
+export const CleanupRuleSchema: Schema<CleanupRuleConfig> = Schema.object({
+  name: Schema.string().default('').description('规则名（空=用目录）'),
+  dir: Schema.string().default('').description('目录（相对路径按工作目录解析）'),
+  unit: Schema.union(['file', 'entry']).default('file').description('file=逐个文件；entry=顶层条目整体'),
+  ttlHours: Schema.number().default(72).description('多少小时未改动后删除（0=不按时间删）'),
+  recursive: Schema.boolean().default(false).description('unit=file 时是否进入子目录'),
+  keep: Schema.array(Schema.string()).default([]).description('永不删除的文件名（支持 * ?）'),
+  match: Schema.array(Schema.string()).default([]).description('只处理这些文件名（空=全部）'),
+  maxTotalMB: Schema.number().default(0).description('总量上限(MB)，0=不限'),
+});
+
+/** 清理配置子 Schema */
+export const CleanupSchema: Schema<CleanupConfig> = Schema.object({
+  dryRun: Schema.boolean().default(false).description('只记日志不删除'),
+  rules: Schema.array(CleanupRuleSchema).default([]).description('额外的清理规则'),
+});
 
 /** 访问控制子 Schema（独立导出：config 路由的服务端校验复用） */
 export const AccessControlSchema: Schema<AccessControlConfig> = Schema.object({
@@ -284,6 +335,8 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   cwd: Schema.string().description('Agent working directory'),
   tmpDir: Schema.string().default('').description('Agent 临时目录（空=工作目录/tmp）'),
   tmpTtlHours: Schema.number().default(72).description('临时目录条目多少小时未改动后自动清理（0=不清理）'),
+  tmpMaxTotalMB: Schema.number().default(4096).description('临时目录总量上限(MB)，超出从最旧的条目删，0=不限'),
+  cleanup: CleanupSchema.default({ dryRun: false, rules: [] }).description('定期清理（内置 media/tmp 之外的额外目录）'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupReplyProbability: Schema.number().default(0).description('群聊未@时随机回复概率(0-1)，0=关闭'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
@@ -308,10 +361,12 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),
     maxMB: Schema.number().default(200).description('富媒体下载大小上限(MB)'),
     ttlHours: Schema.number().default(24).description('富媒体存活时长(小时)，0=永不过期'),
+    maxTotalMB: Schema.number().default(1024).description('media 目录总量上限(MB)，超出从最旧的删，0=不限'),
   }).default({
     enabled: true,
     maxMB: 200,
     ttlHours: 24,
+    maxTotalMB: 1024,
   }).description('富媒体理解配置'),
   vision: Schema.object({
     enabled: Schema.boolean().default(false).description('是否启用视觉理解（qqbot_describe_image 工具）'),

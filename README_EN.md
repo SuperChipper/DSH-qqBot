@@ -15,7 +15,7 @@
 | 🧠 Memory | A Markdown notes library shared by every session, recalled automatically by content; a group's own notes stay out of other groups |
 | 😺 Stickers | Saves stickers based on the bot's mood, matches stickers by hash, a meme-recognition skill |
 | 🖼 Media | Text and media in one message (`caption`), native image input via `deepseek-native`, voice recognition, video understanding, images in forwarded chats |
-| 🔧 Tools | Read-only Bilibili tools, fanart picker, agent temp directory |
+| 🔧 Tools | Read-only Bilibili tools, fanart picker, agent temp directory, scheduled cleanup |
 | ⏰ Schedules | `/new` migrates scheduled tasks, failed proactive group messages are resent later |
 | 🔒 Permissions | Empty allowlist fails closed, only owner/admins change config or click approvals, Bilibili login only in the owner's private chat, per-chat limits on terminal and file tools |
 | 🧩 DSH integration | Install and configure from the DSH Web "Plugins" page, pet balance works with `deepseek-native` |
@@ -128,6 +128,12 @@ The Markdown files under `notes.root` (default `cwd/notes`) are the bot's long-t
   - The API approach follows [dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll) (MIT), reimplemented in plain Node.
 - **Fanart picker `qqbot_fanart_pick`.** Draws a few candidates from pixiv/safebooru pairing tag pools and stitches them into a numbered contact sheet for the model to choose from; images that get sent are marked as seen.
 - **Agent temp directory.** `tmpDir` (default `cwd/tmp`) is where scripts, screenshots and downloads go; entries untouched for `tmpTtlHours` are cleaned up automatically.
+- **Scheduled cleanup.** Runs once at startup and then every hour, removing files by rule.
+  - Built-in rules: files in `media/` older than `media.ttlHours`, plus oldest-first removal once the folder exceeds `media.maxTotalMB`; images in `media/fanart/` after 7 days (`seen*.json` is kept); `tmp/` per top-level entry (using the newest mtime inside it) after `tmpTtlHours`, plus oldest-first removal above `tmpMaxTotalMB`; and work folders that `qqbot_describe_video` left in the system temp folder after a crash, after 1 hour.
+  - `cleanup.rules` adds more folders (such as `state/` for scheduled tasks). Each rule takes `unit` (`file` for each file, `entry` for each top-level entry as a whole), `ttlHours`, `keep` (names never deleted, such as `*.json` or `*.log`), `match`, `recursive` and `maxTotalMB`. A rule's folder must be inside the working directory, the plugin folder or the system temp folder, or the rule is ignored.
+  - Symlinks are not followed; entries changed in the last 10 minutes are skipped when trimming to a size cap; `cleanup.dryRun` only logs what would be deleted.
+  - The owner and admins can send `/bot-cleanup` to see each folder's usage and the last sweep, `/bot-cleanup run` to sweep now, or `/bot-cleanup dry` to see what would be deleted.
+  - `~/.dsh/attachments` (dsh's own image store) is not touched, because older sessions still point to those files.
 
 ## ⏰ Scheduled tasks
 
@@ -162,6 +168,8 @@ Upstream options are documented in the [upstream README](https://github.com/tenc
 | `groupReplyProbability` | `0` | Chance (0–1) of replying to a group message that doesn't @ the bot |
 | `autoCompactTokens` | `120000` | Compact the context once it exceeds this many tokens (0 = off) |
 | `tmpDir` / `tmpTtlHours` | `cwd/tmp` / `72` | Agent temp directory and how long before entries are cleaned up |
+| `tmpMaxTotalMB` / `media.maxTotalMB` | `4096` / `1024` | Size cap for the temp directory / media; above it the oldest go first (0 = no cap) |
+| `cleanup.rules` / `cleanup.dryRun` | `[]` / `false` | Extra cleanup rules; log only, delete nothing |
 | `vision.native` | `false` | Hand images to the main model as native ImageBlocks |
 | `asr.enabled` / `baseUrl` / `apiKey` / `model` | `false` / SiliconFlow / `''` (= `QQBOT_ASR_API_KEY`) / `FunAudioLLM/SenseVoiceSmall` | Online voice recognition |
 | `asr.preferQQ` / `asr.timeoutMs` | `true` / `30000` | Skip the API when QQ already supplied recognised text; transcription timeout |

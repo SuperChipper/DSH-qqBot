@@ -15,7 +15,7 @@
 | 🧠 记忆 | 所有会话共享的 Markdown 笔记库，按内容自动召回；群专属笔记不串到别的群 |
 | 😺 表情 | 按情绪自动收藏表情、按哈希匹配表情、梗图识别 skill |
 | 🖼 媒体 | 图文同发（caption）、`deepseek-native` 原生读图、语音识别、视频理解、合并转发里的图片 |
-| 🔧 工具 | B 站只读工具、同人图挑选（fanart picker）、Agent 临时目录 |
+| 🔧 工具 | B 站只读工具、同人图挑选（fanart picker）、Agent 临时目录、定期清理 |
 | ⏰ 定时 | `/new` 自动迁移定时任务、群聊主动消息失败后补发 |
 | 🔒 权限 | allowlist fail-closed、主人/管理员才能改配置和点审批、B 站登录仅限私聊主人、按会话限制终端和文件工具 |
 | 🧩 DSH 集成 | 在 DSH Web「插件」页安装和配置、桌宠余额兼容 `deepseek-native` |
@@ -128,6 +128,12 @@
   - 参考了 [dsh-bili-scroll](https://github.com/c1overzz/dsh-bili-scroll)（MIT）的接口思路，用纯 Node 实现。
 - **同人图挑选 `qqbot_fanart_pick`**：从 pixiv/safebooru 的 CP 标签池抽几张候选，拼成带编号的预览图让模型挑选；发出去的图记为已看过。
 - **Agent 临时目录**：`tmpDir`（默认 `cwd/tmp`），脚本、截图、下载都写在这里；超过 `tmpTtlHours` 没改动的条目自动清理。
+- **定期清理**：启动时一次、之后每小时一次，按规则回收文件。
+  - 内置规则：`media/` 逐个文件超过 `media.ttlHours` 删除，总量超过 `media.maxTotalMB` 时从最旧的删；`media/fanart/` 里发过的图 7 天后删除（`seen*.json` 保留）；`tmp/` 以顶层条目为单位（取子树里最新的 mtime）超过 `tmpTtlHours` 删除，总量超过 `tmpMaxTotalMB` 时从最旧的条目删；`qqbot_describe_video` 崩溃时遗留在系统临时目录的工作目录 1 小时后删除。
+  - `cleanup.rules` 可以追加目录（如定时任务的 `state/`），每条规则可设 `unit`（`file` 逐个文件 / `entry` 顶层条目整体）、`ttlHours`、`keep`（永不删除的文件名，如 `*.json`、`*.log`）、`match`、`recursive`、`maxTotalMB`。规则目录必须位于工作目录、插件目录或系统临时目录之内，否则忽略。
+  - 不跟随符号链接；超量删除时跳过 10 分钟内改动过的条目；`cleanup.dryRun` 只记日志不删除。
+  - 主人/管理员发 `/bot-cleanup` 查看各目录占用和最近一次清理，`/bot-cleanup run` 立即清理，`/bot-cleanup dry` 试跑看会删什么。
+  - `~/.dsh/attachments`（dsh 自己的图片存储）不在清理范围内：旧会话还引用着这些文件。
 
 ## ⏰ 定时任务
 
@@ -162,6 +168,8 @@
 | `groupReplyProbability` | `0` | 群聊未 @ 时随机回复概率（0–1） |
 | `autoCompactTokens` | `120000` | 上下文超过此 token 数时自动压缩（0 = 关闭） |
 | `tmpDir` / `tmpTtlHours` | `cwd/tmp` / `72` | Agent 临时目录及清理时间 |
+| `tmpMaxTotalMB` / `media.maxTotalMB` | `4096` / `1024` | 临时目录 / media 总量上限，超出从最旧的删（0 = 不限） |
+| `cleanup.rules` / `cleanup.dryRun` | `[]` / `false` | 额外的清理规则；只记日志不删除 |
 | `vision.native` | `false` | 图片作为原生 ImageBlock 交给主模型 |
 | `asr.enabled` / `baseUrl` / `apiKey` / `model` | `false` / SiliconFlow / `''`（= `QQBOT_ASR_API_KEY`）/ `FunAudioLLM/SenseVoiceSmall` | 在线语音识别 |
 | `asr.preferQQ` / `asr.timeoutMs` | `true` / `30000` | 有 QQ 自带识别文本时不调接口；转写超时 |

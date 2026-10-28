@@ -27,7 +27,8 @@ import { PLUGIN_ROOT, buildUserAgent, isPrivilegedSender, privilegedOpenids } fr
 import type { ImQQBotConfig } from '../config.ts';
 import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
-import { MEDIA_ROOT, startMediaCleanup } from '../media/media-cleaner.ts';
+import { MEDIA_ROOT } from '../media/media-cleaner.ts';
+import { startCleanup } from '../media/cleanup.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { registerDescribeVideoTool } from '../media/video-tool.ts';
 import { registerSendFileTool, withFreshReplyTarget, type MediaSenderLike } from '../media/send-file-tool.ts';
@@ -36,7 +37,7 @@ import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
 import { registerPetNativeBalance } from '../pet/native-balance.ts';
 import { NotesStore } from '../notes/notes-store.ts';
-import { resolveTmpDir, startTmpDir } from '../media/tmp-dir.ts';
+import { ensureTmpDir, resolveTmpDir } from '../media/tmp-dir.ts';
 import { registerNotesTools } from '../notes/notes-tools.ts';
 import { registerFanartPickTool } from '../fanart/fanart-tool.ts';
 import { createHttpGet } from '../fanart/http.ts';
@@ -308,13 +309,11 @@ export async function bootstrapGateway(
     console.log(`[im-qqbot] Bot ready! appId=${config.appId}`);
   });
 
-  // ── 富媒体过期清理 ──
-  if (config.media.enabled) {
-    startMediaCleanup(ctx, config.media.ttlHours, logger);
-  }
+  // ── Agent 临时目录（cwd/tmp）：prompt 里要求模型把中间文件都放这里 ──
+  ensureTmpDir(resolveTmpDir(config), logger);
 
-  // ── Agent 临时目录（cwd/tmp）：创建 + 过期清理；prompt 里要求模型把中间文件都放这里 ──
-  startTmpDir(ctx, resolveTmpDir(config), config.tmpTtlHours ?? 72, logger);
+  // ── 定期清理：media / tmp / 视频工作目录 + cleanup.rules（启动时一次，之后每小时） ──
+  startCleanup(ctx, config, logger);
 
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
