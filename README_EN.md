@@ -12,12 +12,12 @@
 |------|----------|
 | 🎲 Tabletop | D&D 5e AI dungeon master: dice, checks and initiative all go through tools, only a PC's own player can act for it, turn buttons, fog-of-war map, an original dungeon, wiki lookup |
 | 💬 Group chat | Random interjections, persistent group memory, sees earlier images in the chat, answers only the triggering message, merged messages keep their senders, context cursor and auto-compaction |
-| 🧠 Memory | A Markdown notes library shared by every session, recalled automatically by content |
+| 🧠 Memory | A Markdown notes library shared by every session, recalled automatically by content; a group's own notes stay out of other groups |
 | 😺 Stickers | Saves stickers based on the bot's mood, matches stickers by hash, a meme-recognition skill |
-| 🖼 Media | Text and media in one message (`caption`), native image input via `deepseek-native` |
+| 🖼 Media | Text and media in one message (`caption`), native image input via `deepseek-native`, voice recognition, video understanding, images in forwarded chats |
 | 🔧 Tools | Read-only Bilibili tools, fanart picker, agent temp directory |
 | ⏰ Schedules | `/new` migrates scheduled tasks, failed proactive group messages are resent later |
-| 🔒 Permissions | Empty allowlist fails closed, only owner/admins change config or click approvals, Bilibili login only in the owner's private chat |
+| 🔒 Permissions | Empty allowlist fails closed, only owner/admins change config or click approvals, Bilibili login only in the owner's private chat, per-chat limits on terminal and file tools |
 | 🧩 DSH integration | Install and configure from the DSH Web "Plugins" page, pet balance works with `deepseek-native` |
 
 ---
@@ -96,13 +96,14 @@ The tool layer also handles some rules on its own: PCs going down at 0 HP and ma
 
 ## 🧠 Shared notes (long-term memory)
 
-The Markdown files under `notes.root` (default `cwd/notes`) are the bot's long-term memory. **Every group, private chat and local session shares the same set:**
+The Markdown files under `notes.root` (default `cwd/notes`) are the bot's long-term memory. **Every group, private chat and local session shares the same set**, except for chat-specific notes:
 
 - **Automatic recall.** Each message (including quoted text) is searched against the notes, and sufficiently relevant snippets are injected as `[共享笔记 · 可能相关]`.
 - **Tools.** `qqbot_notes_search` searches; `qqbot_notes_save` creates a note or appends a section, stamped with the date and source.
+- **Chat-specific notes.** `qqbot_notes_save` takes `scope`: `shared` (default) or `chat`. A `chat` note is stored under `notes/chats/<scope>_<peerId>/` and is only searched and recalled in that group or private chat, so one group's campaign isn't treated as something that happened in another. Notes that look like tabletop campaign records default to `chat`. Recalled chat notes are marked `[本会话]`, with a reminder that shared notes didn't necessarily happen in this group; campaign state comes from the `dnd_*` tools. Local sessions see every note.
 - Search runs locally: BM25 with Chinese bigram tokenisation, no vector service. The index rebuilds automatically when files change.
 
-> Notes are visible to every session, so something said in a private chat can be recalled in a group. Don't let the bot remember private information, and have the owner review `notes/` from time to time.
+> Shared notes are visible to every session, so something said in a private chat can be recalled in a group. Don't let the bot remember private information, and have the owner review `notes/` from time to time.
 
 ## 😺 Stickers
 
@@ -114,6 +115,9 @@ The Markdown files under `notes.root` (default `cwd/notes`) are the bot's long-t
 
 - **Text and media together.** `qqbot_send_file` has a new `caption` parameter, so text and an image, video or file go out as one rich-media message. Stray `<qqbot_send_file>` text tags written by the model are stripped.
 - **Native image input.** A new pi-ai route `deepseek-native` (`deepseek-flash`, text + image) plus `vision.native` hands images to the main model directly as `ImageBlock`s. `qqbot_describe_image` stays for OCR, charts and long screenshots. Existing sessions only switch after `/new` or `/model`.
+- **Voice recognition.** With `asr.enabled`, voice messages that QQ didn't transcribe are downloaded (SILK is decoded to WAV with silk-wasm) and sent to an OpenAI-compatible `/audio/transcriptions` endpoint. The default is SiliconFlow SenseVoice; switching to Groq, OpenAI or a local whisper.cpp server only takes a different `baseUrl` and `model`.
+- **Video understanding.** `qqbot_describe_video` uses ffmpeg to sample frames evenly from the first `video.maxSeconds` seconds (about one every 2 s, at most `video.maxFrames`), tiles them into one grid image for the vision model, and sends the audio track to `asr` at the same time. The result combines what's seen and what's said. It's registered only when vision is configured and ffmpeg/ffprobe can be found.
+- **Images in forwarded chats.** QQ doesn't put the images from a forwarded chat record (合并转发) in the attachments; they only appear as `[附件n] 类型:图片 …` lines with a URL in the expanded text, and the URL stops working once it expires. These images are now extracted and downloaded to media (up to 8 per message), and the line is rewritten to `[图片#n: local path]`, numbered after earlier chat images. With `vision.native` on they go to the main model as native images, with a short note on which were downloaded and which only have a URL.
 
 ## 🔧 Tools
 
@@ -135,6 +139,12 @@ The Markdown files under `notes.root` (default `cwd/notes`) are the bot's long-t
 - An empty `allowlist` now rejects everyone (fails closed) instead of falling back to allowing everyone.
 - Changing `/model` or `/preset`, and clicking approval buttons in groups, is limited to `ownerOpenid` / `adminOpenids`.
 - Approval cards are registered before they're sent, fixing a race with fast clicks; clicking an old card says it has expired.
+- **Per-chat tool limits** (`toolAccess`). DSH's sandbox only restricts writes, not reads, so anyone in a group could have the bot read `~/.dsh/.env` or other groups' saves with pwsh/read/grep. A `tools.guard()` hook now checks each chat:
+  - **Whitelisted chats** (the owner's private chat, `toolAccess.fullAccessGroups` / `fullAccessUsers`, and chats the owner approved in chat) are unrestricted.
+  - **Other QQ chats** get no terminal (`pwsh` / `bash` / `terminal_*`) and no tools that start sub-agents (a sub-agent would bypass the check). File tools (read/grep/glob/write/edit/`qqbot_send_file` and so on) can only reach media, stickers, the temp directory and `toolAccess.readRoots`; symlinks are resolved first, and grep/glob need an explicit path. The prompt in these chats explains the limits.
+  - `fileAccess.sensitivePaths` is blocked in every QQ chat, whitelisted or not.
+  - Local sessions (Web/Desktop) are not affected.
+- **`qqbot_tool_access`.** In the owner's private chat, asking the bot to "give group X the terminal" takes effect right away. In a group the model can only request it: the bot posts a confirm button, and the change applies only when the owner clicks it (QQ reports who clicked, so it can't be faked). Runtime grants are saved to `~/.dsh-qqbot/tool-access.json`.
 
 ## 🧩 DSH integration
 
@@ -153,6 +163,12 @@ Upstream options are documented in the [upstream README](https://github.com/tenc
 | `autoCompactTokens` | `120000` | Compact the context once it exceeds this many tokens (0 = off) |
 | `tmpDir` / `tmpTtlHours` | `cwd/tmp` / `72` | Agent temp directory and how long before entries are cleaned up |
 | `vision.native` | `false` | Hand images to the main model as native ImageBlocks |
+| `asr.enabled` / `baseUrl` / `apiKey` / `model` | `false` / SiliconFlow / `''` (= `QQBOT_ASR_API_KEY`) / `FunAudioLLM/SenseVoiceSmall` | Online voice recognition |
+| `asr.preferQQ` / `asr.timeoutMs` | `true` / `30000` | Skip the API when QQ already supplied recognised text; transcription timeout |
+| `video.enabled` / `ffmpegPath` / `maxFrames` / `maxSeconds` | `true` / `''` (PATH) / `8` / `300` | Video understanding tool |
+| `toolAccess.enabled` | `true` | Limit terminal and file tools per chat (off = every QQ chat can use the terminal and read any path) |
+| `toolAccess.fullAccessGroups` / `fullAccessUsers` | `[]` / `[]` | Unrestricted group / private-chat openids (the owner's private chat is always unrestricted) |
+| `toolAccess.readRoots` | `[]` | Extra directories file tools may reach in restricted chats (media, stickers and the temp directory are always allowed) |
 | `stickers.*` | see config page | Sticker directory, allowed sources, size and entry limits |
 | `notes.enabled` / `notes.root` | `true` / `cwd/notes` | Shared notes library |
 | `notes.autoInject` / `injectTopK` / `injectMaxChars` / `injectMinCoverage` | `true` / `2` / `600` / `0.4` | Automatic recall |

@@ -12,12 +12,12 @@
 |------|------|
 | 🎲 跑团 | D&D 5e AI 地下城主：掷骰/检定/先攻全走工具、行动只认本人、回合按钮、迷雾地图、原创地城、wiki 速查 |
 | 💬 群聊 | 概率插话、持久化群记忆、能看群里的历史图片、只回应触发消息、合并消息保留发送者、上下文游标与自动压缩 |
-| 🧠 记忆 | 所有会话共享的 Markdown 笔记库，按内容自动召回 |
+| 🧠 记忆 | 所有会话共享的 Markdown 笔记库，按内容自动召回；群专属笔记不串到别的群 |
 | 😺 表情 | 按情绪自动收藏表情、按哈希匹配表情、梗图识别 skill |
-| 🖼 媒体 | 图文同发（caption）、`deepseek-native` 原生读图 |
+| 🖼 媒体 | 图文同发（caption）、`deepseek-native` 原生读图、语音识别、视频理解、合并转发里的图片 |
 | 🔧 工具 | B 站只读工具、同人图挑选（fanart picker）、Agent 临时目录 |
 | ⏰ 定时 | `/new` 自动迁移定时任务、群聊主动消息失败后补发 |
-| 🔒 权限 | allowlist fail-closed、主人/管理员才能改配置和点审批、B 站登录仅限私聊主人 |
+| 🔒 权限 | allowlist fail-closed、主人/管理员才能改配置和点审批、B 站登录仅限私聊主人、按会话限制终端和文件工具 |
 | 🧩 DSH 集成 | 在 DSH Web「插件」页安装和配置、桌宠余额兼容 `deepseek-native` |
 
 ---
@@ -96,13 +96,14 @@
 
 ## 🧠 共享笔记（长期记忆）
 
-`notes.root`（默认 `cwd/notes`）下的 Markdown 是 bot 的长期记忆，**所有群、私聊和本机会话共用一份**：
+`notes.root`（默认 `cwd/notes`）下的 Markdown 是 bot 的长期记忆，**所有群、私聊和本机会话共用一份**，只有会话专属笔记例外：
 
 - **自动召回**：每条消息（含引用原文）检索笔记库，足够相关时注入 `[共享笔记 · 可能相关]`。
 - **工具**：`qqbot_notes_search` 检索，`qqbot_notes_save` 新建或追加小节（自动标注日期和来源）。
+- **会话专属笔记**：`qqbot_notes_save` 的 `scope` 可选 `shared`（默认）或 `chat`。`chat` 笔记存在 `notes/chats/<scope>_<peerId>/`，只在这个群/私聊里检索和召回，避免把 A 群的跑团设定当成 B 群发生过的事；看起来像跑团记录的笔记默认存成 `chat`。召回时会话专属笔记标 `[本会话]`，并提示共享笔记不一定发生在本群；跑团状态以 `dnd_*` 工具为准。本机会话能看到全部笔记。
 - 本地 BM25 + 中文二字切词，不需要向量服务；文件改动后自动重建索引。
 
-> 笔记对所有会话可见，私聊内容也可能在群里被召回。不要让 bot 记隐私，主人应定期翻看 `notes/` 清理。
+> 共享笔记对所有会话可见，私聊内容也可能在群里被召回。不要让 bot 记隐私，主人应定期翻看 `notes/` 清理。
 
 ## 😺 表情
 
@@ -116,6 +117,7 @@
 - **原生读图**：新增 pi-ai 路由 `deepseek-native`（`deepseek-flash`，text + image）和 `vision.native`，图片作为 `ImageBlock` 直接交给主模型；`qqbot_describe_image` 保留给 OCR、图表、长截图。已有会话需要 `/new` 或 `/model` 切换后才生效。
 - **语音识别**：`asr.enabled` 开启后，QQ 没给识别文本的语音会下载（SILK 用 silk-wasm 解码为 WAV）并调用 OpenAI 兼容的 `/audio/transcriptions`，默认 SiliconFlow SenseVoice；换 Groq / OpenAI 只需改 `baseUrl` 和 `model`。
 - **视频理解**：`qqbot_describe_video` 用 ffmpeg 在视频前 `video.maxSeconds` 秒均匀抽帧（约 2 秒一帧，最多 `video.maxFrames`），拼成一张宫格图交给视觉模型，同时把音轨交给 `asr` 转写，合成「画面 + 语音」文本。需要 vision 已配置且能找到 ffmpeg/ffprobe，否则不注册。
+- **合并转发里的图片**：QQ 不把聊天记录里的图片放进附件，只在展开的文本里留一行带 URL 的 `[附件n] 类型:图片 …`（URL 过期后就打不开）。现在会把这些图片提取出来下载到 media（每条消息最多 8 张），文本改写成 `[图片#n: 本地路径]`，编号接在历史图片之后；开了 `vision.native` 时直接作为原生图片交给主模型，并附一句提示说明哪些已下载、哪些只剩 URL。
 
 ## 🔧 工具
 
@@ -137,6 +139,12 @@
 - `allowlist` 为空时拒绝所有人（fail-closed），不再退化成全放行。
 - `/model`、`/preset` 的修改，以及群聊审批按钮，只有 `ownerOpenid` / `adminOpenids` 能操作。
 - 审批卡片先登记再发送，修复快速点击的竞态；旧卡片点击会提示已失效。
+- **按会话限制工具**（`toolAccess`）：DSH 的沙箱只限制写、不限制读，群友可以让 bot 用 pwsh/read/grep 去翻 `~/.dsh/.env` 或别的群的存档。现在通过 `tools.guard()` 按会话拦截：
+  - **白名单会话**（主人私聊、`toolAccess.fullAccessGroups` / `fullAccessUsers`、主人在聊天里确认加入的会话）不受限制；
+  - **其他 QQ 会话**：不给终端（`pwsh` / `bash` / `terminal_*`），不给会派生子 agent 的工具（子 agent 会绕过拦截）；文件工具（read/grep/glob/write/edit/`qqbot_send_file` 等）只能碰 media、表情库、临时目录和 `toolAccess.readRoots`，符号链接按真实路径判断，grep/glob 必须显式给 path；受限会话的提示词里会说明这些限制；
+  - `fileAccess.sensitivePaths` 对所有 QQ 会话都拦，白名单会话也不例外；
+  - 本机会话（Web/Desktop）不受影响。
+- **`qqbot_tool_access`**：主人在私聊里直接说「给 XX 群开终端」即可生效；在群里，模型只能发起申请，bot 发一条确认按钮，只有主人本人点「同意」才生效（点击者 openid 由 QQ 回调给出，无法伪造）。运行时授予的白名单存在 `~/.dsh-qqbot/tool-access.json`。
 
 ## 🧩 DSH 集成
 
@@ -159,6 +167,9 @@
 | `asr.preferQQ` / `asr.timeoutMs` | `true` / `30000` | 有 QQ 自带识别文本时不调接口；转写超时 |
 | `video.enabled` / `ffmpegPath` / `maxFrames` / `maxSeconds` | `true` / `''`（PATH）/ `8` / `300` | 视频理解工具 |
 | `stickers.*` | 见配置页 | 表情目录、来源白名单、大小与条目上限 |
+| `toolAccess.enabled` | `true` | 按会话限制终端和文件工具（关闭 = 所有 QQ 会话都能用终端、读任意路径） |
+| `toolAccess.fullAccessGroups` / `fullAccessUsers` | `[]` / `[]` | 不受限的群 / 私聊 openid（主人私聊始终不受限） |
+| `toolAccess.readRoots` | `[]` | 受限会话额外允许文件工具访问的目录（media、表情库、临时目录始终允许） |
 | `notes.enabled` / `notes.root` | `true` / `cwd/notes` | 共享笔记库 |
 | `notes.autoInject` / `injectTopK` / `injectMaxChars` / `injectMinCoverage` | `true` / `2` / `600` / `0.4` | 自动召回 |
 | `fanart.enabled` / `proxy` / `poolDir` | `true` / `''` / `scripts/` | 同人图挑选 |
