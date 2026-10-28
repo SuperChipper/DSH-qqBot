@@ -17,7 +17,7 @@ import type { Context } from '@deepseek-ai/cordis';
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { AsrConfig, VideoConfig, VisionConfig } from '../config.ts';
 import type { Logger } from '../types.ts';
-import { requestTranscription } from './asr.ts';
+import { ASR_OFFLINE_HINT, AsrOfflineError, requestTranscription } from './asr.ts';
 import { callVision, type AttachmentStoreLike, type LlmRuntimeLike } from './vision-tool.ts';
 
 const execFileAsync = promisify(execFile);
@@ -230,7 +230,7 @@ export async function registerDescribeVideoTool(
             return text ? { text } : { note: 'no speech detected' };
           } catch (err) {
             logger.warn(`im-qqbot: video audio transcription failed: ${err instanceof Error ? err.message : String(err)}`);
-            return { note: 'transcription failed' };
+            return { note: err instanceof AsrOfflineError ? ASR_OFFLINE_HINT : 'transcription failed' };
           }
         })();
 

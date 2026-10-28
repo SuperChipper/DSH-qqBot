@@ -1,6 +1,7 @@
+import { createServer, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { encode } from 'silk-wasm';
-import { pcmToWav, requestTranscription, toUploadableAudio } from './asr.ts';
+import { AsrOfflineError, pcmToWav, requestTranscription, toUploadableAudio } from './asr.ts';
 import { transcribeVoices } from '../middleware/attachment.ts';
 import type { AsrConfig } from '../config.ts';
 import type { RawAttachment } from '../types.ts';
@@ -18,6 +19,15 @@ const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 function voice(extra: Partial<RawAttachment> = {}): RawAttachment {
   return { content_type: 'voice', filename: 'a.amr', size: 100, url: 'https://x/a.amr', ...extra };
+}
+
+/** 一个刚释放、没人监听的本机端口（连上去必然 ECONNREFUSED） */
+async function closedPortUrl(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}/v1`;
 }
 
 afterEach(() => {
@@ -54,6 +64,11 @@ describe('requestTranscription', () => {
     expect((init.body as FormData).get('model')).toBe(asr.model);
   });
 
+  it('throws AsrOfflineError when nothing listens at baseUrl', async () => {
+    await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, { ...asr, baseUrl: await closedPortUrl() }))
+      .rejects.toBeInstanceOf(AsrOfflineError);
+  });
+
   it('throws on HTTP errors', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('bad key', { status: 401 })));
     await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, asr)).rejects.toThrow('HTTP 401');
@@ -71,6 +86,21 @@ describe('transcribeVoices', () => {
     );
     expect(transcribe).toHaveBeenCalledTimes(1);
     expect(out.map(p => [p.voiceText, p.voiceSource])).toEqual([['QQ结果', 'asr'], ['在线结果', 'stt']]);
+  });
+
+  it('marks voices with no QQ text as asrOffline when the server is down', async () => {
+    const transcribe = vi.fn(async () => ({ offline: true as const }));
+    const out = await transcribeVoices(
+      [voice(), voice({ filename: 'b.amr', asr_refer_text: 'QQ结果' })],
+      { ...asr, preferQQ: false },
+      logger,
+      transcribe,
+    );
+    expect(out).toEqual([
+      expect.objectContaining({ filename: 'a.amr', asrOffline: true, voiceSource: 'fallback' }),
+      expect.objectContaining({ filename: 'b.amr', voiceText: 'QQ结果', voiceSource: 'asr' }),
+    ]);
+    expect(out[0].voiceText).toBeUndefined();
   });
 
   it('falls back to QQ text when online ASR fails and preferQQ is off', async () => {

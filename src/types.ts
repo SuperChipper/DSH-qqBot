@@ -37,6 +37,8 @@ export interface ProcessedAttachment {
   voiceText?: string;
   /** stt = 在线 ASR 转写，asr = QQ 自带 asr_refer_text */
   voiceSource?: 'stt' | 'asr' | 'fallback';
+  /** 转写服务连不上（且没有 QQ 自带识别文本可用） */
+  asrOffline?: boolean;
   duration?: number;
   width?: number;
   height?: number;

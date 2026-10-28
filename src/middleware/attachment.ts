@@ -56,7 +56,7 @@ export function attachmentProcessor(config: ImQQBotConfig, logger: Logger) {
 
 /**
  * 转写当前消息的语音附件：preferQQ 时 QQ 自带 asr_refer_text 直接采用，否则调用在线 ASR。
- * 转写失败的语音不入结果，由 handleInbound 回退为 asr_refer_text 或语音链接。
+ * 服务连不上且没有 QQ 文本时记 asrOffline，handleInbound 据此让模型直接告知用户；其它失败不入结果，回退为语音链接。
  */
 export async function transcribeVoices(
   attachments: RawAttachment[] | undefined,
@@ -73,7 +73,7 @@ export async function transcribeVoices(
       continue;
     }
     const transcript = await transcribe(att, asr, logger);
-    if (transcript) {
+    if (transcript && 'text' in transcript) {
       results.push({
         type: 'voice',
         filename: att.filename,
@@ -84,6 +84,8 @@ export async function transcribeVoices(
       });
     } else if (qqText) {
       results.push({ type: 'voice', filename: att.filename, url: att.url, voiceText: qqText, voiceSource: 'asr' });
+    } else if (transcript?.offline) {
+      results.push({ type: 'voice', filename: att.filename, url: att.url, voiceSource: 'fallback', asrOffline: true });
     }
   }
   return results;

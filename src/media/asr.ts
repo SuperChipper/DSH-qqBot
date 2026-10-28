@@ -55,12 +55,37 @@ export async function toUploadableAudio(
   return { data: bytes, name: filename || 'voice.amr' };
 }
 
+/** 转写服务连不上（拒绝连接 / 找不到主机），区别于超时和 HTTP 错误 */
+export class AsrOfflineError extends Error {
+  constructor(baseUrl: string, cause: unknown) {
+    super(`ASR server unreachable: ${baseUrl}`, { cause });
+    this.name = 'AsrOfflineError';
+  }
+}
+
+/** 服务离线时给模型的说明：明确拒绝，不让它自己找别的办法转写 */
+export const ASR_OFFLINE_HINT =
+  'speech recognition is unavailable: the ASR server is offline. Tell the user, and ask the bot owner '
+  + 'to start the whisper server. Do not try to transcribe the audio any other way '
+  + '(no ffmpeg/whisper scripts, no other services).';
+
+/** 连接层错误码（undici 把它们挂在 TypeError('fetch failed').cause 上） */
+const OFFLINE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
+
+/** fetch 抛出的错误是否意味着服务连不上 */
+export function isConnectionError(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false;
+  const cause = (err as { cause?: { code?: unknown; errors?: Array<{ code?: unknown }> } }).cause;
+  const codes = [cause?.code, ...(cause?.errors ?? []).map(e => e.code)];
+  return codes.some(c => typeof c === 'string' && OFFLINE_CODES.has(c));
+}
+
 /** 读取接口密钥（配置为空时退到环境变量） */
 function resolveApiKey(asr: AsrConfig): string {
   return asr.apiKey || process.env.QQBOT_ASR_API_KEY || '';
 }
 
-/** 调用 OpenAI 兼容转写接口 */
+/** 调用 OpenAI 兼容转写接口；连不上时抛 AsrOfflineError */
 export async function requestTranscription(
   audio: { data: Buffer; name: string },
   asr: AsrConfig,
@@ -70,12 +95,17 @@ export async function requestTranscription(
   form.append('model', asr.model);
 
   const apiKey = resolveApiKey(asr);
-  const resp = await fetch(`${asr.baseUrl.replace(/\/+$/, '')}/audio/transcriptions`, {
-    method: 'POST',
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
-    body: form,
-    signal: AbortSignal.timeout(asr.timeoutMs),
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${asr.baseUrl.replace(/\/+$/, '')}/audio/transcriptions`, {
+      method: 'POST',
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      body: form,
+      signal: AbortSignal.timeout(asr.timeoutMs),
+    });
+  } catch (err) {
+    throw isConnectionError(err) ? new AsrOfflineError(asr.baseUrl, err) : err;
+  }
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(`HTTP ${resp.status} ${body.slice(0, 200)}`);
@@ -85,13 +115,13 @@ export async function requestTranscription(
 }
 
 /**
- * 转写一条语音附件；失败或识别为空返回 undefined（由调用方回退为语音链接）。
+ * 转写一条语音附件；服务连不上返回 { offline: true }，其它失败或识别为空返回 undefined。
  */
 export async function transcribeVoice(
   att: RawAttachment,
   asr: AsrConfig,
   logger: Logger,
-): Promise<VoiceTranscript | undefined> {
+): Promise<VoiceTranscript | { offline: true } | undefined> {
   const wavUrl = typeof att.voice_wav_url === 'string' ? att.voice_wav_url : '';
   const url = wavUrl || att.url;
   if (!url) return undefined;
@@ -105,6 +135,6 @@ export async function transcribeVoice(
     return { text, duration: audio.duration };
   } catch (err) {
     logger.warn(`im-qqbot: voice transcription failed: ${att.filename} — ${err instanceof Error ? err.message : String(err)}`);
-    return undefined;
+    return err instanceof AsrOfflineError ? { offline: true } : undefined;
   }
 }

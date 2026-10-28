@@ -33,6 +33,7 @@ import {
   type HistoryImage,
 } from '../media/history-images.ts';
 import { createForwardTagger, type ForwardImage, type TaggedForwardImage } from '../media/forward-images.ts';
+import { ASR_OFFLINE_HINT } from '../media/asr.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 
 // ── 类型定义 ──
@@ -454,6 +455,8 @@ function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string 
       const asrTexts = transcribed.length > 0 ? transcribed : voices.map(a => a.asr_refer_text).filter(Boolean);
       if (asrTexts.length > 0) {
         lines.push(`- ASR: ${asrTexts.join(' | ')}`);
+      } else if ((state.processedAttachments ?? []).some(pa => pa.type === 'voice' && pa.asrOffline)) {
+        lines.push(`- Voice: (${ASR_OFFLINE_HINT})`);
       } else {
         const urls = voices.map(a => a.url).filter(Boolean);
         if (urls.length > 0) lines.push(`- Voice: ${urls.join(', ')}`);

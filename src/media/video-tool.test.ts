@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createServer, type AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Context } from '@deepseek-ai/cordis';
@@ -13,6 +14,15 @@ import {
   resolveFfmpegBins,
 } from './video-tool.ts';
 import type { AsrConfig, VideoConfig, VisionConfig } from '../config.ts';
+
+/** 一个刚释放、没人监听的本机端口（连上去必然 ECONNREFUSED） */
+async function closedPortUrl(): Promise<string> {
+  const server = createServer();
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  await new Promise<void>(resolve => server.close(() => resolve()));
+  return `http://127.0.0.1:${port}/v1`;
+}
 
 describe('planFrames', () => {
   it('takes about one frame per 2s, capped by maxFrames and maxSeconds', () => {
@@ -84,7 +94,7 @@ describe.runIf(hasFfmpeg())('qqbot_describe_video with real ffmpeg', () => {
   };
   const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
-  async function register() {
+  async function register(asrConfig: AsrConfig = asr) {
     let tool: { execute(args: unknown, exec: { signal: AbortSignal }): Promise<Record<string, unknown>> } | undefined;
     const saved: Array<{ data: Uint8Array; mediaType: string }> = [];
     const prompts: string[] = [];
@@ -110,7 +120,7 @@ describe.runIf(hasFfmpeg())('qqbot_describe_video with real ffmpeg', () => {
       },
     };
     const ctx = { get: (name: string) => services[name] } as unknown as Context;
-    await registerDescribeVideoTool(ctx, video, vision, asr, logger);
+    await registerDescribeVideoTool(ctx, video, vision, asrConfig, logger);
     return { tool, saved, prompts };
   }
 
@@ -128,6 +138,15 @@ describe.runIf(hasFfmpeg())('qqbot_describe_video with real ffmpeg', () => {
     expect(prompts[0]).toContain('3x1 grid of 3 frames');
     const form = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as FormData;
     expect((form.get('file') as Blob).size).toBeGreaterThan(6 * 16000 * 2 * 0.9);
+  });
+
+  it('tells the model to refuse when the ASR server is offline', async () => {
+    const { tool } = await register({ ...asr, baseUrl: await closedPortUrl() });
+    const out = await tool!.execute({ video: clip }, { signal: new AbortController().signal });
+    expect(out.transcribed).toBe(false);
+    expect(out.text).toContain('[Visual] a color test pattern');
+    expect(out.text).toContain('[Speech] (speech recognition is unavailable: the ASR server is offline.');
+    expect(out.text).toContain('Do not try to transcribe the audio any other way');
   });
 
   it('rejects a missing file', async () => {
