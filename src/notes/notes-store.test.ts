@@ -2,7 +2,8 @@ import { mkdtempSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
-import { NotesStore, chunkMarkdown, formatNotesHint, tokenize } from './notes-store.ts';
+import { NotesStore, chatKeyOf, chunkMarkdown, formatNotesHint, tokenize } from './notes-store.ts';
+import { looksLikeCampaignNote } from './notes-tools.ts';
 
 const SAMPLE = [
   '# 大肥鱼小课堂 · 课堂笔记',
@@ -74,6 +75,20 @@ describe('NotesStore.search', () => {
   it('目录不存在时返回空', () => {
     expect(new NotesStore(join(tmpdir(), 'no-such-notes-dir-xyz')).search('任何')).toEqual([]);
   });
+
+  it('别的会话的私有笔记检索不到；本会话和本机会话都看得到', () => {
+    const root = tempNotes({
+      '共享.md': '# 跑团入门\n沉钟修道院是新手模组',
+      'chats/group_A/沉钟.md': '# 沉钟修道院\n队伍已升 2 级',
+      'chats/group_B/沉钟.md': '# 沉钟修道院\n还没开团',
+    });
+    const store = new NotesStore(root);
+    const files = (key?: string): string[] => store.search('沉钟修道院', 5, key).map((h) => h.file).sort();
+
+    expect(files('group_A')).toEqual(['chats/group_A/沉钟.md', '共享.md']);
+    expect(files('group_C')).toEqual(['共享.md']);
+    expect(files(undefined)).toHaveLength(3);
+  });
 });
 
 describe('NotesStore.save', () => {
@@ -111,6 +126,18 @@ describe('NotesStore.save', () => {
     expect(() => store.save({ title: 'x', content: 'a'.repeat(9000) })).toThrow(/过长/);
   });
 
+  it('带 chatKey 时写到 chats/<会话>/ 下，只有该会话检索得到', () => {
+    const root = tempNotes({});
+    const store = new NotesStore(root);
+    const key = chatKeyOf('group', 'A215');
+    const result = store.save({ title: '沉钟修道院 队伍', content: '刻德温是战争牧师', chatKey: key });
+
+    expect(result.message).toContain('只有本会话');
+    expect(readFileSync(join(root, 'chats', 'group_A215', '沉钟修道院 队伍.md'), 'utf8')).toContain('刻德温');
+    expect(store.search('刻德温是什么职业', 5, key)).toHaveLength(1);
+    expect(store.search('刻德温是什么职业', 5, chatKeyOf('group', 'D609'))).toEqual([]);
+  });
+
   it('人手改文件后重新索引（mtime/大小变化）', () => {
     vi.useFakeTimers();
     try {
@@ -140,9 +167,28 @@ describe('formatNotesHint', () => {
     expect(formatNotesHint(store.search('今天吃什么', 4), hintOptions)).toBe('');
   });
 
+  it('本会话私有笔记标成 [本会话]，不暴露目录名', () => {
+    const scoped = new NotesStore(tempNotes({ 'chats/group_A/团.md': '# 沉钟修道院\n队伍已升两级，下次开矿坑' }));
+    const hint = formatNotesHint(scoped.search('沉钟修道院下次开哪里', 4, 'group_A'), hintOptions);
+    expect(hint).toContain('- [本会话] 团.md › 沉钟修道院');
+    expect(hint).not.toContain('group_A');
+  });
+
   it('按 maxChars 截断', () => {
     const hint = formatNotesHint(store.search('明天开家长会怎么办', 4), { ...hintOptions, maxChars: 80, topK: 1 });
     const body = hint.split('\n')[2]!;
     expect(body.length).toBeLessThanOrEqual(85);
+  });
+});
+
+describe('looksLikeCampaignNote', () => {
+  it('跑团存档/约定默认只记到本会话', () => {
+    expect(looksLikeCampaignNote('沉钟修道院跑团 · DM 操作约定', '默认先上引导术')).toBe(true);
+    expect(looksLikeCampaignNote('2 级队伍配置', '一环位 3 个，20 HP')).toBe(true);
+  });
+
+  it('普通梗和知识不算', () => {
+    expect(looksLikeCampaignNote('网络缩写小抄', 'ltp、admin、php 的意思')).toBe(false);
+    expect(looksLikeCampaignNote('奶蛙迷因档案', '2026 年初在 B 站爆红')).toBe(false);
   });
 });

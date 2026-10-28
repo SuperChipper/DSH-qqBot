@@ -24,7 +24,7 @@ import type { ModelRoute, ModelEntry } from '../model/types.ts';
 import { IdleEvictor } from './idle-evictor.ts';
 import { resolveSessionCwd } from '../shared/file-access.ts';
 import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts';
-import { formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
+import { chatKeyOf, formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
 import type { DndService } from '../dnd/dnd-service.ts';
 import { resolveTmpDir } from '../media/tmp-dir.ts';
 import { join } from 'node:path';
@@ -207,6 +207,7 @@ export class SessionManager {
             '【共享笔记】',
             '你有一个所有群和私聊共享的笔记库，是你的长期记忆。消息前出现「[共享笔记 · 可能相关]」时，是按这条消息自动检索到的片段，相关就自然地用上，不相关就忽略，别生硬复述。',
             '想不起来但可能记过的东西，用 qqbot_notes_search 查；看完/学到/群里沉淀下来值得长期记住的，用 qqbot_notes_save 记下（提炼后再记，别记隐私和闲聊）。',
+            '只属于当前群的东西（跑团的队伍、角色、进度、DM 约定，这个群成员自己的事）用 qqbot_notes_save(scope="chat") 记，别的群看不到；共享笔记里提到的人和事不一定发生在这个群，别把别的群的跑团进度、角色当成这个群的。跑团进度以 dnd_* 工具查到的为准。',
             '记笔记是你自己的事，不用每次都告诉用户「我记下了」。',
             '另外有一本《人类观察日记》，所有群和私聊共用：遇到人类的回复和你预测的不一样，就往里追加一条，用 qqbot_notes_save(file="人类观察日记.md")，格式固定「预测 / 实际 / 差在哪」，编号取文末最后一个 +1。只记判断失误，不记流水账。',
           ].join('\n'),
@@ -499,12 +500,12 @@ export class SessionManager {
     }
   }
 
-  /** 按当前消息检索共享笔记，返回要注入的提示块（未启用/无相关结果/出错时返回空串） */
-  notesHint(query: string): string {
+  /** 按当前消息检索笔记（共享 + 本会话私有），返回要注入的提示块（未启用/无相关结果/出错时返回空串） */
+  notesHint(query: string, scope: ChatScope, peerId: string): string {
     const notes = this.config.notes;
     if (this.notesStore === undefined || !notes?.autoInject || query.trim().length === 0) return '';
     try {
-      return formatNotesHint(this.notesStore.search(query, notes.injectTopK * 2), {
+      return formatNotesHint(this.notesStore.search(query, notes.injectTopK * 2, chatKeyOf(scope, peerId)), {
         topK: notes.injectTopK,
         maxChars: notes.injectMaxChars,
         minCoverage: notes.injectMinCoverage,

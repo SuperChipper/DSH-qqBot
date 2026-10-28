@@ -308,7 +308,7 @@ function assembleAgentBody(
     : `[上次未送达]\n上一次发给本会话的消息因平台限制失败，内容如下。现在用户重新说话了，可以把它作为回复补发（太长就发摘要）：\n${unsent}`;
   const migrationHint = manager.takeScheduleMigration(scope, peerId);
   // 共享笔记自动召回：用当前消息（含引用原文）检索，命中才注入
-  const notesHint = manager.notesHint([userContent, state.quote?.text ?? state.quote?.entry?.content ?? ''].join('\n'));
+  const notesHint = manager.notesHint([userContent, state.quote?.text ?? state.quote?.entry?.content ?? ''].join('\n'), scope, peerId);
 
   const forwardHint = buildForwardHint(forwardImages);
 

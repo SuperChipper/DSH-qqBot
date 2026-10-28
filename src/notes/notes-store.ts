@@ -4,7 +4,9 @@
  *   - 按标题（#/##/###）把每个 .md 切成小段，一段就是一个检索单元；
  *   - 中文按二字切词（bigram）、英文/数字按词，BM25 打分，不依赖向量服务；
  *   - 目录有改动（文件增删、mtime/大小变化）时自动重建索引，人手改笔记也能立即生效；
- *   - save 只写到笔记根目录下，按标题建文件或追加小节。
+ *   - save 只写到笔记根目录下，按标题建文件或追加小节；
+ *   - `chats/<会话键>/` 下是只属于某个群/私聊的笔记（如某个群的跑团进度），只有那个会话检索得到，
+ *     避免别的群的存档混进来。
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { basename, extname, join, relative } from 'node:path';
@@ -22,6 +24,9 @@ const MAX_CHUNK_CHARS = 1200;
 const RESCAN_INTERVAL_MS = 3000;
 /** 单次 save 的内容上限 */
 const MAX_SAVE_CHARS = 8000;
+
+/** 会话私有笔记的子目录：chats/<会话键>/xxx.md */
+const CHAT_NOTES_DIR = 'chats';
 
 const BM25_K1 = 1.2;
 /** 长度归一化放轻（常见取 0.75）：笔记段都很短，否则「待办」这类短段会压过真正讲这件事的段 */
@@ -53,6 +58,8 @@ export interface SaveNoteInput {
   file?: string;
   /** 来源描述，如「群聊」「私聊」 */
   source?: string;
+  /** 会话键：给了就写进 chats/<会话键>/，只有这个会话检索得到 */
+  chatKey?: string;
 }
 
 export interface SaveNoteResult {
@@ -160,6 +167,32 @@ function sanitizeNoteFileName(name: string): string {
   return extname(safe).toLowerCase() === '.md' ? safe : `${safe}.md`;
 }
 
+/** 会话键 → 目录名，如 group:ABC → group_ABC */
+export function chatNotesDir(chatKey: string): string {
+  return chatKey.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 80) || 'unknown';
+}
+
+/** QQ 会话的笔记会话键 */
+export function chatKeyOf(scope: string, peerId: string): string {
+  return `${scope}_${peerId}`;
+}
+
+/** 这段笔记属于哪个会话；共享笔记返回 undefined */
+function chatOwnerOf(file: string): string | undefined {
+  const parts = file.split('/');
+  return parts.length >= 3 && parts[0] === CHAT_NOTES_DIR ? parts[1] : undefined;
+}
+
+/**
+ * 当前会话能不能看到这段笔记：共享笔记都能看；会话私有笔记只有本会话能看。
+ * chatKey 为 undefined 表示本机会话（主人自己），全部可见。
+ */
+function visibleTo(file: string, chatKey: string | undefined): boolean {
+  if (chatKey === undefined) return true;
+  const owner = chatOwnerOf(file);
+  return owner === undefined || owner === chatNotesDir(chatKey);
+}
+
 function today(): string {
   const d = new Date();
   const pad = (n: number): string => String(n).padStart(2, '0');
@@ -188,8 +221,9 @@ export class NotesStore {
 
   /**
    * 检索最相关的 limit 段。查询为空或没有任何命中时返回空数组。
+   * 给了 chatKey 时，别的会话的私有笔记（chats/<别的会话>/）不参与检索。
    */
-  public search(query: string, limit = 5): NoteHit[] {
+  public search(query: string, limit = 5, chatKey?: string): NoteHit[] {
     this.refresh();
     const queryTerms = [...new Set(tokenize(query))];
     if (queryTerms.length === 0 || this.chunks.length === 0) return [];
@@ -198,6 +232,7 @@ export class NotesStore {
     const knownTerms = queryTerms.filter((term) => this.docFreq.has(term)).length;
     const hits: NoteHit[] = [];
     for (const chunk of this.chunks) {
+      if (!visibleTo(chunk.file, chatKey)) continue;
       let score = 0;
       let matched = 0;
       for (const term of queryTerms) {
@@ -230,9 +265,11 @@ export class NotesStore {
     if (content.length === 0) throw new Error('笔记内容不能为空');
     if (content.length > MAX_SAVE_CHARS) throw new Error(`笔记内容过长（${content.length} 字，上限 ${MAX_SAVE_CHARS}）`);
 
-    mkdirSync(this.root, { recursive: true });
+    const dir = input.chatKey === undefined ? this.root : join(this.root, CHAT_NOTES_DIR, chatNotesDir(input.chatKey));
+    mkdirSync(dir, { recursive: true });
     const fileName = sanitizeNoteFileName(input.file ?? title);
-    const path = join(this.root, fileName);
+    const path = join(dir, fileName);
+    const shownName = input.chatKey === undefined ? fileName : `${CHAT_NOTES_DIR}/${chatNotesDir(input.chatKey)}/${fileName}`;
     const meta = `> 记录于 ${today()}${input.source ? ` · 来源：${input.source}` : ''}`;
     const created = !existsSync(path);
 
@@ -243,12 +280,13 @@ export class NotesStore {
     }
     this.lastScan = 0; // 下次检索立即重建索引
 
-    this.logger?.info(`im-qqbot: 笔记${created ? '新建' : '追加'} ${fileName}（${content.length} 字）`);
+    this.logger?.info(`im-qqbot: 笔记${created ? '新建' : '追加'} ${shownName}（${content.length} 字）`);
+    const audience = input.chatKey === undefined ? '所有会话' : '只有本会话';
     return {
       file: fileName,
       created,
       chars: content.length,
-      message: `${created ? '已新建笔记' : '已追加到笔记'} ${fileName}「${title}」（${content.length} 字），所有会话下次检索即可用。`,
+      message: `${created ? '已新建笔记' : '已追加到笔记'} ${fileName}「${title}」（${content.length} 字），${audience}下次检索即可用。`,
     };
   }
 
@@ -342,9 +380,11 @@ export function formatNotesHint(
   const lines = ['[共享笔记 · 可能相关]'];
   for (const hit of relevant) {
     const text = hit.text.replace(/\s+/g, ' ').trim();
-    lines.push(`- ${hit.file} › ${hit.heading}`);
+    const owner = chatOwnerOf(hit.file);
+    const name = owner === undefined ? hit.file : `[本会话] ${hit.file.split('/').slice(2).join('/')}`;
+    lines.push(`- ${name} › ${hit.heading}`);
     lines.push(`  ${text.length > perHit ? `${text.slice(0, perHit)}…` : text}`);
   }
-  lines.push('（来自所有会话共享的笔记库，仅供参考，和当前话题无关就忽略；要看更多用 qqbot_notes_search。）');
+  lines.push('（来自笔记库，仅供参考；不带 [本会话] 的是所有群共享的笔记，不是这个群发生过的事。和当前话题无关就忽略；要看更多用 qqbot_notes_search。）');
   return lines.join('\n');
 }
