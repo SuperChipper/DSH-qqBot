@@ -49,6 +49,7 @@ import { registerDndTools } from '../dnd/dnd-tools.ts';
 import { ACK, DndTurnButtons } from '../dnd/turn-buttons.ts';
 import { ToolAccess, ToolAccessStore } from '../features/tool-access.ts';
 import { createToolGuard } from '../shared/tool-guard.ts';
+import type { JudgeLlm } from '../features/reply-judge.ts';
 
 /**
  * interaction 统一分发器：按 button_data 的顶层 `t` 判别字段，路由到对应
@@ -180,8 +181,14 @@ export async function bootstrapGateway(
   } as ConstructorParameters<typeof QQBot>[0]);
   logger.info(`QQBot SDK initialized (UA: ${userAgent})`);
 
-  // ── 中间件链 ──
-  setupMiddlewares(bot, config, manager, logger);
+  // ── 中间件链（llm 给回复欲望的模型打分用，可选） ──
+  let llm: JudgeLlm | undefined;
+  try {
+    llm = ctx.get('llm') as JudgeLlm | undefined;
+  } catch {
+    llm = undefined;
+  }
+  setupMiddlewares(bot, config, manager, logger, llm);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {

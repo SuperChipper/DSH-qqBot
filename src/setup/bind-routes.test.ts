@@ -430,6 +430,36 @@ describe('bind-routes', () => {
     expect(updates[0]).toMatchObject({ replyDesire: { enabled: true, threshold: 0.5, names: ['大肥鱼'] } });
   });
 
+  it('POST config：replyDesire.judge 通过校验，没传的字段补默认值', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"replyDesire":{"enabled":true,"threshold":0.6,"names":[],"engagedMs":90000,"engagedMaxTurns":8,'
+        + '"judge":{"enabled":true,"model":"deepseek-v4-flash","debounceMs":3000}}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(updates[0]).toMatchObject({
+      replyDesire: { judge: { enabled: true, model: 'deepseek-v4-flash', debounceMs: 3000, provider: '', maxWaitMs: 15000 } },
+    });
+  });
+
+  it('POST config：replyDesire.judge 越界或类型错误被拒绝', async () => {
+    for (const judge of ['{"debounceMs":-1}', '{"contextMessages":0}', '{"timeoutMs":"fast"}', '{"enabled":"yes"}']) {
+      const { routes } = createHarness({ onUpdateConfig: () => true });
+      const res = fakeRes();
+      await invoke(
+        routes.get(BIND_CONFIG_PATH),
+        fakeReq('POST', { host: '127.0.0.1:3080' }, `{"replyDesire":{"enabled":true,"judge":${judge}}}`),
+        res,
+      );
+      expect(res.statusCode, judge).toBe(400);
+    }
+  });
+
   it('POST config：数值越界被拒绝', async () => {
     const { routes } = createHarness({ onUpdateConfig: () => true });
     const res = fakeRes();

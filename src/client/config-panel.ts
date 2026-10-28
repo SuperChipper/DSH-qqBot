@@ -122,6 +122,18 @@ interface DndWire {
   interjections: boolean;
 }
 
+/** 回复欲望的模型打分（与 src/config.ts 的 ReplyJudgeConfig 对应） */
+interface ReplyJudgeWire {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  reasoningEffort: string;
+  debounceMs: number;
+  maxWaitMs: number;
+  contextMessages: number;
+  timeoutMs: number;
+}
+
 /** 回复欲望门控（与 src/config.ts 的 ReplyDesireConfig 对应） */
 interface ReplyDesireWire {
   enabled: boolean;
@@ -129,7 +141,13 @@ interface ReplyDesireWire {
   names: string[];
   engagedMs: number;
   engagedMaxTurns: number;
+  judge: ReplyJudgeWire;
 }
+
+const REPLY_JUDGE_DEFAULTS: ReplyJudgeWire = {
+  enabled: false, provider: '', model: '', reasoningEffort: '',
+  debounceMs: 2500, maxWaitMs: 15000, contextMessages: 20, timeoutMs: 15000,
+};
 
 /** GET 回显的生效配置（appSecret / asr.apiKey 已剔除） */
 type ConfigWire = {
@@ -550,8 +568,14 @@ export function ConfigPanel(): ReactNode {
   const cleanup: CleanupWire = form.cleanup ?? { dryRun: false };
   const fanart: FanartWire = form.fanart ?? { enabled: true, proxy: '', poolDir: '' };
   const dnd: DndWire = form.dnd ?? { enabled: true, root: '', turnButtons: true, interjections: true };
-  const replyDesire: ReplyDesireWire = form.replyDesire ?? {
+  const replyDesire: ReplyDesireWire = {
     enabled: false, threshold: 0.6, names: [], engagedMs: 90000, engagedMaxTurns: 8,
+    ...form.replyDesire,
+    judge: { ...REPLY_JUDGE_DEFAULTS, ...form.replyDesire?.judge },
+  };
+  const judge = replyDesire.judge;
+  const patchJudge = (next: Partial<ReplyJudgeWire>): void => {
+    patch('replyDesire', { ...replyDesire, judge: { ...judge, ...next } });
   };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
@@ -702,6 +726,46 @@ export function ConfigPanel(): ReactNode {
       help: '靠打分接的轮数到上限就关窗（这一条仍接）；0 = 不进入对话窗口，默认 8',
       onChange: (v) => { patch('replyDesire', { ...replyDesire, engagedMaxTurns: v }); },
     }),
+    createElement(SwitchRow, {
+      label: '规则拿不准时让模型打分', checked: judge.enabled,
+      help: '没点名、不在对话窗口的普通文字，交给模型判断要不要接；语气词、表情包、开团期间不调模型',
+      onChange: (v) => { patchJudge({ enabled: v }); },
+    }),
+    ...(judge.enabled ? [
+      createElement(FieldRow, {
+        label: '打分 provider', value: judge.provider, placeholder: '留空 = 这个群的主模型',
+        onChange: (v) => { patchJudge({ provider: v.trim() }); },
+      }),
+      createElement(FieldRow, {
+        label: '打分模型', value: judge.model, placeholder: '留空 = 这个群的主模型',
+        onChange: (v) => { patchJudge({ model: v.trim() }); },
+      }),
+      createElement(FieldRow, {
+        label: '推理档位', value: judge.reasoningEffort, placeholder: '留空 = 自动选最低档',
+        help: '启动后第一次打分会在日志里列出这个模型支持的档位',
+        onChange: (v) => { patchJudge({ reasoningEffort: v.trim() }); },
+      }),
+      createElement(NumberRow, {
+        label: '安静多久才打分（毫秒）', value: judge.debounceMs, min: 0, max: 60000, step: 500,
+        help: '连着说的几条只给最后一条打一次分，默认 2500',
+        onChange: (v) => { patchJudge({ debounceMs: v }); },
+      }),
+      createElement(NumberRow, {
+        label: '最多攒多久也要打分（毫秒）', value: judge.maxWaitMs, min: 0, max: 300000, step: 1000,
+        help: '群里一直有人说话时的上限，默认 15000',
+        onChange: (v) => { patchJudge({ maxWaitMs: v }); },
+      }),
+      createElement(NumberRow, {
+        label: '给模型看的消息条数', value: judge.contextMessages, min: 1, max: 100, step: 1,
+        help: '越多越准也越贵，默认 20',
+        onChange: (v) => { patchJudge({ contextMessages: v }); },
+      }),
+      createElement(NumberRow, {
+        label: '打分超时（毫秒）', value: judge.timeoutMs, min: 1000, max: 120000, step: 1000,
+        help: '超时按不接处理，默认 15000',
+        onChange: (v) => { patchJudge({ timeoutMs: v }); },
+      }),
+    ] : []),
 
     createElement('div', { className: 'imqb2-group-title' }, '表情收藏'),
     createElement(SwitchRow, {

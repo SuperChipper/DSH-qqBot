@@ -192,6 +192,7 @@ class OutboundRouter {
 
     const buffer = this.buffers.get(sessionId);
     if (buffer !== undefined && buffer.text.trim()) {
+      this.noteBotSaid(record, buffer.text);
       void buffer.flush();
       this.buffers.delete(sessionId);
       return;
@@ -203,9 +204,16 @@ class OutboundRouter {
     }
     const fullText = textParts.join('\n');
     if (!fullText.trim()) return;
+    this.noteBotSaid(record, fullText);
 
     void this.send(record, fullText, 'sendMarkdown', this.captionsOf(sessionId));
     this.buffers.delete(sessionId);
+  }
+
+  /** 模型打分要知道 bot 刚说过什么（群记忆里没有 bot 自己的话） */
+  private noteBotSaid(record: SessionRecord, text: string): void {
+    if (record.scope !== 'group' || this.config.replyDesire?.judge?.enabled !== true) return;
+    getEngagementTracker().noteBotSaid(record.peerId, sanitizePseudoToolText(text), Date.now());
   }
 
   /** 取本轮 caption 列表（不存在则创建；同一轮内始终是同一个数组） */

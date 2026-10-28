@@ -81,6 +81,17 @@ export const STICKER_REACT_MS = 30_000;
 /** 复读判定：连续几条同一张表情包（含当前） */
 const CHAIN_LENGTH = 3;
 const RECENT_LIMIT = 5;
+/** 给模型打分看的 bot 最近几句话（群记忆只记群友说的，不记 bot 自己的） */
+const BOT_LINES_LIMIT = 3;
+const BOT_LINE_MAX_CHARS = 300;
+
+/** 规则直接判 0 的原因：这些消息不值得再让模型看 */
+const HARD_SKIP_REASONS = new Set(['empty', 'command', 'other-mention', 'noise']);
+
+/** 规则没放行、也没明确拦下的文字消息，可以交给模型打分 */
+export function isJudgeCandidate(text: string, result: DesireResult): boolean {
+  return result.mode === undefined && text !== '' && !HARD_SKIP_REASONS.has(result.reasons[0] ?? '');
+}
 
 const FACE_RE = /<faceType=(\d+),faceId="[^"]*",ext="([^"]*)">/g;
 const OLD_FACE_RE = /\[<face,id=\d+\/?>\]/g;
@@ -192,6 +203,8 @@ interface GroupReplyState {
   stickerAnswered: Set<string>;
   /** bot 已经跟过的那串复读 */
   chainAnswered?: string;
+  /** bot 最近说的话 */
+  botLines: Array<{ text: string; timestamp: number }>;
 }
 
 /** 按群维护对话窗口、最近消息、bot 上次说话时间等接话所需的状态 */
@@ -201,7 +214,7 @@ export class EngagementTracker {
   private group(groupId: string): GroupReplyState {
     let state = this.groups.get(groupId);
     if (state === undefined) {
-      state = { recent: [], stickerAnswered: new Set() };
+      state = { recent: [], stickerAnswered: new Set(), botLines: [] };
       this.groups.set(groupId, state);
     }
     return state;
@@ -275,6 +288,19 @@ export class EngagementTracker {
 
   public chainAnswered(groupId: string): string | undefined {
     return this.groups.get(groupId)?.chainAnswered;
+  }
+
+  /** 记下 bot 在群里说的话，给模型打分当上下文 */
+  public noteBotSaid(groupId: string, text: string, now: number): void {
+    const trimmed = text.trim();
+    if (trimmed === '') return;
+    const lines = this.group(groupId).botLines;
+    lines.push({ text: trimmed.slice(0, BOT_LINE_MAX_CHARS), timestamp: now });
+    if (lines.length > BOT_LINES_LIMIT) lines.shift();
+  }
+
+  public botLines(groupId: string): ReadonlyArray<{ text: string; timestamp: number }> {
+    return this.groups.get(groupId)?.botLines ?? [];
   }
 
   /** 放行了一条表情包：复读记下这一串，回应记下这个人 */

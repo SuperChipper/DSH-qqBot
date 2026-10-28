@@ -157,6 +157,25 @@ export interface DndConfig {
   interjections: boolean;
 }
 
+export interface ReplyJudgeConfig {
+  /** 规则拿不准的文字消息交给模型打分（规则已放行 / 已拦下的不调模型） */
+  enabled: boolean;
+  /** 打分用的 provider；空 = 跟这个群的主模型一样 */
+  provider: string;
+  /** 打分用的模型；空 = 跟这个群的主模型一样 */
+  model: string;
+  /** 推理档位 id；空 = 自动选这个模型支持的最低档 */
+  reasoningEffort: string;
+  /** 群里安静多久(ms)才打一次分：连续几条只给最后一条打分 */
+  debounceMs: number;
+  /** 群里一直有人说话时，最多攒多久(ms)也要打一次分 */
+  maxWaitMs: number;
+  /** 给模型看的最近群消息条数 */
+  contextMessages: number;
+  /** 单次打分超时(ms)，超时按不接处理 */
+  timeoutMs: number;
+}
+
 export interface ReplyDesireConfig {
   /** 群聊未 @ 时按回复欲望打分决定是否接话（替代纯随机插嘴）；关闭 = 只回 @ 与随机插嘴 */
   enabled: boolean;
@@ -168,6 +187,8 @@ export interface ReplyDesireConfig {
   engagedMs: number;
   /** 对话窗口内最多靠打分连续接几轮（不含 @），到了就退出窗口，0 = 不进入对话窗口 */
   engagedMaxTurns: number;
+  /** 模型打分 */
+  judge: ReplyJudgeConfig;
 }
 
 export interface NotesConfig {
@@ -341,6 +362,29 @@ export const DndSchema: Schema<DndConfig> = Schema.object({
   interjections: Schema.boolean().default(true).description('跑团期间也按插话概率随机吐槽（只吐槽、不结算行动）；关掉则开团后只回 @'),
 });
 
+export const REPLY_JUDGE_DEFAULTS: ReplyJudgeConfig = {
+  enabled: false,
+  provider: '',
+  model: '',
+  reasoningEffort: '',
+  debounceMs: 2500,
+  maxWaitMs: 15000,
+  contextMessages: 20,
+  timeoutMs: 15000,
+};
+
+/** 模型打分子 Schema */
+export const ReplyJudgeSchema: Schema<ReplyJudgeConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('规则拿不准的文字消息交给模型打分'),
+  provider: Schema.string().default('').description('打分 provider（空=这个群的主模型）'),
+  model: Schema.string().default('').description('打分模型（空=这个群的主模型）'),
+  reasoningEffort: Schema.string().default('').description('推理档位 id（空=自动选最低档）'),
+  debounceMs: Schema.number().min(0).max(60000).default(2500).description('群里安静多久(ms)才打一次分'),
+  maxWaitMs: Schema.number().min(0).max(300000).default(15000).description('一直有人说话时最多攒多久(ms)也要打分'),
+  contextMessages: Schema.number().min(1).max(100).default(20).description('给模型看的最近群消息条数'),
+  timeoutMs: Schema.number().min(1000).max(120000).default(15000).description('单次打分超时(ms)'),
+}).default(REPLY_JUDGE_DEFAULTS);
+
 /** 回复欲望子 Schema */
 export const ReplyDesireSchema: Schema<ReplyDesireConfig> = Schema.object({
   enabled: Schema.boolean().default(false).description('群聊未@时按回复欲望打分决定是否接话'),
@@ -348,6 +392,7 @@ export const ReplyDesireSchema: Schema<ReplyDesireConfig> = Schema.object({
   names: Schema.array(Schema.string()).default([]).description('bot 昵称/别名，群里提到即视为在叫 bot'),
   engagedMs: Schema.number().default(90000).description('对话窗口(ms)：bot 回复后刚聊过的人更容易被接话'),
   engagedMaxTurns: Schema.number().default(8).description('对话窗口内最多靠打分连续接几轮，0=不进入对话窗口'),
+  judge: ReplyJudgeSchema.description('模型打分'),
 });
 
 /** 富媒体理解子 Schema（独立导出：config 面板的服务端校验复用） */
@@ -442,6 +487,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     names: [],
     engagedMs: 90000,
     engagedMaxTurns: 8,
+    judge: REPLY_JUDGE_DEFAULTS,
   }).description('群聊回复欲望门控'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),

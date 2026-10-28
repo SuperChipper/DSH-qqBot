@@ -26,7 +26,8 @@ import { isImageContentType } from '../transport/attachment.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
-import { replyDecider } from '../middleware/reply-decider.ts';
+import { replyDecider, type JudgeDeps } from '../middleware/reply-decider.ts';
+import { JudgeQueue, ReplyJudge, type JudgeLlm } from '../features/reply-judge.ts';
 import { accessPolicyFromConfig } from '../shared/permissions.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { appendGroupMessage } from '../features/group-memory.ts';
@@ -56,6 +57,7 @@ export function setupMiddlewares(
   config: ImQQBotConfig,
   manager: SessionManager,
   logger: Logger,
+  llm?: JudgeLlm,
 ): void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
@@ -127,7 +129,18 @@ export function setupMiddlewares(
   }));
 
   // 5.5. 回复欲望门控：未 @ 的群消息按规则打分 + 对话窗口决定是否接话
-  if (replyDesireOn) bot.use(replyDecider(config, manager, logger));
+  if (replyDesireOn) {
+    let judgeDeps: JudgeDeps | undefined;
+    if (config.replyDesire.judge?.enabled === true) {
+      if (llm?.stream === undefined) {
+        logger.warn('im-qqbot: llm 服务不可用，回复欲望的模型打分未启用（只用规则）');
+      } else {
+        const judgeConfig = () => config.replyDesire.judge;
+        judgeDeps = { judge: new ReplyJudge(llm, judgeConfig, logger), queue: new JudgeQueue(judgeConfig) };
+      }
+    }
+    bot.use(replyDecider(config, manager, logger, judgeDeps));
+  }
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
