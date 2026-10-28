@@ -28,6 +28,21 @@ export interface RawAttachment {
   [key: string]: unknown;
 }
 
+/** 中间件预处理后的附件（目前只有语音转写结果，由 attachmentProcessor 填充） */
+export interface ProcessedAttachment {
+  type: 'voice' | 'image' | 'video' | 'file' | 'unknown';
+  filename?: string;
+  url?: string;
+  localPath?: string;
+  voiceText?: string;
+  /** stt = 在线 ASR 转写，asr = QQ 自带 asr_refer_text */
+  voiceSource?: 'stt' | 'asr' | 'fallback';
+  duration?: number;
+  width?: number;
+  height?: number;
+  size?: number;
+}
+
 /** 引用消息附件（quoteRef 中间件解析的 camelCase 视图） */
 export interface QuotedAttachment {
   contentType?: string;

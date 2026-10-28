@@ -124,21 +124,27 @@ async function assertSafeHostname(hostname: string): Promise<void> {
   }
 }
 
-/** 安全下载：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回下载字节数 */
-async function download(url: string, destPath: string, maxBytes: number): Promise<number> {
+/** 安全拉取：仅 HTTPS + SSRF 防护 + 大小上限 + 超时，返回字节 */
+export async function fetchSafe(url: string, maxBytes: number): Promise<Buffer> {
   const parsed = new URL(normalizeUrl(url));
   if (parsed.protocol !== 'https:') {
     throw new Error(`Only HTTPS allowed: ${parsed.protocol}`);
   }
   await assertSafeHostname(parsed.hostname);
 
-  const resp = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
+  const resp = await fetch(parsed, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
   const buf = Buffer.from(await resp.arrayBuffer());
   if (buf.length > maxBytes) {
     throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);
   }
+  return buf;
+}
+
+/** 安全下载到本地文件，返回下载字节数 */
+async function download(url: string, destPath: string, maxBytes: number): Promise<number> {
+  const buf = await fetchSafe(url, maxBytes);
   writeFileSync(destPath, buf);
   return buf.length;
 }

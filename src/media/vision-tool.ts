@@ -30,12 +30,12 @@ type ImageAttachmentRef = ImageBlock['attachment'];
 type ImageMediaType = ImageAttachmentRef['mediaType'];
 
 /** attachments 服务最小接口 */
-interface AttachmentStoreLike {
+export interface AttachmentStoreLike {
   saveImage(input: { data: Uint8Array; mediaType: ImageMediaType; name?: string }): Promise<ImageAttachmentRef>;
 }
 
 /** llm 服务最小接口 */
-interface LlmRuntimeLike {
+export interface LlmRuntimeLike {
   stream(options: GenerateOptions): AsyncIterable<StreamChunk>;
 }
 
@@ -120,7 +120,7 @@ function finishError(finish: FinishReason): Error | undefined {
 }
 
 /** 调视觉模型描述图片，返回纯文本 */
-async function callVision(
+export async function callVision(
   llm: LlmRuntimeLike,
   vision: VisionConfig,
   prompt: string,

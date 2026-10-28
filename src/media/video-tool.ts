@@ -1,0 +1,261 @@
+/**
+ * 内置 qqbot_describe_video 视频理解工具（路线：抽帧宫格 + 视觉模型 + 音轨 ASR）。
+ *
+ *   1. ffprobe 取时长 / 是否有音轨
+ *   2. ffmpeg 在前 maxSeconds 秒内均匀抽 N 帧，tile 拼成一张宫格 JPEG → 一次视觉调用
+ *   3. 有音轨且 asr 已启用：抽 16k 单声道 WAV → OpenAI 兼容 /audio/transcriptions
+ *   4. 合成「画面 + 语音」文本返回给主模型
+ *
+ * 临时文件放系统 tmp 目录，调用结束即删。ffmpeg 不可用时工具不注册。
+ */
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, dirname, extname, join } from 'node:path';
+import { promisify } from 'node:util';
+import type { Context } from '@deepseek-ai/cordis';
+import type { ContentBlock } from '@deepseek-ai/dsh-llm';
+import type { AsrConfig, VideoConfig, VisionConfig } from '../config.ts';
+import type { Logger } from '../types.ts';
+import { requestTranscription } from './asr.ts';
+import { callVision, type AttachmentStoreLike, type LlmRuntimeLike } from './vision-tool.ts';
+
+const execFileAsync = promisify(execFile);
+
+/** tools 服务最小接口 */
+interface ToolsRegistryLike {
+  register(definition: unknown): unknown;
+}
+
+/** qqbot_describe_video 的合法参数 */
+interface DescribeVideoArgs {
+  video: string;
+  prompt?: string;
+}
+
+export const DESCRIBE_VIDEO_TOOL_NAME = 'qqbot_describe_video';
+
+const DESCRIPTION =
+  'Understand one video and return a text summary of what is seen and said. The video is a local '
+  + 'absolute path (downloaded by the QQ bot). Frames are sampled evenly and read by a vision model; '
+  + 'the audio track is transcribed when speech recognition is configured. Use this when the user '
+  + 'sends or references a video. Pass a precise `prompt` when the user asks something specific '
+  + '(e.g. "what game is this", "read the on-screen text").';
+
+const DEFAULT_PROMPT = 'Describe what happens in the video: scenes, people, actions and any on-screen text.';
+
+/** 每帧缩放宽度（宫格最多 4 列 → 1920px 宽） */
+const FRAME_WIDTH = 480;
+/** 宫格最多列数 */
+const MAX_COLUMNS = 4;
+/** ffmpeg 单次调用超时 */
+const FFMPEG_TIMEOUT_MS = 120_000;
+
+/** ffmpeg / ffprobe 可执行文件 */
+export interface FfmpegBins {
+  ffmpeg: string;
+  ffprobe: string;
+}
+
+/** 解析 ffmpeg 路径：配置为空用 PATH；配置了则 ffprobe 取同目录 */
+export function resolveFfmpegBins(ffmpegPath: string): FfmpegBins {
+  if (!ffmpegPath) return { ffmpeg: 'ffmpeg', ffprobe: 'ffprobe' };
+  const ext = extname(ffmpegPath);
+  return { ffmpeg: ffmpegPath, ffprobe: join(dirname(ffmpegPath), `ffprobe${ext}`) };
+}
+
+/** 抽帧计划 */
+export interface FramePlan {
+  /** 实际分析时长（秒） */
+  span: number;
+  count: number;
+  cols: number;
+  rows: number;
+  /** 每帧大致时间点（秒） */
+  times: number[];
+}
+
+/** 按时长规划抽帧：约每 2 秒一帧，最多 maxFrames，只看前 maxSeconds 秒 */
+export function planFrames(duration: number, maxFrames: number, maxSeconds: number): FramePlan {
+  const span = Math.max(0.1, Math.min(duration, maxSeconds));
+  const count = Math.max(1, Math.min(maxFrames, Math.ceil(span / 2)));
+  const cols = Math.min(MAX_COLUMNS, count);
+  const rows = Math.ceil(count / cols);
+  const times = Array.from({ length: count }, (_, k) => Math.round((k * span / count) * 10) / 10);
+  return { span, count, cols, rows, times };
+}
+
+/** ffprobe：时长与是否有音轨 */
+export async function probeVideo(bins: FfmpegBins, path: string): Promise<{ duration: number; hasAudio: boolean }> {
+  const { stdout } = await execFileAsync(
+    bins.ffprobe,
+    ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type', '-of', 'json', path],
+    { timeout: FFMPEG_TIMEOUT_MS },
+  );
+  const json = JSON.parse(stdout) as { format?: { duration?: string }; streams?: Array<{ codec_type?: string }> };
+  const duration = Number(json.format?.duration);
+  if (!Number.isFinite(duration) || duration <= 0) throw new Error('qqbot_describe_video: cannot read video duration');
+  const hasAudio = (json.streams ?? []).some(s => s.codec_type === 'audio');
+  return { duration, hasAudio };
+}
+
+/** 均匀抽帧并拼成一张宫格 JPEG */
+async function extractFrameGrid(bins: FfmpegBins, path: string, plan: FramePlan, out: string): Promise<void> {
+  const filter = `fps=${plan.count}/${plan.span},scale=${FRAME_WIDTH}:-2,tile=${plan.cols}x${plan.rows}`;
+  await execFileAsync(
+    bins.ffmpeg,
+    ['-v', 'error', '-y', '-t', String(plan.span), '-i', path, '-vf', filter, '-frames:v', '1', '-q:v', '3', out],
+    { timeout: FFMPEG_TIMEOUT_MS },
+  );
+}
+
+/** 抽音轨为 16k 单声道 WAV */
+async function extractAudioWav(bins: FfmpegBins, path: string, span: number, out: string): Promise<void> {
+  await execFileAsync(
+    bins.ffmpeg,
+    ['-v', 'error', '-y', '-t', String(span), '-i', path, '-vn', '-ac', '1', '-ar', '16000', '-f', 'wav', out],
+    { timeout: FFMPEG_TIMEOUT_MS },
+  );
+}
+
+/** 给视觉模型的说明：宫格布局 + 每帧时间点 */
+export function buildFramePrompt(plan: FramePlan, duration: number, prompt: string): string {
+  const times = plan.times.map(t => `${t}s`).join(', ');
+  return `This image is a ${plan.cols}x${plan.rows} grid of ${plan.count} frames sampled evenly from a `
+    + `${Math.round(duration * 10) / 10}s video, in chronological order left-to-right, top-to-bottom `
+    + `(at about ${times}). Treat them as one continuous video, not separate pictures.\n\n${prompt}`;
+}
+
+/** 合成返回给主模型的文本 */
+export function composeVideoText(visual: string, transcript: string | undefined, note: string | undefined): string {
+  const parts = [`[Visual] ${visual}`];
+  if (transcript) parts.push(`[Speech] ${transcript}`);
+  else if (note) parts.push(`[Speech] (${note})`);
+  return parts.join('\n');
+}
+
+/** 注册 qqbot_describe_video（vision 未配置 / ffmpeg 不可用时跳过，不阻断启动） */
+export async function registerDescribeVideoTool(
+  ctx: Context,
+  video: VideoConfig,
+  vision: VisionConfig,
+  asr: AsrConfig,
+  logger: Logger,
+): Promise<void> {
+  if (!video.enabled) return;
+  if (!vision.enabled || !vision.provider || !vision.model) {
+    logger.debug('im-qqbot: vision 未配置，qqbot_describe_video 工具未注册');
+    return;
+  }
+
+  const tools = ctx.get('tools') as ToolsRegistryLike | undefined;
+  const llm = ctx.get('llm') as LlmRuntimeLike | undefined;
+  const attachments = ctx.get('attachments') as AttachmentStoreLike | undefined;
+  if (!tools?.register || !llm?.stream || !attachments?.saveImage) {
+    logger.warn('im-qqbot: tools/llm/attachments 服务不可用，qqbot_describe_video 工具未注册');
+    return;
+  }
+
+  const bins = resolveFfmpegBins(video.ffmpegPath);
+  try {
+    await execFileAsync(bins.ffmpeg, ['-version'], { timeout: 10_000 });
+    await execFileAsync(bins.ffprobe, ['-version'], { timeout: 10_000 });
+  } catch {
+    logger.warn(`im-qqbot: 找不到 ffmpeg/ffprobe（${bins.ffmpeg}），qqbot_describe_video 工具未注册`);
+    return;
+  }
+
+  const definition = {
+    name: DESCRIBE_VIDEO_TOOL_NAME,
+    description: DESCRIPTION,
+    parameters: {
+      type: 'object',
+      properties: {
+        video: {
+          type: 'string',
+          description: 'Absolute path to a local video file.',
+        },
+        prompt: {
+          type: 'string',
+          description: 'Your precise instruction for the vision model about this video.',
+        },
+      },
+      required: ['video'],
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          text: { type: 'string' },
+          model: { type: 'string' },
+          video: { type: 'string' },
+          duration: { type: 'number' },
+          frames: { type: 'integer' },
+          transcribed: { type: 'boolean' },
+        },
+        required: ['text', 'model', 'video', 'duration', 'frames', 'transcribed'],
+        additionalProperties: false,
+      },
+      render: (_args: unknown, value: unknown): ContentBlock[] => [
+        { type: 'text', text: (value as { text: string }).text },
+      ],
+    },
+    async execute(args: unknown, exec: { signal: AbortSignal }): Promise<Record<string, unknown>> {
+      const { video: path, prompt } = args as DescribeVideoArgs;
+      if (typeof path !== 'string' || path.length === 0) {
+        throw new Error('qqbot_describe_video: `video` must be a non-empty string');
+      }
+      const info = await stat(path).catch(() => null);
+      if (!info?.isFile()) throw new Error(`qqbot_describe_video: video file not found: ${path}`);
+
+      const { duration, hasAudio } = await probeVideo(bins, path);
+      const plan = planFrames(duration, video.maxFrames, video.maxSeconds);
+      const work = await mkdtemp(join(tmpdir(), 'qqbot-video-'));
+      try {
+        const gridPath = join(work, 'frames.jpg');
+        await extractFrameGrid(bins, path, plan, gridPath);
+        const grid = new Uint8Array(await readFile(gridPath));
+        if (grid.length > vision.maxBytes) throw new Error(`qqbot_describe_video: frame grid too large (${grid.length} bytes)`);
+        const ref = await attachments.saveImage({ data: grid, mediaType: 'image/jpeg', name: `${basename(path)}.frames.jpg` });
+
+        // 画面与语音并行：转写失败只记一条说明，不影响画面结果
+        const transcriptTask = (async (): Promise<{ text?: string; note?: string }> => {
+          if (!hasAudio) return { note: 'no audio track' };
+          if (!asr.enabled) return { note: 'speech recognition disabled' };
+          try {
+            const wavPath = join(work, 'audio.wav');
+            await extractAudioWav(bins, path, plan.span, wavPath);
+            const text = await requestTranscription({ data: await readFile(wavPath), name: 'audio.wav' }, asr);
+            return text ? { text } : { note: 'no speech detected' };
+          } catch (err) {
+            logger.warn(`im-qqbot: video audio transcription failed: ${err instanceof Error ? err.message : String(err)}`);
+            return { note: 'transcription failed' };
+          }
+        })();
+
+        const visual = await callVision(
+          llm,
+          vision,
+          buildFramePrompt(plan, duration, prompt ?? DEFAULT_PROMPT),
+          ref,
+          exec.signal,
+        );
+        const transcript = await transcriptTask;
+        return {
+          text: composeVideoText(visual, transcript.text, transcript.note),
+          model: vision.model,
+          video: path,
+          duration,
+          frames: plan.count,
+          transcribed: Boolean(transcript.text),
+        };
+      } finally {
+        await rm(work, { recursive: true, force: true });
+      }
+    },
+  };
+
+  tools.register(definition);
+  logger.info(`im-qqbot: qqbot_describe_video 工具已注册 (ffmpeg=${bins.ffmpeg} frames≤${video.maxFrames})`);
+}

@@ -114,6 +114,8 @@
 
 - **图文同发**：`qqbot_send_file` 新增 `caption`，文字和图片/视频/文件作为同一条富媒体消息发出；模型误写的 `<qqbot_send_file>` 文本标签会被剥离。
 - **原生读图**：新增 pi-ai 路由 `deepseek-native`（`deepseek-flash`，text + image）和 `vision.native`，图片作为 `ImageBlock` 直接交给主模型；`qqbot_describe_image` 保留给 OCR、图表、长截图。已有会话需要 `/new` 或 `/model` 切换后才生效。
+- **语音识别**：`asr.enabled` 开启后，QQ 没给识别文本的语音会下载（SILK 用 silk-wasm 解码为 WAV）并调用 OpenAI 兼容的 `/audio/transcriptions`，默认 SiliconFlow SenseVoice；换 Groq / OpenAI 只需改 `baseUrl` 和 `model`。
+- **视频理解**：`qqbot_describe_video` 用 ffmpeg 在视频前 `video.maxSeconds` 秒均匀抽帧（约 2 秒一帧，最多 `video.maxFrames`），拼成一张宫格图交给视觉模型，同时把音轨交给 `asr` 转写，合成「画面 + 语音」文本。需要 vision 已配置且能找到 ffmpeg/ffprobe，否则不注册。
 
 ## 🔧 工具
 
@@ -153,6 +155,9 @@
 | `autoCompactTokens` | `120000` | 上下文超过此 token 数时自动压缩（0 = 关闭） |
 | `tmpDir` / `tmpTtlHours` | `cwd/tmp` / `72` | Agent 临时目录及清理时间 |
 | `vision.native` | `false` | 图片作为原生 ImageBlock 交给主模型 |
+| `asr.enabled` / `baseUrl` / `apiKey` / `model` | `false` / SiliconFlow / `''`（= `QQBOT_ASR_API_KEY`）/ `FunAudioLLM/SenseVoiceSmall` | 在线语音识别 |
+| `asr.preferQQ` / `asr.timeoutMs` | `true` / `30000` | 有 QQ 自带识别文本时不调接口；转写超时 |
+| `video.enabled` / `ffmpegPath` / `maxFrames` / `maxSeconds` | `true` / `''`（PATH）/ `8` / `300` | 视频理解工具 |
 | `stickers.*` | 见配置页 | 表情目录、来源白名单、大小与条目上限 |
 | `notes.enabled` / `notes.root` | `true` / `cwd/notes` | 共享笔记库 |
 | `notes.autoInject` / `injectTopK` / `injectMaxChars` / `injectMinCoverage` | `true` / `2` / `600` / `0.4` | 自动召回 |

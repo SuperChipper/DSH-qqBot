@@ -29,6 +29,7 @@ import type { ChatScope, Logger } from '../types.ts';
 import { setupMiddlewares } from './middleware-setup.ts';
 import { MEDIA_ROOT, startMediaCleanup } from '../media/media-cleaner.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
+import { registerDescribeVideoTool } from '../media/video-tool.ts';
 import { registerSendFileTool, withFreshReplyTarget, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
@@ -287,6 +288,9 @@ export async function bootstrapGateway(
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
   registerDescribeImageTool(ctx, config.vision, logger);
+
+  // ── 视频理解工具（qqbot_describe_video：抽帧宫格 + 音轨 ASR；ffmpeg 不可用时跳过） ──
+  await registerDescribeVideoTool(ctx, config.video, config.vision, config.asr, logger);
 
   // ── 附件发送工具注册（qqbot_send_file） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。

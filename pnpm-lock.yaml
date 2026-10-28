@@ -13,13 +13,16 @@ importers:
         version: 1.2.0
       '@tencent-connect/qqbot-nodejs':
         specifier: ^1.0.5
-        version: 1.0.5
+        version: 1.0.5(silk-wasm@3.7.1)
       js-yaml:
         specifier: ^4.1.0
         version: 4.3.1
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
+      silk-wasm:
+        specifier: ^3.7.1
+        version: 3.7.1
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.1
@@ -1004,6 +1007,10 @@ packages:
   siginfo@2.0.0:
     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
 
+  silk-wasm@3.7.1:
+    resolution: {integrity: sha512-mXPwLRtZxrYV3TZx41jMAeKc80wvmyrcXIcs8HctFxK15Ahz2OJQENYhNgEPeCEOdI6Mbx1NxQsqxzwc3DKerw==}
+    engines: {node: '>=16.11.0'}
+
   source-map-js@1.2.1:
     resolution: {integrity: sha512-UXWMKhLOwVKb728IUtQPXxfYU+usdybtUrK/8uGE8CQMvrhOpwvzDBwj0QhSL7MQc7vIsISBG8VQ8+IDQxpfQA==}
     engines: {node: '>=0.10.0'}
@@ -1484,9 +1491,11 @@ snapshots:
     dependencies:
       qrcode-terminal: 0.12.0
 
-  '@tencent-connect/qqbot-nodejs@1.0.5':
+  '@tencent-connect/qqbot-nodejs@1.0.5(silk-wasm@3.7.1)':
     dependencies:
       ws: 8.21.3
+    optionalDependencies:
+      silk-wasm: 3.7.1
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
@@ -1903,6 +1912,8 @@ snapshots:
     optional: true
 
   siginfo@2.0.0: {}
+
+  silk-wasm@3.7.1: {}
 
   source-map-js@1.2.1: {}
 

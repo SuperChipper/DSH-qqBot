@@ -12,7 +12,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
-import type { ChatScope, Logger, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
+import type { ChatScope, Logger, ProcessedAttachment, QuotedAttachment, RawAttachment, ReplyTarget } from '../types.ts';
 import {
   classifyContentType,
   isVoiceContentType,
@@ -82,19 +82,6 @@ interface MiddlewareState {
   /** concurrencyGuard 合并多条消息时的全部发送者（见 mergeWithSenders） */
   mergedSenders?: string[];
   [key: string]: unknown;
-}
-
-interface ProcessedAttachment {
-  type: 'voice' | 'image' | 'video' | 'file' | 'unknown';
-  filename?: string;
-  url?: string;
-  localPath?: string;
-  voiceText?: string;
-  voiceSource?: 'stt' | 'asr' | 'fallback';
-  duration?: number;
-  width?: number;
-  height?: number;
-  size?: number;
 }
 
 // ── 主处理函数 ──
@@ -421,7 +408,10 @@ function buildDynamicCtx(msg: ProcessedMessage, state: MiddlewareState): string 
 
     // 语音：有 ASR 文本才带文本，否则只带链接（纯文本模型无法消费音频）
     if (voices.length > 0) {
-      const asrTexts = voices.map(a => a.asr_refer_text).filter(Boolean);
+      const transcribed = (state.processedAttachments ?? [])
+        .filter(pa => pa.type === 'voice' && pa.voiceText)
+        .map(pa => pa.voiceText);
+      const asrTexts = transcribed.length > 0 ? transcribed : voices.map(a => a.asr_refer_text).filter(Boolean);
       if (asrTexts.length > 0) {
         lines.push(`- ASR: ${asrTexts.join(' | ')}`);
       } else {

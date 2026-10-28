@@ -42,6 +42,32 @@ export interface VisionConfig {
   timeoutMs: number;
 }
 
+export interface VideoConfig {
+  /** 是否注册 qqbot_describe_video（需 vision 已配置 + ffmpeg 可用） */
+  enabled: boolean;
+  /** ffmpeg 可执行文件（空 = PATH 里的 ffmpeg；ffprobe 取同目录） */
+  ffmpegPath: string;
+  /** 每个视频最多抽多少帧（拼成一张宫格图交给视觉模型） */
+  maxFrames: number;
+  /** 最多分析视频前多少秒（画面抽帧 + 音轨转写） */
+  maxSeconds: number;
+}
+
+export interface AsrConfig {
+  /** 是否启用在线语音识别（QQ 未给出识别文本时转写语音） */
+  enabled: boolean;
+  /** OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions） */
+  baseUrl: string;
+  /** 接口密钥（空 = 环境变量 QQBOT_ASR_API_KEY） */
+  apiKey: string;
+  /** 转写模型 id（如 FunAudioLLM/SenseVoiceSmall、whisper-large-v3） */
+  model: string;
+  /** QQ 自带 asr_refer_text 存在时优先使用，不再调用接口 */
+  preferQQ: boolean;
+  /** 转写调用超时(ms) */
+  timeoutMs: number;
+}
+
 export interface SendFileConfig {
   /** 是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots；关闭则任意路径） */
   restrictPaths: boolean;
@@ -157,6 +183,10 @@ export interface ImQQBotConfig {
   media: MediaConfig;
   /** 视觉理解（qqbot_describe_image 工具，走 dsh llm + attachments） */
   vision: VisionConfig;
+  /** 在线语音识别（OpenAI 兼容 /audio/transcriptions） */
+  asr: AsrConfig;
+  /** 视频理解（qqbot_describe_video：抽帧宫格 + 音轨 ASR） */
+  video: VideoConfig;
   /** 附件发送（qqbot_send_file 工具） */
   sendFile: SendFileConfig;
   /** bot 主人 QQ openid（私聊识别，用于文件访问白名单） */
@@ -281,6 +311,32 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     maxTokens: 1024,
     timeoutMs: 120000,
   }).description('视觉理解配置'),
+  asr: Schema.object({
+    enabled: Schema.boolean().default(false).description('是否启用在线语音识别（QQ 未给出识别文本时转写语音）'),
+    baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions）'),
+    apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_ASR_API_KEY）'),
+    model: Schema.string().default('FunAudioLLM/SenseVoiceSmall').description('转写模型 id'),
+    preferQQ: Schema.boolean().default(true).description('QQ 自带识别文本存在时优先使用'),
+    timeoutMs: Schema.number().default(30000).description('转写调用超时(ms)'),
+  }).default({
+    enabled: false,
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    apiKey: '',
+    model: 'FunAudioLLM/SenseVoiceSmall',
+    preferQQ: true,
+    timeoutMs: 30000,
+  }).description('语音识别配置'),
+  video: Schema.object({
+    enabled: Schema.boolean().default(true).description('是否注册 qqbot_describe_video（需 vision 已配置 + ffmpeg 可用）'),
+    ffmpegPath: Schema.string().default('').description('ffmpeg 路径（空=PATH 里的 ffmpeg）'),
+    maxFrames: Schema.number().default(8).description('每个视频最多抽帧数（拼成一张宫格图）'),
+    maxSeconds: Schema.number().default(300).description('最多分析视频前多少秒'),
+  }).default({
+    enabled: true,
+    ffmpegPath: '',
+    maxFrames: 8,
+    maxSeconds: 300,
+  }).description('视频理解配置'),
   sendFile: Schema.object({
     restrictPaths: Schema.boolean().default(true).description('是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots）'),
     extraRoots: Schema.array(Schema.string()).default([]).description('额外允许访问的根目录'),
