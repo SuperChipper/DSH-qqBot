@@ -19,7 +19,7 @@ import {
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { AccessControlSchema, FileAccessSchema, StickersSchema } from '../config.ts';
+import { AccessControlSchema, FileAccessSchema, ReplyDesireSchema, StickersSchema } from '../config.ts';
 import {
   BIND_CONFIG_PATH,
   BIND_MANUAL_PATH,
@@ -98,7 +98,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
-  'groupReplyProbability', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
+  'groupReplyProbability', 'replyDesire', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
   'adminOpenids', 'autoCompactTokens',
   'access', 'fileAccess', 'stickers',
 ]);
@@ -123,6 +123,7 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   access: (v) => AccessControlSchema(v as never),
   fileAccess: (v) => FileAccessSchema(v as never),
   stickers: (v) => StickersSchema(v as never),
+  replyDesire: (v) => ReplyDesireSchema(v as never),
 };
 
 function booleanSchema(value: unknown, name: string): boolean {

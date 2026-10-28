@@ -15,6 +15,7 @@ import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import { DND_TOOL_PREFIX } from '../dnd/dnd-tools.ts';
+import { getEngagementTracker } from '../features/reply-desire.ts';
 import {
   parseEvent,
   extractTurnError,
@@ -269,6 +270,12 @@ class OutboundRouter {
     }
     this.streamAttempts.delete(sessionId);
     this.captions.delete(sessionId);
+
+    // 对话窗口从回复结束时起算（回复慢时不至于还没说完窗口就过期）
+    const rd = this.config.replyDesire;
+    if (record.scope === 'group' && rd?.enabled === true) {
+      getEngagementTracker().touch(record.peerId, Date.now(), rd.engagedMs);
+    }
 
     const failure = extractTurnError(event.reason);
     if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {

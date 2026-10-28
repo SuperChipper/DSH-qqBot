@@ -157,6 +157,19 @@ export interface DndConfig {
   interjections: boolean;
 }
 
+export interface ReplyDesireConfig {
+  /** 群聊未 @ 时按回复欲望打分决定是否接话（替代纯随机插嘴）；关闭 = 只回 @ 与随机插嘴 */
+  enabled: boolean;
+  /** 放行阈值（0-1），越高越安静 */
+  threshold: number;
+  /** bot 的昵称/别名：群里点名这些词视为在叫 bot */
+  names: string[];
+  /** 对话窗口(ms)：bot 回复后这段时间内，刚聊过的人再说话更容易被接 */
+  engagedMs: number;
+  /** 对话窗口内最多靠打分连续接几轮（不含 @），到了就退出窗口，0 = 不进入对话窗口 */
+  engagedMaxTurns: number;
+}
+
 export interface NotesConfig {
   /** 是否启用共享笔记库（检索/记录工具 + 自动召回） */
   enabled: boolean;
@@ -197,6 +210,8 @@ export interface ImQQBotConfig {
   requireMention: boolean;
   /** 群聊未 @bot 时随机回复概率（0-1），0=关闭 */
   groupReplyProbability?: number;
+  /** 群聊回复欲望门控（规则打分 + 对话窗口） */
+  replyDesire: ReplyDesireConfig;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
   /** 私聊额外 system prompt */
@@ -326,6 +341,15 @@ export const DndSchema: Schema<DndConfig> = Schema.object({
   interjections: Schema.boolean().default(true).description('跑团期间也按插话概率随机吐槽（只吐槽、不结算行动）；关掉则开团后只回 @'),
 });
 
+/** 回复欲望子 Schema */
+export const ReplyDesireSchema: Schema<ReplyDesireConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('群聊未@时按回复欲望打分决定是否接话'),
+  threshold: Schema.number().default(0.6).description('放行阈值(0-1)，越高越安静'),
+  names: Schema.array(Schema.string()).default([]).description('bot 昵称/别名，群里提到即视为在叫 bot'),
+  engagedMs: Schema.number().default(90000).description('对话窗口(ms)：bot 回复后刚聊过的人更容易被接话'),
+  engagedMaxTurns: Schema.number().default(8).description('对话窗口内最多靠打分连续接几轮，0=不进入对话窗口'),
+});
+
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   appId: Schema.string().default('').description('QQ 机器人 AppID'),
   appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
@@ -339,6 +363,13 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   cleanup: CleanupSchema.default({ dryRun: false, rules: [] }).description('定期清理（内置 media/tmp 之外的额外目录）'),
   requireMention: Schema.boolean().default(true).description('群聊是否需要@bot触发'),
   groupReplyProbability: Schema.number().default(0).description('群聊未@时随机回复概率(0-1)，0=关闭'),
+  replyDesire: ReplyDesireSchema.default({
+    enabled: false,
+    threshold: 0.6,
+    names: [],
+    engagedMs: 90000,
+    engagedMaxTurns: 8,
+  }).description('群聊回复欲望门控'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),

@@ -26,6 +26,7 @@ import { isImageContentType } from '../transport/attachment.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
+import { replyDecider } from '../middleware/reply-decider.ts';
 import { accessPolicyFromConfig } from '../shared/permissions.ts';
 import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { appendGroupMessage } from '../features/group-memory.ts';
@@ -108,8 +109,11 @@ export function setupMiddlewares(
   });
 
   // 5. 群聊 @bot 门控（含概率隐式 @：未 @ 时按 groupReplyProbability 随机放行）
+  //    开了回复欲望时 passthrough：没放行的消息不在这里丢，交给 5.5 打分决定
+  const replyDesireOn = config.replyDesire?.enabled === true;
   bot.use(mentionGate({
     requireMentionInGroup: config.requireMention,
+    passthrough: replyDesireOn,
     isImplicitMention: (ctx) => {
       if (ctx.message.kind !== 'group') return false;
       const p = config.groupReplyProbability ?? 0;
@@ -121,6 +125,9 @@ export function setupMiddlewares(
       return groupId === undefined || manager.dndService?.active(manager.sessionKey('group', groupId)) === undefined;
     },
   }));
+
+  // 5.5. 回复欲望门控：未 @ 的群消息按规则打分 + 对话窗口决定是否接话
+  if (replyDesireOn) bot.use(replyDecider(config, manager, logger));
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
