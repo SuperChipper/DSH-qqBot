@@ -312,11 +312,24 @@ function assembleAgentBody(
   const notesHint = manager.notesHint([userContent, state.quote?.text ?? state.quote?.entry?.content ?? ''].join('\n'), scope, peerId);
 
   const forwardHint = buildForwardHint(forwardImages);
+  const replyStyleHint = buildReplyStyleHint(state.replyDesire as { mode?: string } | undefined);
 
-  const base = [dynamicCtx, stickerHints, forwardHint, notesHint, unsentHint, migrationHint, userMessage].filter(Boolean).join('\n');
+  const base = [dynamicCtx, stickerHints, forwardHint, notesHint, unsentHint, migrationHint, replyStyleHint, userMessage].filter(Boolean).join('\n');
   const agentBody = buildAgentBody(base, history, isGroup, wasMentioned || implicit, historyImages);
 
   return agentBody;
+}
+
+/** 回复欲望放行的表情包：提示用表情包回应 / 跟着复读，而不是长篇文字 */
+export function buildReplyStyleHint(desire: { mode?: string } | undefined): string {
+  if (desire?.mode === 'sticker') {
+    return '[回复方式] 对方发了一张表情包，在回应你或接着和你聊。像真人一样用表情包回：优先只发一张合适的收藏表情（qqbot_send_file），'
+      + '最多配一句很短的话，不要长段文字。';
+  }
+  if (desire?.mode === 'sticker-chain') {
+    return '[回复方式] 群友在接龙复读这张表情包。跟一张：用 qqbot_send_file 把当前消息里这张表情包原样发出去，不要配文字。';
+  }
+  return '';
 }
 
 /** 合并转发图片的说明：哪些已下载到本地、怎么看 */
