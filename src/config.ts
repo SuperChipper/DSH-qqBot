@@ -350,6 +350,79 @@ export const ReplyDesireSchema: Schema<ReplyDesireConfig> = Schema.object({
   engagedMaxTurns: Schema.number().default(8).description('对话窗口内最多靠打分连续接几轮，0=不进入对话窗口'),
 });
 
+/** 富媒体理解子 Schema（独立导出：config 面板的服务端校验复用） */
+export const MediaSchema: Schema<MediaConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),
+  maxMB: Schema.number().default(200).description('富媒体下载大小上限(MB)'),
+  ttlHours: Schema.number().default(24).description('富媒体存活时长(小时)，0=永不过期'),
+  maxTotalMB: Schema.number().default(1024).description('media 目录总量上限(MB)，超出从最旧的删，0=不限'),
+}).default({
+  enabled: true,
+  maxMB: 200,
+  ttlHours: 24,
+  maxTotalMB: 1024,
+});
+
+/** 视觉理解子 Schema */
+export const VisionSchema: Schema<VisionConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('是否启用视觉理解（qqbot_describe_image 工具）'),
+  native: Schema.boolean().default(false).description('是否把图片作为原生 ImageBlock 直接交给主模型（主模型路由需声明 image 输入）'),
+  provider: Schema.string().default('').description('视觉模型 provider（dsh 注册的 llm adapter，如 pi-ai）'),
+  model: Schema.string().default('').description('视觉模型 id（如 qwen-vl-max）'),
+  defaultPrompt: Schema.string().default('Describe this image in detail.').description('默认描述 prompt'),
+  maxBytes: Schema.number().default(10 * 1024 * 1024).description('图片字节上限'),
+  maxTokens: Schema.number().default(1024).description('输出 token 上限'),
+  timeoutMs: Schema.number().default(120000).description('视觉调用超时(ms)'),
+}).default({
+  enabled: false,
+  native: false,
+  provider: '',
+  model: '',
+  defaultPrompt: 'Describe this image in detail.',
+  maxBytes: 10 * 1024 * 1024,
+  maxTokens: 1024,
+  timeoutMs: 120000,
+});
+
+/** 语音识别子 Schema（apiKey 不随表单回传，服务端在写入时保留旧值） */
+export const AsrSchema: Schema<AsrConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('是否启用在线语音识别（QQ 未给出识别文本时转写语音）'),
+  baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions）'),
+  apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_ASR_API_KEY）'),
+  model: Schema.string().default('FunAudioLLM/SenseVoiceSmall').description('转写模型 id'),
+  preferQQ: Schema.boolean().default(true).description('QQ 自带识别文本存在时优先使用'),
+  timeoutMs: Schema.number().default(30000).description('转写调用超时(ms)'),
+}).default({
+  enabled: false,
+  baseUrl: 'https://api.siliconflow.cn/v1',
+  apiKey: '',
+  model: 'FunAudioLLM/SenseVoiceSmall',
+  preferQQ: true,
+  timeoutMs: 30000,
+});
+
+/** 视频理解子 Schema */
+export const VideoSchema: Schema<VideoConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否注册 qqbot_describe_video（需 vision 已配置 + ffmpeg 可用）'),
+  ffmpegPath: Schema.string().default('').description('ffmpeg 路径（空=PATH 里的 ffmpeg）'),
+  maxFrames: Schema.number().default(8).description('每个视频最多抽帧数（拼成一张宫格图）'),
+  maxSeconds: Schema.number().default(300).description('最多分析视频前多少秒'),
+}).default({
+  enabled: true,
+  ffmpegPath: '',
+  maxFrames: 8,
+  maxSeconds: 300,
+});
+
+/** 附件发送子 Schema */
+export const SendFileSchema: Schema<SendFileConfig> = Schema.object({
+  restrictPaths: Schema.boolean().default(true).description('是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots）'),
+  extraRoots: Schema.array(Schema.string()).default([]).description('额外允许访问的根目录'),
+}).default({
+  restrictPaths: true,
+  extraRoots: [],
+});
+
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   appId: Schema.string().default('').description('QQ 机器人 AppID'),
   appSecret: Schema.string().default('').description('QQ 机器人 AppSecret'),
@@ -388,69 +461,11 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   }).description('访问控制'),
   showToolResults: Schema.boolean().default(false).description('是否展示工具调用结果（关闭时私聊仍展示错误，群聊不展示）'),
   debug: Schema.boolean().default(false),
-  media: Schema.object({
-    enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),
-    maxMB: Schema.number().default(200).description('富媒体下载大小上限(MB)'),
-    ttlHours: Schema.number().default(24).description('富媒体存活时长(小时)，0=永不过期'),
-    maxTotalMB: Schema.number().default(1024).description('media 目录总量上限(MB)，超出从最旧的删，0=不限'),
-  }).default({
-    enabled: true,
-    maxMB: 200,
-    ttlHours: 24,
-    maxTotalMB: 1024,
-  }).description('富媒体理解配置'),
-  vision: Schema.object({
-    enabled: Schema.boolean().default(false).description('是否启用视觉理解（qqbot_describe_image 工具）'),
-    native: Schema.boolean().default(false).description('是否把图片作为原生 ImageBlock 交给主模型（主模型路由需声明 image 输入）'),
-    provider: Schema.string().default('').description('视觉模型 provider（dsh 注册的 llm adapter，如 pi-ai）'),
-    model: Schema.string().default('').description('视觉模型 id（如 qwen-vl-max）'),
-    defaultPrompt: Schema.string().default('Describe this image in detail.').description('默认描述 prompt'),
-    maxBytes: Schema.number().default(10 * 1024 * 1024).description('图片字节上限'),
-    maxTokens: Schema.number().default(1024).description('输出 token 上限'),
-    timeoutMs: Schema.number().default(120000).description('视觉调用超时(ms)'),
-  }).default({
-    enabled: false,
-    native: false,
-    provider: '',
-    model: '',
-    defaultPrompt: 'Describe this image in detail.',
-    maxBytes: 10 * 1024 * 1024,
-    maxTokens: 1024,
-    timeoutMs: 120000,
-  }).description('视觉理解配置'),
-  asr: Schema.object({
-    enabled: Schema.boolean().default(false).description('是否启用在线语音识别（QQ 未给出识别文本时转写语音）'),
-    baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions）'),
-    apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_ASR_API_KEY）'),
-    model: Schema.string().default('FunAudioLLM/SenseVoiceSmall').description('转写模型 id'),
-    preferQQ: Schema.boolean().default(true).description('QQ 自带识别文本存在时优先使用'),
-    timeoutMs: Schema.number().default(30000).description('转写调用超时(ms)'),
-  }).default({
-    enabled: false,
-    baseUrl: 'https://api.siliconflow.cn/v1',
-    apiKey: '',
-    model: 'FunAudioLLM/SenseVoiceSmall',
-    preferQQ: true,
-    timeoutMs: 30000,
-  }).description('语音识别配置'),
-  video: Schema.object({
-    enabled: Schema.boolean().default(true).description('是否注册 qqbot_describe_video（需 vision 已配置 + ffmpeg 可用）'),
-    ffmpegPath: Schema.string().default('').description('ffmpeg 路径（空=PATH 里的 ffmpeg）'),
-    maxFrames: Schema.number().default(8).description('每个视频最多抽帧数（拼成一张宫格图）'),
-    maxSeconds: Schema.number().default(300).description('最多分析视频前多少秒'),
-  }).default({
-    enabled: true,
-    ffmpegPath: '',
-    maxFrames: 8,
-    maxSeconds: 300,
-  }).description('视频理解配置'),
-  sendFile: Schema.object({
-    restrictPaths: Schema.boolean().default(true).description('是否启用路径白名单（默认 true，仅允许 media + cwd + extraRoots）'),
-    extraRoots: Schema.array(Schema.string()).default([]).description('额外允许访问的根目录'),
-  }).default({
-    restrictPaths: true,
-    extraRoots: [],
-  }).description('附件发送工具配置'),
+  media: MediaSchema.description('富媒体理解配置'),
+  vision: VisionSchema.description('视觉理解配置'),
+  asr: AsrSchema.description('语音识别配置'),
+  video: VideoSchema.description('视频理解配置'),
+  sendFile: SendFileSchema.description('附件发送工具配置'),
   ownerOpenid: Schema.string().description('bot 主人 QQ openid（私聊识别，文件访问白名单）'),
   adminOpenids: Schema.array(Schema.string()).default([]).description('额外的配置管理员 openid（可修改模型/preset、点击审批）'),
   fileAccess: FileAccessSchema.default({

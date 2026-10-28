@@ -35,10 +35,94 @@ interface FileAccessWire {
 /** 表情收藏配置（与 src/config.ts 的 StickersConfig 对应的局部投影） */
 interface StickersWire {
   enabled: boolean;
-  [key: string]: unknown;
+  root: string;
+  extraRoots: string[];
+  maxBytes: number;
+  maxAutoEntries: number;
 }
 
-/** GET 回显的生效配置（appSecret 已剔除） */
+/** 富媒体理解（与 src/config.ts 的 MediaConfig 对应） */
+interface MediaWire {
+  enabled: boolean;
+  maxMB: number;
+  ttlHours: number;
+  maxTotalMB: number;
+}
+
+/** 视觉理解（与 src/config.ts 的 VisionConfig 对应；apiKey 不涉及） */
+interface VisionWire {
+  enabled: boolean;
+  native: boolean;
+  provider: string;
+  model: string;
+  defaultPrompt: string;
+  maxBytes: number;
+  maxTokens: number;
+  timeoutMs: number;
+}
+
+/** 在线语音识别（与 src/config.ts 的 AsrConfig 对应；apiKey 走环境变量/patch，不进表单） */
+interface AsrWire {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  preferQQ: boolean;
+  timeoutMs: number;
+}
+
+/** 视频理解（与 src/config.ts 的 VideoConfig 对应） */
+interface VideoWire {
+  enabled: boolean;
+  ffmpegPath: string;
+  maxFrames: number;
+  maxSeconds: number;
+}
+
+/** 附件发送（与 src/config.ts 的 SendFileConfig 对应） */
+interface SendFileWire {
+  restrictPaths: boolean;
+  extraRoots: string[];
+}
+
+/** 共享笔记库（与 src/config.ts 的 NotesConfig 对应） */
+interface NotesWire {
+  enabled: boolean;
+  root: string;
+  autoInject: boolean;
+  injectTopK: number;
+  injectMaxChars: number;
+  injectMinCoverage: number;
+}
+
+/** 工具权限（与 src/config.ts 的 ToolAccessConfig 对应） */
+interface ToolAccessWire {
+  enabled: boolean;
+  fullAccessGroups: string[];
+  fullAccessUsers: string[];
+  readRoots: string[];
+}
+
+/** 定期清理（rules 不在表单上，保存时由服务端保留旧值） */
+interface CleanupWire {
+  dryRun: boolean;
+}
+
+/** 搜图（与 src/config.ts 的 FanartConfig 对应） */
+interface FanartWire {
+  enabled: boolean;
+  proxy: string;
+  poolDir: string;
+}
+
+/** 跑团（与 src/config.ts 的 DndConfig 对应） */
+interface DndWire {
+  enabled: boolean;
+  root: string;
+  turnButtons: boolean;
+  interjections: boolean;
+}
+
+/** GET 回显的生效配置（appSecret / asr.apiKey 已剔除） */
 type ConfigWire = {
   requireMention?: boolean;
   streaming?: boolean;
@@ -52,11 +136,29 @@ type ConfigWire = {
   groupReplyProbability?: number;
   historyLimit?: number;
   sessionIdleTimeout?: number;
+  textChunkLimit?: number;
+  maxQueue?: number;
+  processingTimeoutMs?: number;
+  askTimeoutMs?: number;
+  autoCompactTokens?: number;
+  tmpDir?: string;
+  tmpTtlHours?: number;
+  tmpMaxTotalMB?: number;
   ownerOpenid?: string;
   adminOpenids?: string[];
   access?: AccessControlWire;
   fileAccess?: FileAccessWire;
   stickers?: StickersWire;
+  notes?: NotesWire;
+  toolAccess?: ToolAccessWire;
+  media?: MediaWire;
+  vision?: VisionWire;
+  asr?: AsrWire;
+  video?: VideoWire;
+  sendFile?: SendFileWire;
+  cleanup?: CleanupWire;
+  fanart?: FanartWire;
+  dnd?: DndWire;
   cwd?: string;
 };
 
@@ -257,6 +359,17 @@ function AreaRow({ label, help, value, rows, onChange }: {
   );
 }
 
+/** 列表行（每行一条；编辑期保留空行，提交时统一 trim/filter） */
+function ListRow({ label, help, value, rows, onChange }: {
+  label: string; help?: string; value: readonly string[]; rows?: number; onChange: (next: string[]) => void;
+}): ReactNode {
+  return createElement(AreaRow, {
+    label, help, rows: rows ?? 2,
+    value: value.join('\n'),
+    onChange: (next: string) => { onChange(next.split('\n').map((line) => line.trim())); },
+  });
+}
+
 /** 访问模式分段选择行 */
 function SegmentedRow({ label, help, value, options, onChange }: {
   label: string; help?: string; value: AccessMode;
@@ -332,7 +445,7 @@ export function ConfigPanel(): ReactNode {
 
     // 白名单编辑期间保留原始换行/空行（textarea 可正常回车），提交时才规范化
     if (changed.adminOpenids !== undefined) {
-      changed.adminOpenids = changed.adminOpenids.map((s) => s.trim()).filter(Boolean);
+      changed.adminOpenids = (changed.adminOpenids as string[]).map((s) => s.trim()).filter(Boolean);
     }
     if (changed.access !== undefined) {
       const a = changed.access as AccessControlWire;
@@ -349,6 +462,23 @@ export function ConfigPanel(): ReactNode {
         extraAllow: f.extraAllow.map((s) => s.trim()).filter(Boolean),
         sensitivePaths: f.sensitivePaths.map((s) => s.trim()).filter(Boolean),
       };
+    }
+    if (changed.stickers !== undefined) {
+      const s = changed.stickers as StickersWire;
+      changed.stickers = { ...s, extraRoots: s.extraRoots.map((v) => v.trim()).filter(Boolean) };
+    }
+    if (changed.toolAccess !== undefined) {
+      const t = changed.toolAccess as ToolAccessWire;
+      changed.toolAccess = {
+        ...t,
+        fullAccessGroups: t.fullAccessGroups.map((v) => v.trim()).filter(Boolean),
+        fullAccessUsers: t.fullAccessUsers.map((v) => v.trim()).filter(Boolean),
+        readRoots: t.readRoots.map((v) => v.trim()).filter(Boolean),
+      };
+    }
+    if (changed.sendFile !== undefined) {
+      const s = changed.sendFile as SendFileWire;
+      changed.sendFile = { ...s, extraRoots: s.extraRoots.map((v) => v.trim()).filter(Boolean) };
     }
 
     setBusy(true);
@@ -383,6 +513,29 @@ export function ConfigPanel(): ReactNode {
   const dirty = (Object.keys(form) as Array<keyof ConfigWire>).some((key) => !shallowEqual(form[key], initial[key]));
   const access: AccessControlWire = form.access ?? { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] };
   const fileAccess: FileAccessWire = form.fileAccess ?? { ownerOnly: true, extraAllow: [], sensitivePaths: [] };
+  const media: MediaWire = form.media ?? { enabled: true, maxMB: 200, ttlHours: 24, maxTotalMB: 1024 };
+  const vision: VisionWire = form.vision ?? {
+    enabled: false, native: false, provider: '', model: '',
+    defaultPrompt: 'Describe this image in detail.', maxBytes: 10 * 1024 * 1024, maxTokens: 1024, timeoutMs: 120000,
+  };
+  const asr: AsrWire = form.asr ?? {
+    enabled: false, baseUrl: 'https://api.siliconflow.cn/v1',
+    model: 'FunAudioLLM/SenseVoiceSmall', preferQQ: true, timeoutMs: 30000,
+  };
+  const video: VideoWire = form.video ?? { enabled: true, ffmpegPath: '', maxFrames: 8, maxSeconds: 300 };
+  const notes: NotesWire = form.notes ?? {
+    enabled: true, root: '', autoInject: true, injectTopK: 2, injectMaxChars: 600, injectMinCoverage: 0.4,
+  };
+  const stickers: StickersWire = form.stickers ?? {
+    enabled: true, root: '', extraRoots: [], maxBytes: 8 * 1024 * 1024, maxAutoEntries: 200,
+  };
+  const sendFile: SendFileWire = form.sendFile ?? { restrictPaths: true, extraRoots: [] };
+  const toolAccess: ToolAccessWire = form.toolAccess ?? {
+    enabled: true, fullAccessGroups: [], fullAccessUsers: [], readRoots: [],
+  };
+  const cleanup: CleanupWire = form.cleanup ?? { dryRun: false };
+  const fanart: FanartWire = form.fanart ?? { enabled: true, proxy: '', poolDir: '' };
+  const dnd: DndWire = form.dnd ?? { enabled: true, root: '', turnButtons: true, interjections: true };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
@@ -470,12 +623,66 @@ export function ConfigPanel(): ReactNode {
       help: '超过该时长未活动会回收会话；86400000 = 24 小时',
       onChange: (v) => { patch('sessionIdleTimeout', v); },
     }),
+    createElement(NumberRow, {
+      label: '单条消息最大字符数', value: form.textChunkLimit ?? 4500,
+      min: 200, max: 5000, step: 100,
+      help: 'QQ 单条约 5000 字符上限，长回复会拆成多条',
+      onChange: (v) => { patch('textChunkLimit', v); },
+    }),
+    createElement(NumberRow, {
+      label: '并发队列上限', value: form.maxQueue ?? 20,
+      min: 1, max: 100, step: 1,
+      help: '同时排队的消息数，超出会拒绝新消息',
+      onChange: (v) => { patch('maxQueue', v); },
+    }),
+    createElement(NumberRow, {
+      label: '单次处理超时（毫秒）', value: form.processingTimeoutMs ?? 1800000,
+      min: 10000, max: 21600000, step: 60000,
+      help: '超时中断当前 LLM 调用',
+      onChange: (v) => { patch('processingTimeoutMs', v); },
+    }),
+    createElement(NumberRow, {
+      label: '待答问题超时（毫秒）', value: form.askTimeoutMs ?? 300000,
+      min: 10000, max: 21600000, step: 30000,
+      help: 'ask_user_question 等待用户回答的上限',
+      onChange: (v) => { patch('askTimeoutMs', v); },
+    }),
+    createElement(NumberRow, {
+      label: '自动压缩阈值（token）', value: form.autoCompactTokens ?? 120000,
+      min: 0, max: 1000000, step: 10000,
+      help: '上下文超过该值后自动压缩；0 = 交给 dsh 默认阈值',
+      onChange: (v) => { patch('autoCompactTokens', v); },
+    }),
+    createElement(SwitchRow, {
+      label: '调试模式', checked: form.debug ?? false,
+      help: '输出更详细的运行日志',
+      onChange: (v) => { patch('debug', v); },
+    }),
 
     createElement('div', { className: 'imqb2-group-title' }, '表情收藏'),
     createElement(SwitchRow, {
-      label: '允许 bot 自动收藏表情', checked: form.stickers?.enabled ?? true,
+      label: '允许 bot 自动收藏表情', checked: stickers.enabled,
       help: '开启后 bot 可在看到喜欢的图时调用 qqbot_save_sticker；收藏会更新索引并进入后续对话的表情清单',
-      onChange: (v) => { patch('stickers', { ...(form.stickers ?? { enabled: true }), enabled: v }); },
+      onChange: (v) => { patch('stickers', { ...stickers, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '表情包目录', value: stickers.root, placeholder: '留空 = 插件根目录/stickers',
+      onChange: (v) => { patch('stickers', { ...stickers, root: v }); },
+    }),
+    createElement(ListRow, {
+      label: '额外允许的收藏来源目录', help: '每行一个；media 目录始终允许', value: stickers.extraRoots, rows: 2,
+      onChange: (v) => { patch('stickers', { ...stickers, extraRoots: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '单张表情大小上限（字节）', value: stickers.maxBytes,
+      min: 1024, max: 104857600, step: 1048576,
+      onChange: (v) => { patch('stickers', { ...stickers, maxBytes: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '自动收藏条目上限', value: stickers.maxAutoEntries,
+      min: 0, max: 5000, step: 50,
+      help: '防止索引无限增长',
+      onChange: (v) => { patch('stickers', { ...stickers, maxAutoEntries: v }); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '模型'),
@@ -500,6 +707,226 @@ export function ConfigPanel(): ReactNode {
     createElement(AreaRow, {
       label: '私聊额外 system prompt', value: form.directPrompt ?? '',
       onChange: (v) => { patch('directPrompt', v); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '图片与媒体'),
+    createElement(SwitchRow, {
+      label: '启用富媒体理解', checked: media.enabled,
+      help: '下载聊天里的图片/视频并交给模型或工具分析；关闭后只保留文本',
+      onChange: (v) => { patch('media', { ...media, enabled: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '单个媒体大小上限（MB）', value: media.maxMB, min: 1, max: 2048, step: 10,
+      help: '超过上限的图片/视频不下载',
+      onChange: (v) => { patch('media', { ...media, maxMB: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '媒体保留时长（小时）', value: media.ttlHours, min: 0, max: 720, step: 1,
+      help: '超过后自动清理；0 = 永不清理',
+      onChange: (v) => { patch('media', { ...media, ttlHours: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '媒体目录总量上限（MB）', value: media.maxTotalMB, min: 0, max: 102400, step: 128,
+      help: '超出时从最旧的开始删；0 = 不限',
+      onChange: (v) => { patch('media', { ...media, maxTotalMB: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '视觉理解'),
+    createElement(SwitchRow, {
+      label: '启用视觉理解', checked: vision.enabled,
+      help: '注册 qqbot_describe_image；关闭后不能识图（原生看图另见下一项）',
+      onChange: (v) => { patch('vision', { ...vision, enabled: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '把图片直接交给主模型', checked: vision.native,
+      help: '主模型路由必须声明支持 image 输入，否则会报错',
+      onChange: (v) => { patch('vision', { ...vision, native: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '视觉模型 Provider', value: vision.provider, placeholder: '如 deepseek-vision',
+      onChange: (v) => { patch('vision', { ...vision, provider: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '视觉模型 Model', value: vision.model, placeholder: '如 deepseek-v4-flash',
+      onChange: (v) => { patch('vision', { ...vision, model: v }); },
+    }),
+    createElement(AreaRow, {
+      label: '默认描述 prompt', value: vision.defaultPrompt, rows: 2,
+      onChange: (v) => { patch('vision', { ...vision, defaultPrompt: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '图片字节上限', value: vision.maxBytes, min: 1024, max: 104857600, step: 1048576,
+      onChange: (v) => { patch('vision', { ...vision, maxBytes: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '输出 token 上限', value: vision.maxTokens, min: 64, max: 32768, step: 64,
+      onChange: (v) => { patch('vision', { ...vision, maxTokens: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '视觉调用超时（毫秒）', value: vision.timeoutMs, min: 10000, max: 600000, step: 5000,
+      onChange: (v) => { patch('vision', { ...vision, timeoutMs: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '视频理解'),
+    createElement(SwitchRow, {
+      label: '启用视频理解', checked: video.enabled,
+      help: '注册 qqbot_describe_video：抽帧宫格 + 音轨转写；需要视觉模型和 ffmpeg',
+      onChange: (v) => { patch('video', { ...video, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: 'ffmpeg 路径', value: video.ffmpegPath, placeholder: '留空 = PATH 里的 ffmpeg',
+      help: '路径里有空格也直接填；ffprobe 取同目录',
+      onChange: (v) => { patch('video', { ...video, ffmpegPath: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '最多抽帧数', value: video.maxFrames, min: 1, max: 24, step: 1,
+      onChange: (v) => { patch('video', { ...video, maxFrames: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '最多分析前多少秒', value: video.maxSeconds, min: 10, max: 3600, step: 10,
+      onChange: (v) => { patch('video', { ...video, maxSeconds: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '语音识别'),
+    createElement(SwitchRow, {
+      label: '启用在线语音识别', checked: asr.enabled,
+      help: 'QQ 没给识别文本时，把语音发给转写接口；密钥请用环境变量 QQBOT_ASR_API_KEY 或 patch 配置',
+      onChange: (v) => { patch('asr', { ...asr, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '接口地址', value: asr.baseUrl, placeholder: 'https://api.siliconflow.cn/v1',
+      onChange: (v) => { patch('asr', { ...asr, baseUrl: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '转写模型', value: asr.model, placeholder: 'FunAudioLLM/SenseVoiceSmall',
+      onChange: (v) => { patch('asr', { ...asr, model: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '优先用 QQ 自带识别文本', checked: asr.preferQQ,
+      onChange: (v) => { patch('asr', { ...asr, preferQQ: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '转写超时（毫秒）', value: asr.timeoutMs, min: 5000, max: 120000, step: 5000,
+      onChange: (v) => { patch('asr', { ...asr, timeoutMs: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '共享笔记'),
+    createElement(SwitchRow, {
+      label: '启用共享笔记库', checked: notes.enabled,
+      help: 'qqbot_notes_search / qqbot_notes_save + 自动召回',
+      onChange: (v) => { patch('notes', { ...notes, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '笔记目录', value: notes.root, placeholder: '留空 = 工作目录/notes',
+      onChange: (v) => { patch('notes', { ...notes, root: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '自动注入相关笔记', checked: notes.autoInject,
+      help: '每条消息前检索并注入相关片段',
+      onChange: (v) => { patch('notes', { ...notes, autoInject: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '最多注入片段数', value: notes.injectTopK, min: 0, max: 8, step: 1,
+      onChange: (v) => { patch('notes', { ...notes, injectTopK: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '注入总字数上限', value: notes.injectMaxChars, min: 0, max: 4000, step: 50,
+      onChange: (v) => { patch('notes', { ...notes, injectMaxChars: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '最低查询词覆盖率', value: notes.injectMinCoverage, min: 0, max: 1, step: 0.05,
+      help: '0-1，越高越保守',
+      onChange: (v) => { patch('notes', { ...notes, injectMinCoverage: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '工具权限'),
+    createElement(SwitchRow, {
+      label: '按会话限制工具', checked: toolAccess.enabled,
+      help: '关闭后所有 QQ 会话都能用终端、读写任意路径',
+      onChange: (v) => { patch('toolAccess', { ...toolAccess, enabled: v }); },
+    }),
+    createElement(ListRow, {
+      label: '可完全访问的群 openid', help: '每行一个；这些群里能用终端、读写任意路径',
+      value: toolAccess.fullAccessGroups, rows: 2,
+      onChange: (v) => { patch('toolAccess', { ...toolAccess, fullAccessGroups: v }); },
+    }),
+    createElement(ListRow, {
+      label: '可完全访问的用户 openid', help: '每行一个；主人私聊始终可以',
+      value: toolAccess.fullAccessUsers, rows: 2,
+      onChange: (v) => { patch('toolAccess', { ...toolAccess, fullAccessUsers: v }); },
+    }),
+    createElement(ListRow, {
+      label: '受限会话可读目录', help: '每行一个；media、表情库、临时目录始终允许',
+      value: toolAccess.readRoots, rows: 3,
+      onChange: (v) => { patch('toolAccess', { ...toolAccess, readRoots: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '文件发送'),
+    createElement(SwitchRow, {
+      label: '启用路径白名单', checked: sendFile.restrictPaths,
+      help: '只允许 media、工作目录和额外目录里的文件；关闭后任意路径都能发',
+      onChange: (v) => { patch('sendFile', { ...sendFile, restrictPaths: v }); },
+    }),
+    createElement(ListRow, {
+      label: '额外允许的根目录', help: '每行一个绝对路径', value: sendFile.extraRoots, rows: 2,
+      onChange: (v) => { patch('sendFile', { ...sendFile, extraRoots: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '临时目录与清理'),
+    createElement(FieldRow, {
+      label: '临时目录', value: form.tmpDir ?? '', placeholder: '留空 = 工作目录/tmp',
+      help: '下载、抽帧、截图等中间文件放这里',
+      onChange: (v) => { patch('tmpDir', v); },
+    }),
+    createElement(NumberRow, {
+      label: '临时文件保留（小时）', value: form.tmpTtlHours ?? 72, min: 0, max: 8760, step: 1,
+      help: '0 = 不按时间清理',
+      onChange: (v) => { patch('tmpTtlHours', v); },
+    }),
+    createElement(NumberRow, {
+      label: '临时目录总量上限（MB）', value: form.tmpMaxTotalMB ?? 4096, min: 0, max: 1048576, step: 256,
+      help: '0 = 不限',
+      onChange: (v) => { patch('tmpMaxTotalMB', v); },
+    }),
+    createElement(SwitchRow, {
+      label: '清理只记日志（dry run）', checked: cleanup.dryRun,
+      help: '自定义清理规则（cleanup.rules）只能在 cordis.patch.yml 里配',
+      onChange: (v) => { patch('cleanup', { ...cleanup, dryRun: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '搜图'),
+    createElement(SwitchRow, {
+      label: '启用 qqbot_fanart_pick', checked: fanart.enabled,
+      onChange: (v) => { patch('fanart', { ...fanart, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: 'HTTP 代理', value: fanart.proxy, placeholder: '留空 = HTTPS_PROXY 或系统代理',
+      onChange: (v) => { patch('fanart', { ...fanart, proxy: v }); },
+    }),
+    createElement(FieldRow, {
+      label: 'CP 池目录', value: fanart.poolDir, placeholder: '留空 = 插件根目录/scripts',
+      onChange: (v) => { patch('fanart', { ...fanart, poolDir: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '跑团'),
+    createElement(SwitchRow, {
+      label: '启用跑团', checked: dnd.enabled,
+      help: '/dnd 命令与 dnd_* 工具',
+      onChange: (v) => { patch('dnd', { ...dnd, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '跑团数据目录', value: dnd.root, placeholder: '留空 = 工作目录/dnd',
+      onChange: (v) => { patch('dnd', { ...dnd, root: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '回合按钮', checked: dnd.turnButtons,
+      help: '轮到 PC 时发「结束回合 / 查看状态」按钮',
+      onChange: (v) => { patch('dnd', { ...dnd, turnButtons: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '开团后允许随机插嘴', checked: dnd.interjections,
+      help: '只吐槽、不结算；关闭后开团后只回 @',
+      onChange: (v) => { patch('dnd', { ...dnd, interjections: v }); },
     }),
 
     form.cwd !== undefined

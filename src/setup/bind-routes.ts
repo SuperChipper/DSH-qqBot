@@ -19,7 +19,22 @@ import {
   type SetupCredentials,
 } from './persist.ts';
 import { getProfileDir } from '../shared/index.ts';
-import { AccessControlSchema, FileAccessSchema, ReplyDesireSchema, StickersSchema } from '../config.ts';
+import {
+  AccessControlSchema,
+  AsrSchema,
+  CleanupSchema,
+  DndSchema,
+  FanartSchema,
+  FileAccessSchema,
+  MediaSchema,
+  NotesSchema,
+  ReplyDesireSchema,
+  SendFileSchema,
+  StickersSchema,
+  ToolAccessSchema,
+  VideoSchema,
+  VisionSchema,
+} from '../config.ts';
 import {
   BIND_CONFIG_PATH,
   BIND_MANUAL_PATH,
@@ -99,8 +114,11 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
   'groupReplyProbability', 'replyDesire', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
-  'adminOpenids', 'autoCompactTokens',
-  'access', 'fileAccess', 'stickers',
+  'adminOpenids', 'autoCompactTokens', 'textChunkLimit', 'maxQueue',
+  'processingTimeoutMs', 'askTimeoutMs',
+  'tmpDir', 'tmpTtlHours', 'tmpMaxTotalMB',
+  'access', 'fileAccess', 'stickers', 'notes', 'toolAccess',
+  'media', 'vision', 'asr', 'video', 'sendFile', 'cleanup', 'fanart', 'dnd',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
@@ -117,12 +135,29 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   groupReplyProbability: (v) => numberSchema(v, 'groupReplyProbability', 0, 1),
   historyLimit: (v) => integerSchema(v, 'historyLimit', 0, 200),
   autoCompactTokens: (v) => integerSchema(v, 'autoCompactTokens', 0, 1_000_000),
+  textChunkLimit: (v) => integerSchema(v, 'textChunkLimit', 200, 5000),
+  maxQueue: (v) => integerSchema(v, 'maxQueue', 1, 100),
+  processingTimeoutMs: (v) => integerSchema(v, 'processingTimeoutMs', 10_000, 6 * 60 * 60 * 1000),
+  askTimeoutMs: (v) => integerSchema(v, 'askTimeoutMs', 10_000, 6 * 60 * 60 * 1000),
   sessionIdleTimeout: (v) => integerSchema(v, 'sessionIdleTimeout', 60_000, 30 * 24 * 60 * 60 * 1000),
+  tmpDir: stringSchema('tmpDir'),
+  tmpTtlHours: (v) => integerSchema(v, 'tmpTtlHours', 0, 24 * 365),
+  tmpMaxTotalMB: (v) => integerSchema(v, 'tmpMaxTotalMB', 0, 1_000_000),
   ownerOpenid: stringSchema('ownerOpenid'),
   adminOpenids: (v) => stringArraySchema(v, 'adminOpenids'),
   access: (v) => AccessControlSchema(v as never),
   fileAccess: (v) => FileAccessSchema(v as never),
   stickers: (v) => StickersSchema(v as never),
+  notes: (v) => NotesSchema(v as never),
+  toolAccess: (v) => ToolAccessSchema(v as never),
+  media: (v) => MediaSchema(v as never),
+  vision: (v) => VisionSchema(v as never),
+  asr: (v) => AsrSchema(v as never),
+  video: (v) => VideoSchema(v as never),
+  sendFile: (v) => SendFileSchema(v as never),
+  cleanup: (v) => CleanupSchema(v as never),
+  fanart: (v) => FanartSchema(v as never),
+  dnd: (v) => DndSchema(v as never),
   replyDesire: (v) => ReplyDesireSchema(v as never),
 };
 
@@ -392,9 +427,12 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
 
   if (req.method === 'GET') {
     const current = options.currentConfig?.() ?? {};
-    // appSecret 永不回传；其余（含只读 cwd）原样回显
-    const { appSecret: _s, ...safe } = current;
-    sendJson(res, 200, { config: safe });
+    // appSecret / asr.apiKey 永不回传；其余（含只读 cwd）原样回显
+    const { appSecret: _s, asr: asrValue, ...safe } = current;
+    const config = asrValue === undefined
+      ? safe
+      : { ...safe, asr: { ...(asrValue as Record<string, unknown>), apiKey: '' } };
+    sendJson(res, 200, { config });
     return;
   }
 
@@ -435,6 +473,18 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
   } catch (err) {
     sendJson(res, 400, { ok: false, error: err instanceof TypeError ? err.message : String(err) });
     return;
+  }
+
+  // 嵌套组里没有表单控件的字段按当前生效值回填：Schema 默认值会补空，
+  // 直接写回会把已保存的 ASR 密钥 / 自定义清理规则冲掉
+  const current = options.currentConfig?.() ?? {};
+  if (validated.asr !== undefined) {
+    const currentAsr = (current.asr ?? {}) as Record<string, unknown>;
+    validated.asr = { ...(validated.asr as Record<string, unknown>), apiKey: currentAsr.apiKey ?? '' };
+  }
+  if (validated.cleanup !== undefined) {
+    const currentCleanup = (current.cleanup ?? {}) as Record<string, unknown>;
+    validated.cleanup = { ...(validated.cleanup as Record<string, unknown>), rules: currentCleanup.rules ?? [] };
   }
 
   const persisted = options.onUpdateConfig === undefined

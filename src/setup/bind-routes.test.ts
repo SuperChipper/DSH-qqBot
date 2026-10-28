@@ -377,15 +377,100 @@ describe('bind-routes', () => {
     expect(json(res)).toMatchObject({ ok: false, error: expect.stringContaining('只读') });
   });
 
-  it('POST config：未知/超时类字段不在白名单被拒绝', async () => {
+  it('POST config：未知字段不在白名单被拒绝', async () => {
     const { routes } = createHarness();
     const res = fakeRes();
     await invoke(
       routes.get(BIND_CONFIG_PATH),
-      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"maxQueue":50}'),
+      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"unknownKey":50}'),
       res,
     );
     expect(res.statusCode).toBe(400);
+  });
+
+  it('POST config：新增嵌套组通过校验并写入', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({
+      onUpdateConfig: (config) => { updates.push(config); return true; },
+    });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        JSON.stringify({
+          notes: { enabled: false, root: 'C:/notes', autoInject: true, injectTopK: 3, injectMaxChars: 500, injectMinCoverage: 0.5 },
+          media: { enabled: true, maxMB: 100, ttlHours: 12, maxTotalMB: 512 },
+          video: { enabled: false, ffmpegPath: 'C:/ffmpeg/bin/ffmpeg.exe', maxFrames: 4, maxSeconds: 60 },
+          toolAccess: { enabled: true, fullAccessGroups: ['g1'], fullAccessUsers: [], readRoots: ['C:/x'] },
+          dnd: { enabled: true, root: '', turnButtons: false, interjections: true },
+        })),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      notes: { enabled: false },
+      video: { maxFrames: 4 },
+      toolAccess: { fullAccessGroups: ['g1'] },
+      dnd: { turnButtons: false },
+    });
+  });
+
+  it('POST config：数值越界被拒绝', async () => {
+    const { routes } = createHarness({ onUpdateConfig: () => true });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"maxQueue":0}'),
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('GET config：不回传 asr.apiKey', async () => {
+    const { routes } = createHarness({
+      currentConfig: () => ({ asr: { enabled: true, apiKey: 'sk-secret', timeoutMs: 30000 } }),
+    });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
+    const body = json(res) as { config: { asr: { apiKey: string; enabled: boolean } } };
+    expect(res.statusCode).toBe(200);
+    expect(body.config.asr.apiKey).toBe('');
+    expect(body.config.asr.enabled).toBe(true);
+  });
+
+  it('POST config：asr 只改非密钥字段时保留已存 apiKey', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({
+      currentConfig: () => ({ asr: { enabled: true, apiKey: 'sk-secret', baseUrl: 'x', model: 'm', preferQQ: true, timeoutMs: 30000 } }),
+      onUpdateConfig: (config) => { updates.push(config); return true; },
+    });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"asr":{"enabled":false,"baseUrl":"https://api.siliconflow.cn/v1","model":"FunAudioLLM/SenseVoiceSmall","preferQQ":true,"timeoutMs":30000}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect((updates[0]?.asr as { apiKey?: string }).apiKey).toBe('sk-secret');
+  });
+
+  it('POST config：cleanup 只改 dryRun 时保留自定义规则', async () => {
+    const rules = [{ name: 'x', dir: 'C:/x', unit: 'file', ttlHours: 1, recursive: false, keep: [], match: [], maxTotalMB: 0 }];
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({
+      currentConfig: () => ({ cleanup: { dryRun: false, rules } }),
+      onUpdateConfig: (config) => { updates.push(config); return true; },
+    });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080' }, '{"cleanup":{"dryRun":true}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect((updates[0]?.cleanup as { rules?: unknown }).rules).toEqual(rules);
   });
 
   it('POST config：类型错误被 Schema 拒绝', async () => {
