@@ -40,7 +40,9 @@ const DESCRIPTION =
   + 'absolute path (downloaded by the QQ bot). Frames are sampled evenly and read by a vision model; '
   + 'the audio track is transcribed when speech recognition is configured. Use this when the user '
   + 'sends or references a video. Pass a precise `prompt` when the user asks something specific '
-  + '(e.g. "what game is this", "read the on-screen text").';
+  + '(e.g. "what game is this", "read the on-screen text"). The result is raw material for your own '
+  + 'reply: answer what the user actually wanted (a reaction, a summary, or a specific answer) instead '
+  + 'of relaying the description.';
 
 const DEFAULT_PROMPT = 'Describe what happens in the video: scenes, people, actions and any on-screen text.';
 
