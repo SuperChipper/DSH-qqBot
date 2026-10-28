@@ -137,6 +137,8 @@ export interface Campaign {
   knownSites: string[];
   /** 只提示一次的事（里程碑、章节推进） */
   announced: string[];
+  /** false = 还在开场（没进第一个场景）；旧存档没有这个字段，当作已开始 */
+  begun?: boolean;
 }
 
 const MAX_LOG = 30;
@@ -174,6 +176,7 @@ export function createCampaign(key: string, adv: Adventure, now = Date.now()): C
     npcs: {},
     knownSites: adv.sites.filter((s) => s.knownWhen === undefined || s.id === startSite?.id).map((s) => s.id),
     announced: [],
+    begun: false,
   };
 }
 
@@ -552,6 +555,7 @@ export function startInitiative(c: Campaign, roller: Roller = cryptoRoller, name
   });
   rolls.sort((a, b) => b.init - a.init || b.tiebreak - a.tiebreak);
   c.initiative = { round: 1, turn: 0, order: rolls.map(({ name, init }) => ({ name, init })) };
+  c.begun = true;
   pushLog(c, `进入战斗：${rolls.map((r) => `${r.name}(${r.init})`).join(' > ')}`);
   return rolls.map(({ name, init, detail }) => ({ name, init, detail }));
 }
@@ -725,6 +729,13 @@ export function spawnMonsters(c: Campaign, roomId: string, monsters: readonly Du
   return spawned;
 }
 
+/** 房间的固定遭遇只刷一次（第一次有人进来，或开场结束时的起始房间） */
+export function spawnEncounter(c: Campaign, room: DungeonRoom): Character[] {
+  if (c.spawned.includes(room.id)) return [];
+  c.spawned.push(room.id);
+  return spawnMonsters(c, room.id, room.encounter ?? []);
+}
+
 /** 出口检定：skill 或 ability 都可以写中文或英文 */
 function rollExitCheck(ch: Character, check: ExitCheck, roller: Roller): ExitCheckRoll {
   const skill = check.skill === undefined ? undefined : parseSkill(check.skill);
@@ -811,6 +822,12 @@ export function moveParty(
   const firstVisit = movers.length > 0 && !c.revealed.includes(room.id);
   const spawned: Character[] = [];
   if (movers.length > 0) {
+    // 都开始走动了，开场肯定结束了；起始房间的遭遇（比如开场伏击）这时还没刷过，补上
+    if (c.begun === false) {
+      c.begun = true;
+      const start = findRoom(graph, from);
+      if (start !== undefined) spawnEncounter(c, start);
+    }
     // 没单独移动过的人跟着 currentRoom；它要变之前先把留下的人钉在原地，免得被一起带走
     for (const ch of c.characters) {
       if (ch.kind !== 'monster' && ch.room === undefined && !movers.includes(ch)) ch.room = c.currentRoom;
@@ -820,10 +837,7 @@ export function moveParty(
     c.currentRoom = everyone ? room.id : mainRoom(c, room.id);
     if (firstVisit) c.revealed.push(room.id);
     if (!c.knownSites.includes(site.id)) c.knownSites.push(site.id);
-    if (!c.spawned.includes(room.id)) {
-      c.spawned.push(room.id);
-      spawned.push(...spawnMonsters(c, room.id, room.encounter ?? []));
-    }
+    spawned.push(...spawnEncounter(c, room));
     pushLog(c, `${everyone ? '队伍' : movers.map((ch) => ch.name).join('、')}进入「${room.name}」`);
   }
   const story = afterChange(c, adv);

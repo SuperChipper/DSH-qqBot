@@ -392,6 +392,7 @@ describe('摘要、注入与加载', () => {
       c.knownSites.push('mine');
       c.quests['clear-mine'] = 'active';
       c.currentRoom = 'mine-mouth';
+      c.begun = true;
     });
     const state = service.promptSections('group:g')[1]!.text;
     expect(state).toContain('章节：矿镇｜目标：打听矿坑的事');
@@ -411,6 +412,52 @@ describe('摘要、注入与加载', () => {
     expect(library.get('broken')).toBeUndefined();
     expect(library.get('sunken-bell')).toBeDefined();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('broken.json'));
+  });
+});
+
+describe('开场', () => {
+  function withStartEncounter(): Adventure {
+    const adv = structuredClone(fixture());
+    adv.opening = ['介绍角色', '定行进队形'];
+    adv.sites[0]!.rooms[0]!.encounter = [{ ...rat, count: 1 }];
+    return validateAdventure(adv);
+  }
+
+  it('新团先开场：注入开场步骤、不注入第一个场景的 DM 笔记；begin 后给出场景并刷出起始房间的敌人', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dnd-open-'));
+    const advDir = join(root, 'adventures');
+    mkdirSync(advDir);
+    writeFileSync(join(advDir, 'grey-mine.json'), JSON.stringify(withStartEncounter()));
+    const service = new DndService({ store: new CampaignStore(join(root, 'campaigns')), library: new AdventureLibrary({ adventures: advDir }), mapDir: root });
+    service.start('group:o', 'grey-mine', false);
+    const state = service.promptSections('group:o')[1]!.text;
+    expect(state).toContain('【开场还没做完】');
+    expect(state).toContain('1. 介绍角色');
+    expect(state).not.toContain('本房间 DM 笔记');
+    expect(state).toContain('开场：还没开始');
+
+    const adv = service.require('group:o').adventure;
+    const lines = service.store.update('group:o', (c) => storyAction(c, adv, 'begin', '', {}));
+    expect(lines.join('\n')).toContain('【玩家视角，可以描述】木栅栏围着几顶帐篷。');
+    expect(lines.join('\n')).toContain('【DM 机密】这里的敌人：巨鼠');
+    const after = service.require('group:o').campaign;
+    expect(after.begun).toBe(true);
+    expect(after.characters.some((ch) => ch.name === '巨鼠' && ch.room === 'camp-gate')).toBe(true);
+    expect(service.promptSections('group:o')[1]!.text).toContain('本房间 DM 笔记（只给你裁定用，不要直接念）：安全区。');
+    expect(() => service.store.update('group:o', (c) => storyAction(c, adv, 'begin', '', {}))).toThrow(/已经开场/);
+  });
+
+  it('没 begin 就直接走动也算开场结束，起始房间的敌人照样刷出；旧存档不算在开场', () => {
+    const adv = withStartEncounter();
+    const c = party(adv);
+    expect(c.begun).toBe(false);
+    moveParty(c, adv, 'camp-tavern');
+    expect(c.begun).toBe(true);
+    expect(c.characters.find((ch) => ch.name === '巨鼠')?.room).toBe('camp-gate');
+
+    const old = party(adv);
+    delete old.begun;
+    expect(summarize(old, adv)).not.toContain('开场');
   });
 });
 

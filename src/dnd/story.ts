@@ -350,6 +350,41 @@ export function afterChange(c: Campaign, adv: Adventure): string[] {
   return lines;
 }
 
+// ── 开场 ──
+
+/** 还在开场：新团从 false 开始；旧存档没有这个字段，当作已经开始 */
+export function inOpening(c: Campaign): boolean {
+  return c.begun === false;
+}
+
+/** 开场做完，进入第一个场景：返回给 DM 叙述用的抵达描述和房间的玩家视角 */
+export function beginAdventure(c: Campaign, adv: Adventure): { lines: string[]; room: DungeonRoom | undefined } {
+  if (!inOpening(c)) throw new Error('已经开场了，不用再 begin');
+  c.begun = true;
+  const site = siteOfRoom(adv, c.currentRoom);
+  const room = site?.rooms.find((r) => r.id === c.currentRoom);
+  const lines = ['开场结束，进入第一个场景。'];
+  if (site?.arrival) lines.push(`【抵达「${site.name}」，可以念】${site.arrival}`);
+  if (room !== undefined) {
+    const view = roomView(c, adv, room);
+    lines.push(`【玩家视角，可以描述】${view.playerView}`, `【DM 机密，勿念】${view.dmNotes}`);
+  }
+  return { lines, room };
+}
+
+/** 开场阶段注入给 DM 的说明 */
+export function openingLines(c: Campaign, adv: Adventure): string[] {
+  if (!inOpening(c)) return [];
+  const steps = adv.opening ?? [];
+  return [
+    '【开场还没做完】/dnd new 已经把开场白发到群里了。先带玩家做下面的事，一步一步来、等玩家回应；'
+      + '不要描述第一个场景、不要提任何敌人或危险、不要掷骰。玩家都准备好了（或者说「开始吧」）再调用 dnd_story action=begin，按它返回的玩家视角描述第一个场景。',
+    ...(steps.length > 0
+      ? steps.map((s, i) => `${i + 1}. ${s}`)
+      : ['1. 让每个人介绍自己的角色（名字、职业、一两句来历）。', '2. 问清楚队伍怎么上路、谁走前面谁殿后。']),
+  ];
+}
+
 // ── 读取 ──
 
 /** 房间当前的描述：后面满足条件的变体覆盖前面的 */
@@ -388,6 +423,7 @@ function short(text: string, max: number): string {
 /** 团况摘要里的剧情行；单地城、没有剧情内容时返回空 */
 export function storySummaryLines(c: Campaign, adv: Adventure, rooms: string[]): string[] {
   const lines: string[] = [];
+  if (inOpening(c)) lines.push('开场：还没开始（先做开场，做完调用 dnd_story action=begin；之前别描述第一个场景）');
   const chapter = adv.chapters.find((ch) => ch.id === c.chapter);
   if (chapter !== undefined && (adv.chapters.length > 1 || chapter.goal)) {
     lines.push(`章节：${chapter.name}${chapter.goal ? `｜目标：${chapter.goal}` : ''}`);
@@ -406,7 +442,7 @@ export function storySummaryLines(c: Campaign, adv: Adventure, rooms: string[]):
     const shop = siteOfRoom(adv, id)?.rooms.find((r) => r.id === id)?.shop;
     if (shop !== undefined) lines.push(`店铺：${shopLine(shop)}；买卖用 dnd_character 的 add_items / gp_change`);
   }
-  const pending = rooms.flatMap((r) => pendingTriggers(c, adv, r));
+  const pending = inOpening(c) ? [] : rooms.flatMap((r) => pendingTriggers(c, adv, r));
   if (pending.length > 0) lines.push(`这里可能发生的事件（情况吻合时 dnd_story trigger）：${pending.map((t) => `${t.id}：${t.when}`).join('；')}`);
   const flags = adv.flags.filter((f) => f.label !== undefined && c.flags.includes(f.id));
   if (flags.length > 0) lines.push(`剧情进展：${flags.map((f) => f.label).join('、')}`);

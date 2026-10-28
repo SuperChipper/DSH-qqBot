@@ -114,7 +114,9 @@ export function setupMiddlewares(
       if (ctx.message.kind !== 'group') return false;
       const p = config.groupReplyProbability ?? 0;
       if (!(p > 0 && Math.random() < p)) return false;
-      // 跑团期间不随机冒泡：没 @ 的消息是闲聊，被当成行动宣告会让 DM 越界
+      // 跑团期间默认照样随机插嘴：这类消息不带 (@you)，DM 守则规定只吐槽、不当成行动宣告去结算。
+      // dnd.interjections=false 时开团后只回 @
+      if (config.dnd?.interjections !== false) return true;
       const groupId = ctx.message.groupOpenid;
       return groupId === undefined || manager.dndService?.active(manager.sessionKey('group', groupId)) === undefined;
     },

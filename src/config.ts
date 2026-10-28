@@ -87,6 +87,8 @@ export interface DndConfig {
   root: string;
   /** 轮到 PC 时发「结束回合 / 查看状态」按钮（需要机器人有消息按钮权限） */
   turnButtons: boolean;
+  /** 跑团期间也按 groupReplyProbability 随机插嘴（只吐槽、不结算）；false = 开团后只回 @ */
+  interjections: boolean;
 }
 
 export interface NotesConfig {
@@ -219,6 +221,7 @@ export const DndSchema: Schema<DndConfig> = Schema.object({
   enabled: Schema.boolean().default(true).description('是否启用跑团（/dnd 命令与 dnd_* 工具）'),
   root: Schema.string().default('').description('跑团数据目录（空=工作目录/dnd）'),
   turnButtons: Schema.boolean().default(true).description('轮到玩家时发「结束回合 / 查看状态」按钮'),
+  interjections: Schema.boolean().default(true).description('跑团期间也按插话概率随机吐槽（只吐槽、不结算行动）；关掉则开团后只回 @'),
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -316,5 +319,6 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     enabled: true,
     root: '',
     turnButtons: true,
+    interjections: true,
   }).description('跑团配置'),
 });

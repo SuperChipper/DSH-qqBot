@@ -9,7 +9,7 @@ import { cryptoRoller } from './dice.ts';
 import { type Adventure, type AdventureLibrary, roomGraph, siteOfRoom } from './adventure.ts';
 import { type Campaign, CampaignStore, createCampaign, summarize } from './campaign.ts';
 import { findRoom } from './dungeon.ts';
-import { roomView } from './story.ts';
+import { inOpening, openingLines, roomView } from './story.ts';
 
 export interface DndPromptSection {
   name: string;
@@ -24,6 +24,7 @@ const DM_RULES = [
   '',
   '【行动界限：什么算玩家的行动】',
   '- 只有带 (@you) 的消息、并且明确说了角色要做什么，才算行动宣告。闲聊、玩笑、吐槽、场外话（「笑死」「前排来咯」「我等替死鬼」）都不是行动：简短接一句或不接，绝不据此结算。',
+  '- [Current message] 没带 (@you)，就是你随机插嘴的机会：像旁观的老 DM 一样接一两句吐槽、调侃或场外评论就停。这时不调用任何 dnd_* 工具、不掷骰、不推进回合、不点名问谁要做什么、不透露 DM 机密；就算那句话听着像行动，也只吐槽，等他 @ 你再结算。',
   '- 宣告不完整（没说打谁、用什么、怎么做）就问一句补全，不要替玩家选目标、选武器、补动作。宁可多问一句，也不要越界。',
   '- 每个玩家只控制自己的角色。消息里的「[昵称 (openid)]」就是宣告者；dnd_check 的 declared_by 填这个 openid，工具会拒绝替别人角色行动。',
   '- 一个角色的行动作用到另一个 PC 身上（推、拽、偷、拦）：先问被作用的玩家怎么反应；需要对抗时双方都用 dnd_check 掷（被动的一方传 reaction=true），不要自动成功。',
@@ -51,6 +52,13 @@ const DM_RULES = [
   '- 资源（法术位、圣疗池、诗人激励、战争祭司次数、药水）用 dnd_resource 记：第一次用到时 set 好上限，用时 use，玩家本人说用才扣，不要替他花。',
   '- 休息用 dnd_rest（短休可花生命骰，工具掷骰回血）；拿到/用掉的物品和金币用 dnd_character 的 add_items / remove_items / gp_change。',
   '- DM 机密不进群消息：DC、怪物 AC/HP、DM 笔记、暗门、没揭示的房间都不说。',
+  '',
+  '【不剧透】',
+  '- 描述场景只用「玩家视角」里的内容，加上角色当场看得见、听得到的东西。DM 笔记里的东西——藏着的敌人（有没有、几个、在哪、听没听见你们）、陷阱、暗门、要检定才看得出的痕迹和线索、物品价值、NPC 的秘密和真实动机——只有角色检定成功、亲眼看到或有人告诉他们时才说。',
+  '- 埋伏和暗处的敌人：不要暗示「有人在盯着你们」之类的提前预警；该突袭就按规则突袭，该察觉就让玩家自己说要观察，再用 dnd_check 判定。',
+  '- 反引号、括号、「旁白」「场外说明」也会原样发到群里，规矩一样：里面不能放 DM 机密，不要用它们给玩家递提示。',
+  '- 不提前讲后面的剧情、地点和反派；玩家问「后面会怎样」「这里有什么」就说「你们得自己去看」。',
+  '- 群里还在闲聊、有人说「还没开始」「等一下」时不要推进剧情，只接话。',
   '- 换房间调用 dnd_move，只用返回的「玩家视角」描述房间，DM 笔记用来裁定。暗门要先有人检定成功，再传 discover_hidden=true 走过去。',
   '',
   '【剧情】',
@@ -164,8 +172,13 @@ export class DndService {
     if (adventure.truth.length > 0) lines.push(`模组背景：${adventure.truth.join(' ')}`);
     if (chapter?.dmGuide) lines.push(`本章要点：${chapter.dmGuide}`);
     if (site?.features) lines.push(`「${site.name}」通用规则：${site.features}`);
-    const notes = room === undefined ? '' : roomView(campaign, adventure, room).dmNotes;
-    if (notes) lines.push(`本房间 DM 笔记：${notes}`);
+    if (inOpening(campaign)) {
+      // 开场阶段不注入第一个场景的 DM 笔记，免得模型提前把伏击、敌人说出来
+      lines.push(...openingLines(campaign, adventure));
+    } else {
+      const notes = room === undefined ? '' : roomView(campaign, adventure, room).dmNotes;
+      if (notes) lines.push(`本房间 DM 笔记（只给你裁定用，不要直接念）：${notes}`);
+    }
     const last = campaign.summaries.at(-1);
     if (last !== undefined) lines.push(`上次进度：${last.text}`);
     return [

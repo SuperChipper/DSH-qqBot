@@ -210,8 +210,10 @@ export interface Adventure {
   levels?: { start: number; end: number };
   /** 整本模组的 DM 机密：反派、计划、东西真正在哪；每条一句 */
   truth: string[];
-  /** 开团念给玩家的开场 */
+  /** 开团念给玩家的开场（/dnd new 会直接发到群里） */
   hook: string;
+  /** 进入第一个场景之前 DM 要带玩家做的事（互相介绍、和委托人的交情、行进队形……），一步一条 */
+  opening?: string[];
   /** 开局所在的房间 id */
   start: string;
   chapters: Chapter[];
@@ -362,6 +364,9 @@ export function validateAdventure(input: unknown): Adventure {
     if (!site.rooms.some((r) => r.id === site.entry)) throw new Error(`场景 ${site.id} 的 entry 不是本场景的房间`);
   }
   if (!roomIds.has(adv.start)) throw new Error(`${where}：start 不是有效房间`);
+  if (adv.opening !== undefined && (!Array.isArray(adv.opening) || adv.opening.some((s) => typeof s !== 'string'))) {
+    throw new Error(`${where}：opening 要是字符串数组`);
+  }
 
   const chapterIds = unique('章节', adv.chapters.map((c) => c.id));
   const npcIds = unique('NPC', adv.npcs.map((n) => n.id));

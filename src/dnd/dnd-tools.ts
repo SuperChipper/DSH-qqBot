@@ -47,6 +47,7 @@ import {
   restoreResource,
   roomOf,
   setResource,
+  spawnEncounter,
   spawnMonsters,
   startInitiative,
   summarize,
@@ -61,6 +62,7 @@ import { renderMapPng } from './map-render.ts';
 import {
   type NpcState,
   afterChange,
+  beginAdventure,
   fireTrigger,
   leadsCard,
   learnLead,
@@ -714,6 +716,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
   register(
     'dnd_story',
     'Change story state written into the adventure, by id (ids come from 【团况】 and dnd_lookup). '
+    + 'begin (no id): the opening is done and the party enters the first scene; returns what to narrate. '
     + 'trigger: an event listed as "可能发生" now happens (applies its flags, leads, reinforcements). '
     + 'fact: an NPC or captive reveals a piece of information (checks with a DC: dnd_check first, then passed=true); '
     + 'say only what the tool returns. lead: players learn a lead. flag: set/clear a declared flag. '
@@ -721,7 +724,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     + 'npc: attitude/room/met, or join=true (joins the party) / fight=true (fights the party), which creates the '
     + 'character sheet. chapter: move to another chapter.',
     {
-      action: { type: 'string', enum: ['trigger', 'fact', 'lead', 'flag', 'quest', 'npc', 'chapter'] },
+      action: { type: 'string', enum: ['begin', 'trigger', 'fact', 'lead', 'flag', 'quest', 'npc', 'chapter'] },
       id: { type: 'string', description: 'Trigger / fact / lead / flag / quest / npc / chapter id.' },
       on: { type: 'boolean', description: 'For flag: true sets (default), false clears.' },
       passed: { type: 'boolean', description: 'For fact with a DC: the required check succeeded.' },
@@ -734,7 +737,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       join: { type: 'boolean', description: 'For npc: joins the party (creates a companion sheet).' },
       fight: { type: 'boolean', description: 'For npc: fights the party (creates a monster sheet in their room).' },
     },
-    ['action', 'id'],
+    ['action'],
     async (args, exec) => {
       const action = String(args.action);
       const id = String(args.id ?? '').trim();
@@ -857,6 +860,14 @@ export function storyAction(
   args: Record<string, unknown>,
   srdBase?: Omit<CharacterInput, 'name'>,
 ): string[] {
+  if (action === 'begin') {
+    const { lines, room } = beginAdventure(c, adventure);
+    const spawned = room === undefined ? [] : spawnEncounter(c, room);
+    if (spawned.length > 0) {
+      lines.push(`【DM 机密】这里的敌人：${spawned.map((m) => `${m.name} HP${m.hp} AC${m.ac} 命中+${m.attackBonus} 伤害${m.damage}${m.notes ? `（${m.notes}）` : ''}`).join('；')}`);
+    }
+    return lines;
+  }
   if (id.length === 0) throw new Error('dnd_story: id 不能为空');
   if (action === 'trigger') {
     const result = fireTrigger(c, adventure, id);
