@@ -416,6 +416,20 @@ describe('bind-routes', () => {
     });
   });
 
+  it('POST config：replyDesire 通过校验并写入', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"replyDesire":{"enabled":true,"threshold":0.5,"names":["大肥鱼"],"engagedMs":90000,"engagedMaxTurns":8}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(updates[0]).toMatchObject({ replyDesire: { enabled: true, threshold: 0.5, names: ['大肥鱼'] } });
+  });
+
   it('POST config：数值越界被拒绝', async () => {
     const { routes } = createHarness({ onUpdateConfig: () => true });
     const res = fakeRes();

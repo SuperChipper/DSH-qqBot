@@ -122,6 +122,15 @@ interface DndWire {
   interjections: boolean;
 }
 
+/** 回复欲望门控（与 src/config.ts 的 ReplyDesireConfig 对应） */
+interface ReplyDesireWire {
+  enabled: boolean;
+  threshold: number;
+  names: string[];
+  engagedMs: number;
+  engagedMaxTurns: number;
+}
+
 /** GET 回显的生效配置（appSecret / asr.apiKey 已剔除） */
 type ConfigWire = {
   requireMention?: boolean;
@@ -159,6 +168,7 @@ type ConfigWire = {
   cleanup?: CleanupWire;
   fanart?: FanartWire;
   dnd?: DndWire;
+  replyDesire?: ReplyDesireWire;
   cwd?: string;
 };
 
@@ -480,6 +490,10 @@ export function ConfigPanel(): ReactNode {
       const s = changed.sendFile as SendFileWire;
       changed.sendFile = { ...s, extraRoots: s.extraRoots.map((v) => v.trim()).filter(Boolean) };
     }
+    if (changed.replyDesire !== undefined) {
+      const r = changed.replyDesire as ReplyDesireWire;
+      changed.replyDesire = { ...r, names: r.names.map((v) => v.trim()).filter(Boolean) };
+    }
 
     setBusy(true);
     void fetch(BIND_CONFIG_PATH, {
@@ -536,6 +550,9 @@ export function ConfigPanel(): ReactNode {
   const cleanup: CleanupWire = form.cleanup ?? { dryRun: false };
   const fanart: FanartWire = form.fanart ?? { enabled: true, proxy: '', poolDir: '' };
   const dnd: DndWire = form.dnd ?? { enabled: true, root: '', turnButtons: true, interjections: true };
+  const replyDesire: ReplyDesireWire = form.replyDesire ?? {
+    enabled: false, threshold: 0.6, names: [], engagedMs: 90000, engagedMaxTurns: 8,
+  };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
@@ -657,6 +674,33 @@ export function ConfigPanel(): ReactNode {
       label: '调试模式', checked: form.debug ?? false,
       help: '输出更详细的运行日志',
       onChange: (v) => { patch('debug', v); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '回复欲望'),
+    createElement(SwitchRow, {
+      label: '未 @ 时按打分决定是否接话', checked: replyDesire.enabled,
+      help: '开启后，群里没 @ bot 的消息按规则打分，过阈值才接；关闭则只回 @ 和按概率随机插嘴',
+      onChange: (v) => { patch('replyDesire', { ...replyDesire, enabled: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '放行阈值（0-1）', value: replyDesire.threshold, min: 0, max: 1, step: 0.05,
+      help: '越高越安静：点名 bot 得 0.7、窗口内的人 0.6、像提问再 +0.2；默认 0.6',
+      onChange: (v) => { patch('replyDesire', { ...replyDesire, threshold: v }); },
+    }),
+    createElement(ListRow, {
+      label: 'bot 的昵称/别名', help: '每行一个；群里提到这些词就算在叫 bot（大小写不敏感）',
+      value: replyDesire.names, rows: 2,
+      onChange: (v) => { patch('replyDesire', { ...replyDesire, names: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '对话窗口时长（毫秒）', value: replyDesire.engagedMs, min: 5000, max: 600000, step: 5000,
+      help: '被 @ 或接话后开窗；窗口内刚聊过的人再说话基本都会被接，默认 90000（90 秒）',
+      onChange: (v) => { patch('replyDesire', { ...replyDesire, engagedMs: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '窗口内连续接话轮数上限', value: replyDesire.engagedMaxTurns, min: 0, max: 50, step: 1,
+      help: '靠打分接的轮数到上限就关窗（这一条仍接）；0 = 不进入对话窗口，默认 8',
+      onChange: (v) => { patch('replyDesire', { ...replyDesire, engagedMaxTurns: v }); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '表情收藏'),
