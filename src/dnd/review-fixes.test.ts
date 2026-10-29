@@ -2,7 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
-import type { InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import type { InlineKeyboard, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import type { Roller } from './dice.ts';
 import {
   CampaignStore,
@@ -251,5 +251,86 @@ describe('回合按钮', () => {
     const kb = buildTurnKeyboard('卡厄斯', 3);
     const end = kb.content.rows[0]!.buttons[0]!;
     expect(JSON.parse(end.action.data)).toEqual({ t: 'dnd', a: 'end', n: '卡厄斯', r: 3 });
+  });
+});
+
+describe('开团签到', () => {
+  function setup() {
+    const root = mkdtempSync(join(tmpdir(), 'dnd-checkin-'));
+    const service = new DndService({ store: new CampaignStore(join(root, 'campaigns')), library: new AdventureLibrary(), mapDir: root });
+    const key = 'group:G1';
+    service.start(key, 'sunken-bell', false);
+    service.store.update(key, (c) => {
+      upsertCharacter(c, { name: '卡厄斯', player: '玩家丙', playerId: 'P3' });
+      upsertCharacter(c, { name: '恩佐', player: '玩家丁', playerId: 'P4' });
+      upsertCharacter(c, { name: '路人', kind: 'pc' });
+    });
+    const record = { sessionKey: key, scope: 'group', replyTarget: { scope: 'group', targetId: 'G1' }, agent: { followup: vi.fn(), whenIdle: () => Promise.resolve() } };
+    const manager = { sessionKey: (_s: string, gid: string) => `group:${gid}`, getSessionRecord: () => record };
+    const sender = { sendMarkdown: vi.fn((..._args: unknown[]) => Promise.resolve()) };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const buttons = new DndTurnButtons(service, manager as never, sender, logger as never);
+    const click = (clicker: string): number | undefined => buttons.handleInteraction({
+      id: 'e1', type: 11, version: 1, group_openid: 'G1', group_member_openid: clicker,
+      data: { type: 11, resolved: { button_data: encodeButtonData({ t: 'dnd', a: 'in' }) } },
+    });
+    return { service, key, buttons, record, sender, click };
+  }
+
+  it('开团后补发签到消息和按钮；有人签到，几秒内合成一条名单', async () => {
+    vi.useFakeTimers();
+    try {
+      const { service, key, buttons, record, sender, click } = setup();
+      expect(buttons.openCheckIn(record as never, true)).toBe(true);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
+      const [, first, opts] = sender.sendMarkdown.mock.calls[0]! as [unknown, string, { keyboard: InlineKeyboard }];
+      expect(first).toContain('签到 0/2');
+      expect(first).toContain('路人 没绑定玩家');
+      expect(JSON.parse(opts.keyboard.content.rows[0]!.buttons[0]!.action.data)).toEqual({ t: 'dnd', a: 'in' });
+
+      expect(click('P3')).toBe(ACK.ok);
+      expect(click('P3')).toBe(ACK.duplicate);
+      expect(click('NEW')).toBe(ACK.ok);
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(sender.sendMarkdown).toHaveBeenCalledTimes(2);
+      const roster = sender.sendMarkdown.mock.calls[1]![1] as string;
+      expect(roster).toContain('签到 1/2');
+      expect(roster).toContain('已到：卡厄斯〈玩家丙〉');
+      expect(roster).toContain('未到：恩佐〈玩家丁〉');
+      expect(roster).toContain('1 位没有角色卡');
+
+      // DM 的 prompt 里能看到出勤
+      const state = service.promptSections(key).find((s) => s.name === 'qqbot:dnd-state')!.text;
+      expect(state).toContain('本次签到：已到 卡厄斯');
+      expect(state).toContain('未签到 恩佐');
+
+      // 最后一个人到齐：马上发，不等防抖
+      expect(click('P4')).toBe(ACK.ok);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(sender.sendMarkdown).toHaveBeenCalledTimes(3);
+      expect(sender.sendMarkdown.mock.calls[2]![1]).toContain('全员到齐');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('重新开团清空签到；/dnd 签到（reset=false）保留；结团后签到表删掉', () => {
+    const { service, key, buttons, record, click } = setup();
+    buttons.openCheckIn(record as never, true);
+    click('P3');
+    buttons.openCheckIn(record as never, false);
+    expect(service.checkIns.get(key)?.arrived.has('P3')).toBe(true);
+    buttons.openCheckIn(record as never, true);
+    expect(service.checkIns.get(key)?.arrived.size).toBe(0);
+    service.stop(key);
+    expect(service.checkIns.has(key)).toBe(false);
+  });
+
+  it('bot 重启后点旧签到按钮：自动开新表接着签', () => {
+    const { service, key, click } = setup();
+    expect(service.checkIns.has(key)).toBe(false);
+    expect(click('P3')).toBe(ACK.ok);
+    expect(service.checkIns.get(key)?.arrived.has('P3')).toBe(true);
   });
 });

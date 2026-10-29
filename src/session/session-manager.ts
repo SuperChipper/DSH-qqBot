@@ -27,6 +27,7 @@ import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts
 import { chatKeyOf, formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
 import type { ToolAccess } from '../features/tool-access.ts';
 import type { DndService } from '../dnd/dnd-service.ts';
+import type { DndTurnButtons } from '../dnd/turn-buttons.ts';
 import { resolveTmpDir } from '../media/tmp-dir.ts';
 import { join } from 'node:path';
 import {
@@ -123,6 +124,8 @@ export class SessionManager {
   public toolAccess?: ToolAccess;
   /** 由 bootstrap 注入的跑团服务（/dnd 命令 + DM prompt 注入） */
   public dndService?: DndService;
+  /** 由 bootstrap 注入的跑团按钮（/dnd start 发签到）；按钮关闭时为空 */
+  public dndButtons?: DndTurnButtons;
   /** 由 bootstrap 探测到的 ffmpeg 绝对路径（配置的或 winget 目录里找到的；走 PATH 时为空），提示模型直接用 */
   public ffmpegPath?: string;
 

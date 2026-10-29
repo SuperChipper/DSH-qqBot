@@ -258,6 +258,7 @@ export async function bootstrapGateway(
   const dndButtons = dndService !== undefined && config.dnd?.turnButtons !== false
     ? new DndTurnButtons(dndService, manager, sender, logger)
     : undefined;
+  manager.dndButtons = dndButtons;
 
   // ── 工具权限：非白名单会话不给终端、文件工具只能碰 bot 自己的目录；主人可在聊天里确认加白名单 ──
   const toolAccess = new ToolAccess(config, new ToolAccessStore(), manager, sender, logger);

@@ -8,6 +8,7 @@ import type { Roller } from './dice.ts';
 import { cryptoRoller } from './dice.ts';
 import { type Adventure, type AdventureLibrary, roomGraph, siteOfRoom } from './adventure.ts';
 import { type Campaign, CampaignStore, createCampaign, reconcileKnownSites, summarize } from './campaign.ts';
+import { type CheckIn, rosterOf, rosterPrompt } from './check-in.ts';
 import { findRoom } from './dungeon.ts';
 import { inOpening, openingLines, roomView } from './story.ts';
 
@@ -91,6 +92,8 @@ export class DndService {
   public readonly roller: Roller;
   /** 地图 PNG 输出目录 */
   public readonly mapDir: string;
+  /** 这一次开团的签到表（会话 key → 签到）；只在内存里，见 check-in.ts */
+  public readonly checkIns = new Map<string, CheckIn>();
 
   public constructor(options: { store: CampaignStore; library: AdventureLibrary; mapDir: string; roller?: Roller }) {
     this.store = options.store;
@@ -158,6 +161,7 @@ export class DndService {
     campaign.active = false;
     campaign.initiative = undefined;
     this.store.save(campaign);
+    this.checkIns.delete(key);
     return campaign;
   }
 
@@ -183,6 +187,8 @@ export class DndService {
     }
     const last = campaign.summaries.at(-1);
     if (last !== undefined) lines.push(`上次进度：${last.text}`);
+    const checkIn = this.checkIns.get(key);
+    if (checkIn !== undefined) lines.push(rosterPrompt(rosterOf(checkIn, campaign)));
     return [
       { name: 'qqbot:dnd-dm', order: 96, text: DM_RULES },
       { name: 'qqbot:dnd-state', order: 97, text: lines.join('\n') },

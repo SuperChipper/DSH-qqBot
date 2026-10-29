@@ -5,6 +5,7 @@
  * 本人点才推进先攻；推进后给会话补一条系统消息，让 DM 接着结算怪物回合。
  * 「查看状态」由工具层直接回一份玩家视角的团况，不经过模型、也不会泄露怪物数值。
  * 攻击/施法/其他是指令按钮：只把半句话填进点击者自己的输入框，行动仍由本人发出。
+ * /dnd start 时另发一条签到消息：「签到」也按点击者 openid 记，名单见 check-in.ts。
  */
 import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
@@ -12,6 +13,7 @@ import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { decodeButtonData, encodeButtonData } from '../features/button-utils.ts';
 import { type Campaign, findCharacter, nextTurn, playerStatus } from './campaign.ts';
+import { createCheckIn, markArrived, rosterOf, rosterText } from './check-in.ts';
 import type { DndService } from './dnd-service.ts';
 import { turnPrompt } from './dnd-tools.ts';
 
@@ -20,6 +22,8 @@ export const ACK = { ok: 0, failed: 1, duplicate: 3, denied: 4 } as const;
 
 /** 等 DM 的回复真正发出去再补按钮，避免按钮消息跑到叙事前面 */
 const FLUSH_DELAY_MS = 1500;
+/** 签到名单的防抖：这段时间内的签到合成一条名单 */
+const ROSTER_DEBOUNCE_MS = 5000;
 
 export interface TurnButtonSender {
   sendMarkdown(target: ReplyTarget, content: string, opts?: { keyboard?: InlineKeyboard }): Promise<unknown>;
@@ -67,6 +71,19 @@ export function buildTurnKeyboard(name: string, round: number): InlineKeyboard {
   };
 }
 
+export function buildCheckInKeyboard(): InlineKeyboard {
+  return {
+    content: {
+      rows: [{
+        buttons: [
+          callbackButton('dnd-in', '签到', 1, encodeButtonData({ t: 'dnd', a: 'in' })),
+          callbackButton('dnd-status', '查看状态', 0, encodeButtonData({ t: 'dnd', a: 'status' })),
+        ],
+      }],
+    },
+  };
+}
+
 /** 当前回合的 PC（活着、有意识）；不是 PC 回合时返回 undefined */
 function currentPc(c: Campaign): { name: string; player?: string; round: number; turn: number } | undefined {
   const state = c.initiative;
@@ -81,6 +98,7 @@ export class DndTurnButtons {
   private readonly scheduled = new Set<string>();
   /** 每个会话最后一次发按钮的回合，同一回合不重复发 */
   private readonly lastSent = new Map<string, string>();
+  private readonly rosterTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private disabled = false;
 
   public constructor(
@@ -121,6 +139,66 @@ export class DndTurnButtons {
     }
   }
 
+  /**
+   * 开签到：/dnd start 的回复发出去之后补一条签到消息 + 按钮。
+   * reset=false 时沿用已有的签到表（/dnd 签到 只是把按钮再发一次）。按钮被关掉时返回 false。
+   */
+  public openCheckIn(record: SessionRecord, reset: boolean): boolean {
+    if (this.disabled || record.scope !== 'group') return false;
+    const key = record.sessionKey;
+    if (reset || !this.service.checkIns.has(key)) this.service.checkIns.set(key, createCheckIn());
+    setTimeout(() => {
+      void this.sendRoster(record, '到了的点「签到」，大家就知道谁来了；没角色卡的也可以先签。\n', true);
+    }, FLUSH_DELAY_MS);
+    return true;
+  }
+
+  private async sendRoster(record: SessionRecord, intro: string, withButtons: boolean): Promise<void> {
+    const found = this.service.active(record.sessionKey);
+    const checkIn = this.service.checkIns.get(record.sessionKey);
+    if (found === undefined || checkIn === undefined) return;
+    const text = `${intro}${rosterText(rosterOf(checkIn, found.campaign))}`;
+    try {
+      await this.sender.sendMarkdown(record.replyTarget, text, withButtons ? { keyboard: buildCheckInKeyboard() } : undefined);
+    } catch (err) {
+      this.logger.warn(`im-qqbot: 跑团签到发送失败: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * 有人签到后过一会儿发一次名单：几个人前后脚点，只发一条，不刷屏。
+   * 人到齐了马上发。名单不带按钮，按钮留在最初那条签到消息上。
+   */
+  private announceRoster(record: SessionRecord, complete: boolean): void {
+    const key = record.sessionKey;
+    const pending = this.rosterTimers.get(key);
+    if (pending !== undefined) clearTimeout(pending);
+    const fire = (): void => {
+      this.rosterTimers.delete(key);
+      void this.sendRoster(record, '', false);
+    };
+    if (complete) fire();
+    else this.rosterTimers.set(key, setTimeout(fire, ROSTER_DEBOUNCE_MS));
+  }
+
+  private checkIn(event: InteractionEvent, key: string, record: SessionRecord | undefined, campaign: Campaign): number {
+    const clicker = event.group_member_openid ?? event.user_openid;
+    if (clicker === undefined) return ACK.failed;
+    let checkIn = this.service.checkIns.get(key);
+    // bot 重启后点旧消息上的按钮：签到表丢了，重新开一张接着签
+    if (checkIn === undefined) {
+      checkIn = createCheckIn();
+      this.service.checkIns.set(key, checkIn);
+    }
+    if (!markArrived(checkIn, clicker)) return ACK.duplicate;
+    this.logger.info(`im-qqbot: 跑团签到 key=${key} by=${clicker}`);
+    if (record !== undefined) {
+      const roster = rosterOf(checkIn, campaign);
+      this.announceRoster(record, roster.missing.length === 0 && roster.arrived.length > 0);
+    }
+    return ACK.ok;
+  }
+
   /** 处理按钮点击；不是跑团按钮时返回 undefined，交给其他通道 */
   public handleInteraction(event: InteractionEvent): number | undefined {
     const raw = event.data?.resolved?.button_data;
@@ -132,6 +210,8 @@ export class DndTurnButtons {
     const record = this.manager.getSessionRecord('group', groupId);
     const found = this.service.active(key);
     if (found === undefined) return ACK.duplicate;
+
+    if (button.a === 'in') return this.checkIn(event, key, record, found.campaign);
 
     if (button.a === 'status') {
       if (record !== undefined) {

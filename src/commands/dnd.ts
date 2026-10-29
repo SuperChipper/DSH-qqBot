@@ -12,6 +12,7 @@ const USAGE = [
   '/dnd start [模组id] — 开团（同一模组的旧团会接着跑）',
   '/dnd new [模组id] [空卡] — 存档旧团开新团（默认带上 PC 卡，加「空卡」从零建卡）',
   '/dnd status — 看团况',
+  '/dnd 签到 — 再发一次签到按钮（开团时会自动发）',
   '/dnd end — 暂停（让 DM 写摘要请直接说「今天先到这」）',
   '/dnd dungeons — 列出可用模组',
   '/dnd 查 <词条> — 查 wiki（法术、技能、职业、专长、怪物…），如 /dnd 查 火球术',
@@ -62,7 +63,7 @@ const HELP = [
   '· 回合按钮里的「查询」会在输入框里预填 /dnd 查。',
   `· wiki 首页：${RULES_WIKI}`,
   '',
-  '命令：/dnd start｜new｜status｜end｜dungeons｜查｜法表｜help',
+  '命令：/dnd start｜new｜status｜签到｜end｜dungeons｜查｜法表｜help',
 ].join('\n');
 
 export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
@@ -114,6 +115,9 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
             '',
             scope === 'group' ? '跑团期间 @ 我说你的行动；还没有角色的先 @ 我说名字和职业来建卡。' : '直接说你的行动；还没有角色就先告诉我名字和职业。',
           );
+          // 每次开团都是新的一场：签到表清空重来
+          const record = scope === 'group' ? manager.getSessionRecord(scope, peerId) : undefined;
+          if (record !== undefined && manager.dndButtons?.openCheckIn(record, true) === true) lines.push('马上发签到，到了的点一下。');
           return lines.join('\n');
         } catch (err) {
           return err instanceof Error ? err.message : String(err);
@@ -129,6 +133,14 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
         const found = service.active(key);
         if (found === undefined) return '现在没有进行中的团。';
         return `🎲 ${found.adventure.name}\n${playerStatus(found.campaign, found.adventure)}`;
+      }
+
+      if (sub === '签到' || sub === 'checkin') {
+        if (service.active(key) === undefined) return '现在没有进行中的团，先 /dnd start。';
+        if (scope !== 'group') return '签到只在群里用。';
+        const record = manager.getSessionRecord(scope, peerId);
+        if (record === undefined || manager.dndButtons?.openCheckIn(record, false) !== true) return '签到按钮没开（配置 dnd.turnButtons，或机器人没有消息按钮权限）。';
+        return '📋 签到按钮马上发出来。';
       }
 
       if (sub === 'help') return HELP;
