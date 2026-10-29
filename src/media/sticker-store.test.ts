@@ -153,7 +153,7 @@ describe('StickerStore', () => {
     expect(() => store.save({ source: second, emotion: '二' })).toThrow(/上限/);
   });
 
-  it('只把 auto 条目放进动态清单，旧手动条目保留在索引里', () => {
+  it('手动条目和 auto 条目都进清单，手动的排前面', () => {
     const { media, root, store } = setup();
     writeFileSync(join(root, 'fish_旧图.png'), Buffer.from('old'));
     writeFileSync(join(root, 'index.json'), JSON.stringify([
@@ -164,12 +164,24 @@ describe('StickerStore', () => {
     store.save({ source, emotion: '新图' });
 
     const sections = store.promptSections();
-    expect(sections[1]?.text).toContain('新图=fish_新图.png');
-    expect(sections[1]?.text).not.toContain('旧图=fish_旧图.png');
+    expect(sections[1]?.text).toContain('旧图=fish_旧图.png 新图=fish_新图.png');
 
     const index = JSON.parse(readFileSync(join(root, 'index.json'), 'utf8')) as Array<Record<string, unknown>>;
     expect(index).toHaveLength(2);
     expect(index[0]?.sha256).toBeTypeOf('string');
+  });
+
+  it('超出上限时先保留手动条目，自动收藏只留最新的', () => {
+    const { root } = setup();
+    const entries = ['手1', '手2', '自1', '自2', '自3'].map((emotion) => {
+      writeFileSync(join(root, `fish_${emotion}.png`), Buffer.from(emotion));
+      return { emotion, file: `fish_${emotion}.png`, bytes: 1, ...(emotion.startsWith('自') ? { auto: true } : {}) };
+    });
+    writeFileSync(join(root, 'index.json'), JSON.stringify(entries));
+    const capped = new StickerStore({ root, allowedRoots: [], maxBytes: 1024, maxAutoEntries: 10, maxPromptEntries: 3 });
+    const text = capped.promptSections()[1]?.text ?? '';
+    expect(text).toContain('手1=fish_手1.png 手2=fish_手2.png 自3=fish_自3.png');
+    expect(text).not.toContain('自1=');
   });
 
   it('拒绝含路径分隔符的 file 参数', () => {

@@ -281,7 +281,8 @@ export class StickerStore {
   /**
    * 生成每回合注入的 prompt section：
    * - 收藏指令（始终存在，告诉 bot 何时该调用工具）
-   * - 自动收藏清单（只列 auto:true 且文件仍存在的条目）
+   * - 表情清单：手动维护的条目（bot 自带的那套）全列，自动收藏的按新近补满上限；文件已不在的跳过。
+   *   清单原先只列自动收藏，自带表情写死在人设里，新加的图人设里没有，两边会对不上
    */
   promptSections(): StickerPromptSection[] {
     const sections: StickerPromptSection[] = [{
@@ -294,7 +295,7 @@ export class StickerStore {
         '只在真正想用的时候存：普通截图、长文截图、与情绪无关的图不要存；重复图片会按内容哈希自动跳过，不要为了凑数反复存。',
         '必须通过真正的工具调用收藏：不要把 <qqbot_save_sticker>、<image>、<emotion> 这类标签写进回复正文——那不是调用，会被当普通文字发出去。',
         '如果要同时回复和收藏：先发起 qqbot_save_sticker 工具调用（正文留空），拿到工具结果后再写回复。',
-        '收藏后可以立即用 qqbot_send_file 发出；从下一回合起，它会自动出现在下面的「自动收藏」清单里。',
+        '收藏后可以立即用 qqbot_send_file 发出；从下一回合起，它会自动出现在下面的表情清单里。',
       ].join('\n'),
     }];
 
@@ -306,10 +307,12 @@ export class StickerStore {
       return sections;
     }
 
-    const visible = entries
-      .filter((entry) => entry.auto === true && typeof entry.file === 'string' && entry.file.length > 0)
-      .filter((entry) => existsSync(join(this.root, entry.file)))
-      .slice(-this.maxPromptEntries);
+    const present = entries
+      .filter((entry) => typeof entry.file === 'string' && entry.file.length > 0)
+      .filter((entry) => existsSync(join(this.root, entry.file)));
+    const manual = present.filter((entry) => entry.auto !== true).slice(0, this.maxPromptEntries);
+    const auto = present.filter((entry) => entry.auto === true);
+    const visible = [...manual, ...auto.slice(Math.max(0, auto.length - (this.maxPromptEntries - manual.length)))];
 
     if (visible.length === 0) return sections;
 
@@ -317,7 +320,7 @@ export class StickerStore {
       name: 'qqbot:sticker-catalog',
       order: 92,
       text: [
-        '【自动收藏的表情】',
+        '【你的表情包】',
         `路径前缀：${this.root}`,
         `情绪=文件：${visible.map((entry) => `${entry.emotion}=${entry.file}`).join(' ')}`,
         '一次最多发 1 张；先文字后图片，别刷屏。',
