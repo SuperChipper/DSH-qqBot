@@ -38,13 +38,14 @@
 
 | 命令 | 说明 |
 |------|------|
-| `/dnd start [地城id]` | 开团（同一地城的旧团接着跑） |
-| `/dnd new [地城id]` | 存档旧团，从头开新团 |
+| `/dnd start [地城id]` | 开团（同一地城的旧团接着跑）；群里这条消息带签到按钮，人齐自动开场 |
+| `/dnd new [地城id] [blank]` | 存档旧团，从头开新团（加 blank 不带旧角色卡） |
 | `/dnd status` | 玩家视角的团况 |
+| `/dnd checkin` | 再发一次签到按钮 |
 | `/dnd end` | 暂停（想让 DM 写剧情摘要就直接说「今天先到这」） |
 | `/dnd dungeons` | 列出可用地城 |
-| `/dnd 查 <词条>` | 查 [灰机 D&D wiki](https://dnd.huijiwiki.com/wiki/)（法术、技能、职业、专长、怪物…） |
-| `/dnd 法表 [职业]` | 职业法术列表 |
+| `/dnd search <词条>` | 查 [灰机 D&D wiki](https://dnd.huijiwiki.com/wiki/)（法术、技能、职业、专长、怪物…） |
+| `/dnd spells [职业]` | 职业法术列表 |
 | `/dnd help` | 玩法说明 |
 
 - **@bot 并说清楚角色做什么**才算行动；闲聊、问规则、「查询状态」都不算，不掷骰也不消耗动作。

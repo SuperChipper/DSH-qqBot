@@ -255,6 +255,8 @@ describe('回合按钮', () => {
 });
 
 describe('开团签到', () => {
+  const TARGET = { scope: 'group' as const, targetId: 'G1', msgId: 'M1' };
+
   function setup() {
     const root = mkdtempSync(join(tmpdir(), 'dnd-checkin-'));
     const service = new DndService({ store: new CampaignStore(join(root, 'campaigns')), library: new AdventureLibrary(), mapDir: root });
@@ -265,72 +267,136 @@ describe('开团签到', () => {
       upsertCharacter(c, { name: '恩佐', player: '玩家丁', playerId: 'P4' });
       upsertCharacter(c, { name: '路人', kind: 'pc' });
     });
-    const record = { sessionKey: key, scope: 'group', replyTarget: { scope: 'group', targetId: 'G1' }, agent: { followup: vi.fn(), whenIdle: () => Promise.resolve() } };
+    const followup = vi.fn();
+    const record = { sessionKey: key, scope: 'group', replyTarget: { scope: 'group', targetId: 'G1' }, agent: { followup, whenIdle: () => Promise.resolve() } };
     const manager = { sessionKey: (_s: string, gid: string) => `group:${gid}`, getSessionRecord: () => record };
     const sender = { sendMarkdown: vi.fn((..._args: unknown[]) => Promise.resolve()) };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
     const buttons = new DndTurnButtons(service, manager as never, sender, logger as never);
-    const click = (clicker: string): number | undefined => buttons.handleInteraction({
+    const press = (a: 'in' | 'go' | 'roster', clicker: string): number | undefined => buttons.handleInteraction({
       id: 'e1', type: 11, version: 1, group_openid: 'G1', group_member_openid: clicker,
-      data: { type: 11, resolved: { button_data: encodeButtonData({ t: 'dnd', a: 'in' }) } },
+      data: { type: 11, resolved: { button_data: encodeButtonData({ t: 'dnd', a }) } },
     });
-    return { service, key, buttons, record, sender, click };
+    const kickoffText = (): string => followup.mock.calls[0]![0].content[0].text as string;
+    return { service, key, buttons, sender, followup, press, kickoffText };
   }
 
-  it('开团后补发签到消息和按钮；有人签到，几秒内合成一条名单', async () => {
+  it('开团回复本身带名单和签到/开始/名单按钮，只发一条，回复到 /dnd 那条消息', async () => {
+    const { buttons, key, sender } = setup();
+    expect(await buttons.openCheckIn(key, TARGET, '🎲 开团：沉钟修道院', true)).toBe(true);
+    expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    const [target, text, opts] = sender.sendMarkdown.mock.calls[0]! as [unknown, string, { keyboard: InlineKeyboard }];
+    expect(target).toEqual(TARGET);
+    expect(text).toContain('🎲 开团：沉钟修道院');
+    expect(text).toContain('签到 0/2');
+    expect(text).toContain('路人 没绑定玩家');
+    expect(text).toContain('人齐了自动开场');
+    expect(opts.keyboard.content.rows[0]!.buttons.map((b) => JSON.parse(b.action.data).a)).toEqual(['in', 'go', 'roster']);
+  });
+
+  it('签到后群里攒几秒发一行提醒，连着签到的合成一条', async () => {
     vi.useFakeTimers();
     try {
-      const { service, key, buttons, record, sender, click } = setup();
-      expect(buttons.openCheckIn(record as never, true)).toBe(true);
-      await vi.advanceTimersByTimeAsync(2000);
+      const { buttons, key, sender, press } = setup();
+      await buttons.openCheckIn(key, TARGET, '', true);
+      sender.sendMarkdown.mockClear();
+
+      press('in', 'P3');
+      press('in', 'NEW');
+      expect(sender.sendMarkdown).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(4000);
       expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
-      const [, first, opts] = sender.sendMarkdown.mock.calls[0]! as [unknown, string, { keyboard: InlineKeyboard }];
-      expect(first).toContain('签到 0/2');
-      expect(first).toContain('路人 没绑定玩家');
-      expect(JSON.parse(opts.keyboard.content.rows[0]!.buttons[0]!.action.data)).toEqual({ t: 'dnd', a: 'in' });
-
-      expect(click('P3')).toBe(ACK.ok);
-      expect(click('P3')).toBe(ACK.duplicate);
-      expect(click('NEW')).toBe(ACK.ok);
-      await vi.advanceTimersByTimeAsync(6000);
-      expect(sender.sendMarkdown).toHaveBeenCalledTimes(2);
-      const roster = sender.sendMarkdown.mock.calls[1]![1] as string;
-      expect(roster).toContain('签到 1/2');
-      expect(roster).toContain('已到：卡厄斯〈玩家丙〉');
-      expect(roster).toContain('未到：恩佐〈玩家丁〉');
-      expect(roster).toContain('1 位没有角色卡');
-
-      // DM 的 prompt 里能看到出勤
-      const state = service.promptSections(key).find((s) => s.name === 'qqbot:dnd-state')!.text;
-      expect(state).toContain('本次签到：已到 卡厄斯');
-      expect(state).toContain('未签到 恩佐');
-
-      // 最后一个人到齐：马上发，不等防抖
-      expect(click('P4')).toBe(ACK.ok);
-      await vi.advanceTimersByTimeAsync(0);
-      expect(sender.sendMarkdown).toHaveBeenCalledTimes(3);
-      expect(sender.sendMarkdown.mock.calls[2]![1]).toContain('全员到齐');
+      const [target, text, opts] = sender.sendMarkdown.mock.calls[0]! as [unknown, string, unknown];
+      expect(target).toEqual({ scope: 'group', targetId: 'G1' });
+      expect(text).toBe('✅ 卡厄斯 到了；1 位还没角色卡的玩家到了（@我说名字和职业建卡） · 1/2，还差 恩佐');
+      expect(opts).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('重新开团清空签到；/dnd 签到（reset=false）保留；结团后签到表删掉', () => {
-    const { service, key, buttons, record, click } = setup();
-    buttons.openCheckIn(record as never, true);
-    click('P3');
-    buttons.openCheckIn(record as never, false);
+  it('签到凑齐触发开场时不发提醒，攒着的也取消', async () => {
+    vi.useFakeTimers();
+    try {
+      const { buttons, key, sender, followup, press } = setup();
+      await buttons.openCheckIn(key, TARGET, '', true);
+      sender.sendMarkdown.mockClear();
+      press('in', 'P3');
+      press('in', 'P4');
+      expect(followup).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(sender.sendMarkdown).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('人齐了自动开场，只开一次', async () => {
+    const { buttons, key, service, sender, followup, press, kickoffText } = setup();
+    await buttons.openCheckIn(key, TARGET, '', true);
+    sender.sendMarkdown.mockClear();
+
+    expect(press('in', 'P3')).toBe(ACK.ok);
+    expect(press('in', 'P3')).toBe(ACK.duplicate);
+    expect(press('in', 'NEW')).toBe(ACK.ok);
+    expect(followup).not.toHaveBeenCalled();
+    // DM 的 prompt 里能看到出勤
+    const state = service.promptSections(key).find((s) => s.name === 'qqbot:dnd-state')!.text;
+    expect(state).toContain('本次签到：已到 卡厄斯');
+    expect(state).toContain('未签到 恩佐');
+
+    expect(press('in', 'P4')).toBe(ACK.ok);
+    expect(followup).toHaveBeenCalledTimes(1);
+    expect(kickoffText()).toContain('人到齐了（卡厄斯、恩佐）');
+    expect(kickoffText()).toContain('按开场要求叙述');
+    // 开场后再有人签到不会再开一次
+    expect(press('in', 'LATE')).toBe(ACK.ok);
+    expect(followup).toHaveBeenCalledTimes(1);
+  });
+
+  it('「开始」不等没到的人，点的人顺带签到；继续的团让 DM 先回顾', async () => {
+    const { buttons, key, service, followup, press, kickoffText } = setup();
+    service.store.update(key, (c) => { c.begun = true; });
+    await buttons.openCheckIn(key, TARGET, '', true);
+    expect(press('go', 'P3')).toBe(ACK.ok);
+    expect(kickoffText()).toContain('已到：卡厄斯；未到：恩佐');
+    expect(kickoffText()).toContain('回顾上次的进度');
+    expect(press('go', 'P4')).toBe(ACK.duplicate);
+    expect(followup).toHaveBeenCalledTimes(1);
+  });
+
+  it('「名单」才在群里发名单，30 秒内重复点不再发', async () => {
+    const { buttons, key, sender, press } = setup();
+    await buttons.openCheckIn(key, TARGET, '', true);
+    sender.sendMarkdown.mockClear();
+    press('in', 'P3');
+    expect(press('roster', 'P4')).toBe(ACK.ok);
+    expect(press('roster', 'P3')).toBe(ACK.duplicate);
+    expect(sender.sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(sender.sendMarkdown.mock.calls[0]![1]).toContain('未到：恩佐〈玩家丁〉');
+  });
+
+  it('checkin（reset=false）保留签到；重新开团清空；结团删掉；按钮发不出去退回文字', async () => {
+    const { buttons, key, service, sender, press } = setup();
+    await buttons.openCheckIn(key, TARGET, '', true);
+    press('in', 'P3');
+    await buttons.openCheckIn(key, TARGET, '', false);
     expect(service.checkIns.get(key)?.arrived.has('P3')).toBe(true);
-    buttons.openCheckIn(record as never, true);
+    await buttons.openCheckIn(key, TARGET, '', true);
     expect(service.checkIns.get(key)?.arrived.size).toBe(0);
     service.stop(key);
+    expect(service.checkIns.has(key)).toBe(false);
+
+    service.start(key, 'sunken-bell', false);
+    sender.sendMarkdown.mockRejectedValueOnce(new Error('no keyboard permission'));
+    expect(await buttons.openCheckIn(key, TARGET, '', true)).toBe(false);
     expect(service.checkIns.has(key)).toBe(false);
   });
 
   it('bot 重启后点旧签到按钮：自动开新表接着签', () => {
-    const { service, key, click } = setup();
+    const { service, key, press } = setup();
     expect(service.checkIns.has(key)).toBe(false);
-    expect(click('P3')).toBe(ACK.ok);
+    expect(press('in', 'P3')).toBe(ACK.ok);
     expect(service.checkIns.get(key)?.arrived.has('P3')).toBe(true);
   });
 });

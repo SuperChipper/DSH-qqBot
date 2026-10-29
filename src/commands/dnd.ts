@@ -2,21 +2,23 @@
  * 跑团命令：/dnd — 开团、结团、看团况、列模组
  *
  * 开团后这个会话每回合注入 DM 守则和团况，模型用 dnd_* 工具裁定；结团后恢复普通聊天。
+ * 子命令只用英文（start/search/spells…），不和中文混写；回复内容照常是中文。
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
+import type { ReplyTarget } from '../types.ts';
 import { getScopePeer } from '../shared/index.ts';
 import { playerStatus } from '../dnd/campaign.ts';
 
 const USAGE = [
   '用法：',
-  '/dnd start [模组id] — 开团（同一模组的旧团会接着跑）',
-  '/dnd new [模组id] [空卡] — 存档旧团开新团（默认带上 PC 卡，加「空卡」从零建卡）',
+  '/dnd start [模组id] — 开团（同一模组的旧团会接着跑），群里会带签到按钮，人齐自动开场',
+  '/dnd new [模组id] [blank] — 存档旧团开新团（默认带上 PC 卡，加 blank 从零建卡）',
   '/dnd status — 看团况',
-  '/dnd 签到 — 再发一次签到按钮（开团时会自动发）',
+  '/dnd checkin — 再发一次签到按钮',
   '/dnd end — 暂停（让 DM 写摘要请直接说「今天先到这」）',
   '/dnd dungeons — 列出可用模组',
-  '/dnd 查 <词条> — 查 wiki（法术、技能、职业、专长、怪物…），如 /dnd 查 火球术',
-  '/dnd 法表 [职业] — 职业法术列表，如 /dnd 法表 牧师',
+  '/dnd search <词条> — 查 wiki（法术、技能、职业、专长、怪物…），如 /dnd search 火球术',
+  '/dnd spells [职业] — 职业法术列表，如 /dnd spells 牧师',
   '/dnd help — 怎么玩',
 ].join('\n');
 
@@ -34,6 +36,10 @@ const SPELL_CLASSES = ['吟游诗人', '牧师', '德鲁伊', '圣武士', '游�
 
 const HELP = [
   '🎲 跑团怎么玩',
+  '',
+  '【开团与签到】',
+  '· /dnd start 的那条消息就是签到表：到了点「签到」，人齐了我直接开场。',
+  '· 有人来不了就点「开始」，不等了。想看谁到了点「名单」。',
   '',
   '【说行动】',
   '· 要 @我，并说清角色做什么：「卡厄斯用巨剑砍地精3」「恩佐潜行到门口听动静」。',
@@ -58,19 +64,19 @@ const HELP = [
   '· 大家同意的话说「卷回到 xx 之前」，我会把状态回滚，不会硬改数字。',
   '',
   '【查规则】',
-  '· /dnd 查 火球术：给出 wiki 词条链接，法术、技能、职业特性、专长、怪物都能查。',
-  '· /dnd 法表 牧师：职业法术列表。',
-  '· 回合按钮里的「查询」会在输入框里预填 /dnd 查。',
+  '· /dnd search 火球术：给出 wiki 词条链接，法术、技能、职业特性、专长、怪物都能查。',
+  '· /dnd spells 牧师：职业法术列表。',
+  '· 回合按钮里的「查询」会在输入框里预填 /dnd search。',
   `· wiki 首页：${RULES_WIKI}`,
   '',
-  '命令：/dnd start｜new｜status｜签到｜end｜dungeons｜查｜法表｜help',
+  '命令：/dnd start｜new｜status｜checkin｜end｜dungeons｜search｜spells｜help',
 ].join('\n');
 
 export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
   return {
     name: 'dnd',
     category: 'qqbot',
-    description: '跑团：开团/结团/团况/玩法说明（用法: /dnd start|new|status|end|dungeons|help）',
+    description: '跑团：开团/结团/团况/玩法说明（用法: /dnd start|new|status|checkin|end|dungeons|search|spells|help）',
     handler: async (cmdCtx) => {
       const service = manager.dndService;
       if (service === undefined) return '跑团功能未启用（配置 dnd.enabled）';
@@ -78,13 +84,15 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
       const key = manager.sessionKey(scope, peerId);
       const [sub = '', arg, ...more] = (cmdCtx.command?.raw ?? '').trim().split(/\s+/);
       const rest = [arg, ...more].filter((s): s is string => s !== undefined && s.length > 0).join(' ');
+      // 带按钮的回复直接回这条 /dnd 消息（被动回复），不借会话里上一条消息的 msgId
+      const target: ReplyTarget = { scope, targetId: peerId, msgId: cmdCtx.message.messageId, receivedAt: Date.now() };
 
       // 查规则不需要开团，也不需要启用跑团服务之外的东西
-      if (sub === '查' || sub === 'wiki' || sub === 'search') {
-        if (rest.length === 0) return `用法：/dnd 查 <词条>，如 /dnd 查 火球术\nwiki 首页：${RULES_WIKI}`;
+      if (sub === 'search') {
+        if (rest.length === 0) return `用法：/dnd search <词条>，如 /dnd search 火球术\nwiki 首页：${RULES_WIKI}`;
         return `📖 ${rest}：${wikiSearchUrl(rest)}`;
       }
-      if (sub === '法表' || sub === 'spells') {
+      if (sub === 'spells') {
         if (rest.length === 0) {
           return ['📖 职业法表（点开是 wiki 搜索，标题对上会直接跳到词条页）：', ...SPELL_CLASSES.map((cls) => `${cls}：${wikiSearchUrl(`${cls}法术列表`)}`)].join('\n');
         }
@@ -99,29 +107,27 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
       }
 
       if (sub === 'start' || sub === 'new') {
+        let text: string;
         try {
-          // 「空卡」「blank」不带旧角色卡；其余的词当模组 id
+          // blank 不带旧角色卡；其余的词当模组 id
           const words = [arg, ...more].filter((s): s is string => s !== undefined && s.length > 0);
-          const blank = words.some((w) => w === '空卡' || w === 'blank');
-          const id = words.find((w) => w !== '空卡' && w !== 'blank');
+          const blank = words.includes('blank');
+          const id = words.find((w) => w !== 'blank');
           const { adventure, resumed, campaign, carried } = service.start(key, id, sub === 'new', { keepParty: !blank });
           const party = campaign.characters.filter((ch) => ch.kind === 'pc').map((ch) => ch.name);
           const lines = [
             `🎲 ${resumed ? '继续' : '开团'}：${adventure.name}`,
             resumed ? `队伍：${party.join('、') || '还没有角色'}` : adventure.hook,
           ];
-          if (carried.length > 0) lines.push(`带上了 ${carried.length} 张角色卡：${carried.join('、')}（HP、资源、物品照旧）。想从空卡开始：/dnd new ${adventure.id} 空卡`);
-          lines.push(
-            '',
-            scope === 'group' ? '跑团期间 @ 我说你的行动；还没有角色的先 @ 我说名字和职业来建卡。' : '直接说你的行动；还没有角色就先告诉我名字和职业。',
-          );
-          // 每次开团都是新的一场：签到表清空重来
-          const record = scope === 'group' ? manager.getSessionRecord(scope, peerId) : undefined;
-          if (record !== undefined && manager.dndButtons?.openCheckIn(record, true) === true) lines.push('马上发签到，到了的点一下。');
-          return lines.join('\n');
+          if (carried.length > 0) lines.push(`带上了 ${carried.length} 张角色卡：${carried.join('、')}（HP、资源、物品照旧）。想从空卡开始：/dnd new ${adventure.id} blank`);
+          lines.push('', scope === 'group' ? '跑团期间 @ 我说你的行动。' : '直接说你的行动；还没有角色就先告诉我名字和职业。');
+          text = lines.join('\n');
         } catch (err) {
           return err instanceof Error ? err.message : String(err);
         }
+        // 群里：开团消息本身就是签到表（每次开团清空重来）；按钮不可用时退回纯文字
+        if (scope === 'group' && await manager.dndButtons?.openCheckIn(key, target, text, true) === true) return { kind: 'noop' as const };
+        return scope === 'group' ? `${text}\n还没有角色的先 @ 我说名字和职业来建卡。` : text;
       }
 
       if (sub === 'end') {
@@ -135,12 +141,11 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
         return `🎲 ${found.adventure.name}\n${playerStatus(found.campaign, found.adventure)}`;
       }
 
-      if (sub === '签到' || sub === 'checkin') {
+      if (sub === 'checkin') {
         if (service.active(key) === undefined) return '现在没有进行中的团，先 /dnd start。';
         if (scope !== 'group') return '签到只在群里用。';
-        const record = manager.getSessionRecord(scope, peerId);
-        if (record === undefined || manager.dndButtons?.openCheckIn(record, false) !== true) return '签到按钮没开（配置 dnd.turnButtons，或机器人没有消息按钮权限）。';
-        return '📋 签到按钮马上发出来。';
+        if (await manager.dndButtons?.openCheckIn(key, target, '', false) === true) return { kind: 'noop' as const };
+        return '签到按钮没开（配置 dnd.turnButtons，或机器人没有消息按钮权限）。';
       }
 
       if (sub === 'help') return HELP;

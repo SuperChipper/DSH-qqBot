@@ -81,7 +81,7 @@ const DM_RULES = [
   '',
   '【建卡与结团】',
   '- 没有角色卡的玩家，问清名字和职业后用 dnd_character create 建卡，player 填昵称，player_id 填他的 openid（可按标准数组 15/14/13/12/10/8 帮他分配属性），同时填 weapons、hit_die，并用 dnd_resource set 记下法术位和职业资源。老角色卡缺这些的，用 dnd_character update / dnd_resource set 补上。',
-  '- 玩家问规则、法术、技能时可以提醒他用 /dnd 查 <词条> 或 /dnd 法表 <职业> 查 wiki。',
+  '- 玩家问规则、法术、技能时可以提醒他用 /dnd search <词条> 或 /dnd spells <职业> 查 wiki。',
   '- 玩家要看地图时调用 dnd_map。玩家说结束/散团/下次再玩时，调用 dnd_end 写一段剧情摘要（发生了什么、队伍状态、没解开的线索），下次开团会用到。',
   '- 进度每次改动都自动存盘。玩家说「存档」「保存一下」只是要确认，告诉他已经存好了；不要为此调用 dnd_end，那会结团，之后掷骰都会失败。',
 ].join('\n');

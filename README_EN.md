@@ -38,13 +38,14 @@ Send `/dnd start` in a group and the bot becomes that group's dungeon master (DM
 
 | Command | What it does |
 |---------|--------------|
-| `/dnd start [dungeon id]` | Start a campaign (an earlier campaign in the same dungeon resumes) |
-| `/dnd new [dungeon id]` | Archive the old campaign and start fresh |
+| `/dnd start [dungeon id]` | Start a campaign (an earlier campaign in the same dungeon resumes); in groups the message carries check-in buttons and the game opens once everyone is in |
+| `/dnd new [dungeon id] [blank]` | Archive the old campaign and start fresh (blank drops the old character sheets) |
 | `/dnd status` | Campaign state from the players' point of view |
+| `/dnd checkin` | Re-send the check-in buttons |
 | `/dnd end` | Pause (to get a story recap from the DM, just say you're stopping for tonight) |
 | `/dnd dungeons` | List available dungeons |
-| `/dnd 查 <term>` | Look up the [Huiji D&D wiki](https://dnd.huijiwiki.com/wiki/) (spells, skills, classes, feats, monsters…) |
-| `/dnd 法表 [class]` | A class's spell list |
+| `/dnd search <term>` | Look up the [Huiji D&D wiki](https://dnd.huijiwiki.com/wiki/) (spells, skills, classes, feats, monsters…) |
+| `/dnd spells [class]` | A class's spell list |
 | `/dnd help` | How to play |
 
 - **@ the bot and say what your character does.** Only that counts as an action. Chatting, rules questions and "show me the status" don't roll dice or use up your action.

@@ -34,10 +34,10 @@ export interface ApprovalButtonData {
   d: 'allow' | 'deny';
 }
 
-/** 跑团按钮：a=动作（end 结束回合 / status 查看状态 / in 签到），n=角色名，r=轮次（防止点到过期的旧按钮） */
+/** 跑团按钮：a=动作（end 结束回合 / status 查看状态 / in 签到 / go 开场 / roster 发名单），n=角色名，r=轮次（防止点到过期的旧按钮） */
 export interface DndButtonData {
   t: 'dnd';
-  a: 'end' | 'status' | 'in';
+  a: 'end' | 'status' | 'in' | 'go' | 'roster';
   n?: string;
   r?: number;
 }
