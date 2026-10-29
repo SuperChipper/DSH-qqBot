@@ -70,6 +70,7 @@ describe('ReplyJudge', () => {
     await judge.score(request);
     expect(calls[0]!.reasoningEffort).toBe('low');
     expect(calls[0]!.system).toContain('小d');
+    expect(calls[0]!.system).toContain('名字的变体');
     expect(llm.resolveModelInfo).toHaveBeenCalledTimes(1);
   });
 

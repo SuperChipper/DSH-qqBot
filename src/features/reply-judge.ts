@@ -58,14 +58,16 @@ export function buildJudgeSystem(names: readonly string[], persona?: string): st
   const who = names.length > 0 ? `「${names.join('」「')}」` : '「bot」';
   const lines = [
     `你在帮 QQ 群里的机器人 ${who} 判断：看到最新这条消息，它现在要不要主动接话（没人 @ 它）。`,
+    '群友叫它不一定用全名：名字的变体（叠字、只叫一半、换个字、加「小」「老」「子」）、照人设起的外号或调侃'
+      + '（人设里的特点、爱好、梗），或者直接冲它说话（「起床」「在吗」「懒虫」），都算在叫它。',
     '像一个有分寸的群友那样判断：',
-    '- 高分：在问 bot 或明显想听 bot 的意见；聊到 bot 感兴趣、能接得上的话题；有人求助一直没人回；话说到一半在等人接。',
+    '- 高分：在叫 bot、逗 bot、问 bot 或明显想听 bot 的意见；聊到 bot 感兴趣、能接得上的话题；有人求助一直没人回；话说到一半在等人接。',
     '- 低分：群友之间在聊自己的事；已经有人回答了；刷屏、发泄、只是附和；bot 刚说过话没人理它；插进去会显得突兀。',
     '- 拿不准就给低分，宁可少说。',
     '只输出 JSON，不要解释：{"desire": 0到100的整数}',
   ];
   if (persona !== undefined && persona.trim() !== '') {
-    lines.push('', `bot 的人设（参考）：${persona.trim().slice(0, PERSONA_MAX_CHARS)}`);
+    lines.push('', `bot 的人设（用来认出群友是不是在叫它、聊的是不是它会接的话题）：${persona.trim().slice(0, PERSONA_MAX_CHARS)}`);
   }
   return lines.join('\n');
 }
