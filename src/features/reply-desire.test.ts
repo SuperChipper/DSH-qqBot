@@ -39,6 +39,13 @@ describe('scoreReplyDesire 文字', () => {
     expect(scoreReplyDesire({ ...base, content: '哈哈小d' }).reasons).toContain('name');
   });
 
+  it('昵称里带的分号、逗号当分隔符', () => {
+    const names = ['大肥鱼;', '小肥鱼；', 'a, 肥鱼'];
+    expect(scoreReplyDesire({ ...base, names, content: '大肥鱼在吗' }).reasons).toContain('name');
+    expect(scoreReplyDesire({ ...base, names, content: '你还没给肥鱼新答案' }).reasons).toContain('name');
+    expect(scoreReplyDesire({ ...base, names: [' ; '], content: '随便说说' }).reasons).not.toContain('name');
+  });
+
   it('没开窗的普通提问不过阈值', () => {
     expect(scoreReplyDesire({ ...base, content: '今晚吃什么' }).score).toBeLessThan(0.6);
   });

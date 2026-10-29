@@ -167,6 +167,14 @@ function scoreSticker(input: DesireInput, stickerId: string): DesireResult {
   return { score: Math.min(1, score), reasons, mode: 'sticker', stickerId };
 }
 
+/** 昵称按子串匹配：设置页里顺手敲的「大肥鱼；」「a, b」会让整条永远匹配不上，先按分隔符拆开 */
+export function splitNames(names: readonly string[]): string[] {
+  return names
+    .flatMap((name) => name.split(/[;；,，、\s]+/))
+    .map((name) => name.trim().toLowerCase())
+    .filter((name) => name !== '');
+}
+
 export function scoreReplyDesire(input: DesireInput): DesireResult {
   const { text, stickerId } = classifyMessage(input.content, input.attachments);
   if (input.mentionsOthers) return { score: 0, reasons: ['other-mention'] };
@@ -178,7 +186,7 @@ export function scoreReplyDesire(input: DesireInput): DesireResult {
   if (text.startsWith('/')) return { score: 0, reasons: ['command'] };
 
   const lower = text.toLowerCase();
-  const named = input.names.some((name) => name.trim() !== '' && lower.includes(name.trim().toLowerCase()));
+  const named = splitNames(input.names).some((name) => lower.includes(name));
   if (!named && text !== '' && NOISE_RE.test(text)) return { score: 0, reasons: ['noise'] };
 
   let score = 0;
