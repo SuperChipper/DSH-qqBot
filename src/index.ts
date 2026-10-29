@@ -12,6 +12,7 @@ import type { DshAgentRegistry } from './session/index.ts';
 import { resolveProfileDir, resolveEnv } from './shared/index.ts';
 import { ensureCredentials, persistCredentialsToProfile, registerBoundCredentialRoutes } from './setup/index.ts';
 import type { Logger } from './types.ts';
+import { installFileLog } from './shared/file-log.ts';
 
 // ── Cordis 插件元数据 ──
 export const name = 'im-qqbot';
@@ -24,6 +25,7 @@ export type { ImQQBotConfig } from './config.ts';
 export async function apply(ctx: Context, config: ImQQBotConfig): Promise<void> {
   const agents = (ctx as unknown as Record<string, unknown>).agents as DshAgentRegistry;
   const logger: Logger = ((ctx as unknown as Record<string, unknown>).logger as Logger) ?? console;
+  installFileLog(logger, config.debug === true);
   // Cordis Loader 根（profile 的 cordis.yml 所在目录）：链接安装下比
   // 插件源码路径更可靠，扫码/配置写入据此落到正确 profile。
   const profileDir = resolveProfileDir(ctx.baseUrl);
