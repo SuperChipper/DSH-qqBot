@@ -7,7 +7,7 @@
 import type { Roller } from './dice.ts';
 import { cryptoRoller } from './dice.ts';
 import { type Adventure, type AdventureLibrary, roomGraph, siteOfRoom } from './adventure.ts';
-import { type Campaign, CampaignStore, createCampaign, summarize } from './campaign.ts';
+import { type Campaign, CampaignStore, createCampaign, reconcileKnownSites, summarize } from './campaign.ts';
 import { findRoom } from './dungeon.ts';
 import { inOpening, openingLines, roomView } from './story.ts';
 
@@ -105,6 +105,7 @@ export class DndService {
     if (campaign === undefined || !campaign.active) return undefined;
     const adventure = this.library.get(campaign.adventureId);
     if (adventure === undefined) return undefined;
+    reconcileKnownSites(campaign, adventure);
     return { campaign, adventure };
   }
 
@@ -134,6 +135,7 @@ export class DndService {
     }
     if (existing !== undefined && existing.adventureId === adventure.id && !fresh) {
       existing.active = true;
+      reconcileKnownSites(existing, adventure);
       this.store.save(existing);
       return { campaign: existing, adventure, resumed: true, carried: [] };
     }

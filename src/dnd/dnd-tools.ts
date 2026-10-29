@@ -11,7 +11,7 @@ import type { DshAgent, SessionManager, SessionRecord } from '../session/index.t
 import { recentSenderIds } from '../session/session-manager.ts';
 import type { Logger } from '../types.ts';
 import { ATTITUDES, type Adventure, type Attitude, QUEST_STATUSES, type QuestStatus, findNpc, findQuest, roomGraph } from './adventure.ts';
-import { type Advantage, rollD20, rollExpression } from './dice.ts';
+import { type Advantage, type Roller, rollD20, rollExpression } from './dice.ts';
 import {
   type Campaign,
   type Character,
@@ -36,7 +36,12 @@ import {
   grantTempHp,
   heal,
   inInitiative,
+  isRangedWeapon,
+  isTwoHandedWeapon,
+  fightRooms,
   joinInitiative,
+  leaveInitiative,
+  outsideRooms,
   moveParty,
   nextTurn,
   partyPositions,
@@ -55,6 +60,8 @@ import {
   summarize,
   upsertCharacter,
   useResource,
+  usesGreatWeaponFighting,
+  weaponAttackModifier,
   type Weapon,
   weaponDamage,
 } from './campaign.ts';
@@ -149,6 +156,42 @@ export function critExpression(expression: string): string {
   return expression.replace(/(\d*)d(\d+)/gi, (_m, n: string, sides: string) => `${(n === '' ? 1 : Number(n)) * 2}d${sides}`);
 }
 
+/** 表达式里一共有几颗骰子（常数不算） */
+export function diceCount(expression: string): number {
+  let n = 0;
+  for (const m of expression.matchAll(/(\d*)d\d+/gi)) n += m[1] === '' ? 1 : Number(m[1]);
+  return n;
+}
+
+/**
+ * 巨武器战斗：只对前 weaponDice 颗骰（武器本身的伤害骰，表达式里排在最前）掷出 1、2 时重投一次，
+ * 必须用新点数。偷袭、神恩之类附加骰不重投。明细里只显示最终点数，重投记在 rerolls 里另报。
+ */
+export function greatWeaponRoller(roller: Roller, weaponDice: number): { roller: Roller; rerolls: string[] } {
+  const rerolls: string[] = [];
+  let i = 0;
+  return {
+    rerolls,
+    roller: (sides) => {
+      const first = roller(sides);
+      if (i++ >= weaponDice || first > 2) return first;
+      const second = roller(sides);
+      rerolls.push(`${first}→${second}`);
+      return second;
+    },
+  };
+}
+
+function weaponTags(w: Weapon): string {
+  const tags = [
+    w.magic ? `+${w.magic} 魔法` : '',
+    w.proficient === false ? '不熟练' : '',
+    isRangedWeapon(w) ? '远程' : '',
+    isTwoHandedWeapon(w) ? '双手持' : '',
+  ].filter(Boolean);
+  return tags.length > 0 ? `［${tags.join('，')}］` : '';
+}
+
 function sheet(ch: Character): string {
   const abilities = ABILITIES.map((a) => `${ABILITY_NAMES[a]}${ch.abilities[a]}`).join(' ');
   const lines = [
@@ -157,10 +200,12 @@ function sheet(ch: Character): string {
     abilities,
   ];
   if (ch.skills.length > 0) lines.push(`熟练技能：${ch.skills.map(skillLabel).join('、')}`);
+  if ((ch.expertise?.length ?? 0) > 0) lines.push(`专精：${ch.expertise!.map(skillLabel).join('、')}`);
   if (ch.saves.length > 0) lines.push(`熟练豁免：${ch.saves.map((a) => ABILITY_NAMES[a]).join('、')}`);
   if (ch.attackBonus !== undefined || ch.damage !== undefined) lines.push(`攻击 +${attackModifier(ch)} 伤害 ${ch.damage ?? '?'}`);
   for (const w of ch.weapons ?? []) {
-    lines.push(`武器 ${w.name}：命中 +${attackModifier(ch, w.ability ?? 'str')}，伤害 ${weaponDamage(ch, w)}${w.notes ? `（${w.notes}）` : ''}`);
+    const hit = weaponAttackModifier(ch, w);
+    lines.push(`武器 ${w.name}${weaponTags(w)}：命中 ${hit >= 0 ? '+' : ''}${hit}，伤害 ${weaponDamage(ch, w)}${w.notes ? `（${w.notes}）` : ''}`);
   }
   if (ch.conditions.length > 0) lines.push(`状态：${ch.conditions.join('、')}`);
   if (ch.deathSaves !== undefined) lines.push(`死亡豁免：成功 ${ch.deathSaves.successes}/3 失败 ${ch.deathSaves.failures}/3`);
@@ -196,6 +241,11 @@ function parseWeapons(value: unknown): Weapon[] | undefined {
     if (w.ability === 'str' || w.ability === 'dex') weapon.ability = w.ability;
     const notes = str(w.notes);
     if (notes !== undefined) weapon.notes = notes;
+    const magic = int(w.magic);
+    if (magic !== undefined && magic !== 0) weapon.magic = Math.max(-3, Math.min(3, magic));
+    if (w.proficient === false) weapon.proficient = false;
+    if (typeof w.ranged === 'boolean') weapon.ranged = w.ranged;
+    if (typeof w.two_handed === 'boolean') weapon.twoHanded = w.two_handed;
     return weapon;
   });
 }
@@ -308,7 +358,11 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       },
       damage_type: { type: 'string', description: 'For type=attack: damage type, e.g. 光耀/穿刺 (radiant beats Undead Fortitude).' },
       advantage: { type: 'string', enum: ['none', 'advantage', 'disadvantage'] },
-      bonus: { type: 'integer', description: 'Extra flat modifier (e.g. cover, magic weapon +1).' },
+      bonus: {
+        type: 'integer',
+        description: 'Extra situational flat modifier (e.g. cover). Magic weapons, fighting styles and expertise on the '
+          + 'sheet are applied automatically; never add them here.',
+      },
       bonus_dice: {
         type: 'string',
         description: 'Extra dice added to THIS d20 roll, rolled by the tool: guidance/bless "1d4", bardic inspiration "1d6". '
@@ -362,7 +416,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const weapon = weaponName === undefined ? undefined : findWeapon(ch, weaponName);
         const override = str(args.ability);
         const ability = override !== undefined ? parseAbility(override) : (weapon === undefined ? undefined : weapon.ability ?? 'str');
-        const roll = rollD20(attackModifier(ch, ability) + bonus, adv, service.roller);
+        const modifier = weapon !== undefined ? weaponAttackModifier(ch, weapon, ability) : attackModifier(ch, ability);
+        const roll = rollD20(modifier + bonus, adv, service.roller);
         const crit = roll.natural === 20;
         const hit = crit || (roll.natural !== 1 && roll.total >= target.ac);
         const lines = [`${ch.name}${weapon !== undefined ? `（${weapon.name}）` : ''} 攻击 ${target.name}：${roll.detail}${extraNote} vs AC ${target.ac} → ${crit ? '重击！' : (hit ? '命中' : (roll.natural === 1 ? '天然 1，失手' : '未命中'))}${spentNote}`];
@@ -374,8 +429,12 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           if (expression === undefined) {
             lines.push('没有伤害表达式：传 weapon（角色卡上的武器），或用 dnd_roll 掷伤害（重击时骰子翻倍）再 dnd_apply 扣血。');
           } else {
-            const dmg = rollExpression(crit ? critExpression(expression) : expression, service.roller);
-            lines.push(`伤害 ${dmg.detail}`);
+            const gwf = usesGreatWeaponFighting(ch, weapon)
+              ? greatWeaponRoller(service.roller, diceCount(crit ? critExpression(weapon!.damage) : weapon!.damage))
+              : undefined;
+            const dmg = rollExpression(crit ? critExpression(expression) : expression, gwf?.roller ?? service.roller);
+            const rerolled = gwf !== undefined && gwf.rerolls.length > 0 ? `（巨武器战斗重投：${gwf.rerolls.join('、')}）` : '';
+            lines.push(`伤害 ${dmg.detail}${rerolled}`);
             const change = applyDamage(c, target.name, dmg.total, { crit, damageType: str(args.damage_type), roller: service.roller });
             // 倒地的 PC 被重击：死亡豁免记两次失败（applyDamage 已记一次）
             if (crit && change.before === 0 && target.kind === 'pc' && !target.conditions.includes('死亡')) {
@@ -456,9 +515,19 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       name: { type: 'string' },
       srd: { type: 'string', description: 'For create: SRD monster index; fills AC/HP/abilities/attack from dnd5eapi.' },
       count: { type: 'integer', description: 'For create: how many copies (numbered names).' },
-      room: { type: 'string', description: 'Room id the character is in (monsters; PCs that split off).' },
+      room: {
+        type: 'string',
+        description: 'Room id the character is in (monsters; PCs that split off). Moving a monster in combat to a room '
+          + 'outside the fight (fleeing, running for help) also takes it out of the initiative order.',
+      },
       hit_die: { type: 'string', description: 'PCs: hit die, e.g. d10 (fighter/paladin/ranger), d8 (cleric/rogue/bard).' },
-      traits: { type: 'array', items: { type: 'string' }, description: 'Auto-handled traits, e.g. ["不死坚韧"].' },
+      traits: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Auto-handled traits (replaces the list): "不死坚韧"; fighting styles "巨武器战斗" (rerolls 1-2 on '
+          + 'two-handed weapon dice) and "箭术" (+2 to hit with ranged weapons). With these set, never add them by hand.',
+      },
+      expertise: { type: 'array', items: { type: 'string' }, description: 'Skills with expertise (double proficiency), e.g. ["巧手","隐匿"].' },
       add_items: { type: 'array', items: { type: 'string' }, description: 'Items picked up.' },
       remove_items: { type: 'array', items: { type: 'string' }, description: 'Items used up or handed over.' },
       gp_change: { type: 'integer', description: 'Gold gained (+) or spent (-).' },
@@ -485,6 +554,10 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
             damage: { type: 'string' },
             ability: { type: 'string', enum: ['str', 'dex'] },
             notes: { type: 'string', description: 'damage type, properties, range' },
+            magic: { type: 'integer', description: '+N magic weapon: added to hit AND damage automatically.' },
+            proficient: { type: 'boolean', description: 'false when the wielder lacks proficiency (no proficiency bonus to hit).' },
+            ranged: { type: 'boolean', description: 'Ranged weapon (Archery applies). Default: name contains 弓/弩.' },
+            two_handed: { type: 'boolean', description: 'Wielded two-handed (Great Weapon Fighting applies). Default: notes contain 双手.' },
           },
           required: ['name', 'damage'],
           additionalProperties: false,
@@ -523,7 +596,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const optional = {
           player: str(args.player), playerId: str(args.player_id), className: str(args.class_name), level: int(args.level), maxHp: int(args.max_hp),
           ac: int(args.ac), attackBonus: int(args.attack_bonus), damage: str(args.damage), notes: str(args.notes),
-          skills: parseSkills(strList(args.skills)), saves: parseAbilities(strList(args.saves)),
+          skills: parseSkills(strList(args.skills)), expertise: parseSkills(strList(args.expertise)), saves: parseAbilities(strList(args.saves)),
           weapons: parseWeapons(args.weapons), room: str(args.room), hitDie: str(args.hit_die), traits: strList(args.traits),
         };
         for (const [k, v] of Object.entries(optional)) {
@@ -539,8 +612,16 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           return `已建卡 ${made.length} 个：${names.join('、')}\n${sheet(made[0]!)}`;
         }
         if (action === 'create' && findCharacter(c, name)?.name === name) throw new Error(`已经有「${name}」了，改数据用 update，再加一只换个名字或传 count`);
+        const roomsBefore = fightRooms(c);
         const { character, created } = upsertCharacter(c, input);
         const lines = [`${created ? '已建卡' : '已更新'}：`];
+        // 战斗中换到交战房间以外（逃跑、去报信）：移出先攻表，不然它会一直占着回合
+        const newRoom = str(args.room);
+        if (!created && newRoom !== undefined && inInitiative(c, character.name) && !roomsBefore.has(newRoom)) {
+          const wasCurrent = c.initiative!.order[c.initiative!.turn]?.name === character.name;
+          leaveInitiative(c, character.name);
+          lines.unshift(`${character.name} 离开了交战区域，已移出先攻表${wasCurrent ? '；它的回合到此结束，接着调用 dnd_initiative next' : ''}。`);
+        }
         const add = strList(args.add_items) ?? [];
         const remove = strList(args.remove_items) ?? [];
         const gp = int(args.gp_change) ?? 0;
@@ -641,14 +722,20 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         if (roomArg !== undefined && room === undefined) throw new Error(`没有这个房间: ${roomArg}`);
         const rolls = startInitiative(c, service.roller, strList(args.participants), room);
         turnChanged();
-        return `先攻：\n${rolls.map((r, i) => `${i + 1}. ${r.name} ${r.detail}`).join('\n')}\n第 1 轮，${turnPrompt(findCharacter(c, rolls[0]!.name), rolls[0]!.name)}`;
+        const away = positionNote(c, adventure, rolls.map((r) => r.name), new Set([room ?? c.currentRoom]));
+        return `先攻：\n${rolls.map((r, i) => `${i + 1}. ${r.name} ${r.detail}`).join('\n')}\n第 1 轮，${turnPrompt(findCharacter(c, rolls[0]!.name), rolls[0]!.name)}${away}`;
       }
       if (action === 'join') {
+        const rooms = fightRooms(c);
         const rolls = joinInitiative(c, strList(args.participants) ?? [], service.roller);
         const state = requireInitiative(c);
-        const current = state.order[state.turn]!.name;
+        const current = state.order[state.turn]?.name;
+        const away = positionNote(c, adventure, rolls.map((r) => r.name), rooms);
         return `加入战斗：${rolls.map((r) => `${r.name} ${r.detail}`).join('；')}\n第 ${state.round} 轮：${orderLine(c)}\n`
-          + `仍是 ${current} 的回合；排在 ${current} 前面的新成员本轮已错过，下一轮才行动。`;
+          + (current === undefined
+            ? '调用 dnd_initiative next 轮到下一位。'
+            : `仍是 ${current} 的回合；排在 ${current} 前面的新成员本轮已错过，下一轮才行动。`)
+          + away;
       }
       if (action === 'next') {
         assertCanEndTurn(c, { declaredBy: str(args.declared_by), recentSenders: sendersOf(exec), dmOverride: args.dm_override === true });
@@ -750,6 +837,11 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       alive: { type: 'boolean', description: 'For npc that never entered play: dies (or survives) off-screen.' },
       join: { type: 'boolean', description: 'For npc: joins the party (creates a companion sheet).' },
       fight: { type: 'boolean', description: 'For npc: fights the party (creates a monster sheet in their room).' },
+      hp: {
+        type: 'integer',
+        description: 'For npc with join/fight: current HP when the sheet is created or updated (e.g. a wounded captive '
+          + 'at 0 or 1). Default: full.',
+      },
     },
     ['action'],
     async (args, exec) => {
@@ -827,7 +919,9 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     'dnd_undo',
     'Roll back the game state when the table agrees an action was resolved wrongly ("卷回到…"). list: show recent '
     + 'changes, newest first. undo: revert the newest `steps` changes in one go. Never fake a rollback by healing '
-    + 'dead monsters or restarting initiative.',
+    + 'dead monsters or restarting initiative. Also use it when a player takes back a choice that was already '
+    + 'resolved (e.g. "不用神恩了" after the boosted attack landed): undo the attack AND the resource together, then '
+    + 're-resolve; refunding only the slot while keeping its damage is wrong.',
     {
       action: { type: 'string', enum: ['list', 'undo'] },
       steps: { type: 'integer', description: 'For undo: how many changes to revert (see list).' },
@@ -919,7 +1013,8 @@ export function storyAction(
       if (args.join === true && args.fight === true) throw new Error('join 和 fight 只能选一个');
       const mode = args.join === true ? 'join' : 'fight';
       if (!npcAlive(c, npc.id)) throw new Error(`${npc.name} 已经死了`);
-      const { character, created } = upsertCharacter(c, npcCharacterInput(c, npc, mode, srdBase));
+      const hp = int(args.hp);
+      const { character, created } = upsertCharacter(c, { ...npcCharacterInput(c, npc, mode, srdBase), ...(hp !== undefined ? { hp } : {}) });
       // 态度本来就对时 updateNpc 只回一句「已更新」，上场这里不用重复
       const lines = updateNpc(c, adventure, npc.id, { met: true, attitude: attitude ?? (mode === 'fight' ? 'hostile' : 'friendly') }).lines
         .filter((l) => l !== `${npc.name} 已更新`);
@@ -974,6 +1069,16 @@ export function lookup(c: Campaign, adventure: Adventure, kind: string, id: stri
     return roomCard(c, adventure, room);
   }
   throw new Error(`dnd_lookup 不认识的 kind: ${kind}`);
+}
+
+/** 参战者里有人不在交战房间时的提醒：多半是赶过来了但没 dnd_move，战后位置会对不上 */
+function positionNote(c: Campaign, adventure: Adventure, names: readonly string[], rooms: ReadonlySet<string>): string {
+  const away = outsideRooms(c, names, rooms);
+  if (away.length === 0) return '';
+  const graph = roomGraph(adventure);
+  const where = away.map((a) => `${a.name}（在「${findRoom(graph, a.room)?.name ?? a.room}」）`).join('、');
+  return `\n【DM】${where} 不在交战的房间。已经赶到的，轮到他时先 dnd_move 过来（不在先攻表里的随时能移动）；`
+    + '真是隔着房间远程参战就不用管。';
 }
 
 function orderLine(c: Campaign): string {

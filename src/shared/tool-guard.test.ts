@@ -21,6 +21,8 @@ function setup(config = makeConfig()) {
   const cwd = mkdtempSync(join(tmpdir(), 'guard-'));
   const media = join(cwd, 'media');
   mkdirSync(media);
+  const campaigns = join(cwd, 'dnd', 'campaigns');
+  mkdirSync(campaigns, { recursive: true });
   writeFileSync(join(media, 'a.png'), 'x');
   writeFileSync(join(cwd, '.env'), 'SECRET=1');
   const agents = new Map<object, ToolGuardSession>();
@@ -34,9 +36,10 @@ function setup(config = makeConfig()) {
     isFullAccess: (s) => hasFullToolAccess(s, config),
     findSession: (agent) => agents.get(agent as object),
     roots: [media],
+    noWriteRoots: [campaigns],
     cwd,
   });
-  return { guard, cwd, media, agentFor };
+  return { guard, cwd, media, campaigns, agentFor };
 }
 
 describe('hasFullToolAccess', () => {
@@ -102,5 +105,16 @@ describe('createToolGuard', () => {
     const sensitive = setup(makeConfig({}, ['.env']));
     const ownerAgent = sensitive.agentFor({ scope: 'c2c', peerId: OWNER });
     expect(sensitive.guard({ name: 'read', arguments: { file_path: join(sensitive.cwd, '.env') }, agent: ownerAgent })).toMatch(/敏感路径/);
+  });
+
+  it('跑团存档目录：白名单会话也不能用 write/edit 改，读照常', () => {
+    const { guard, agentFor, campaigns } = setup();
+    const white = agentFor({ scope: 'group', peerId: WHITE_GROUP });
+    const save = join(campaigns, 'qqbot_group_x.json');
+    expect(guard({ name: 'edit', arguments: { file_path: save, old_string: 'a', new_string: 'b' }, agent: white })).toMatch(/dnd_\* 工具/);
+    expect(guard({ name: 'write', arguments: { file_path: save, content: '{}' }, agent: white })).toMatch(/dnd_\* 工具/);
+    expect(guard({ name: 'read', arguments: { file_path: save }, agent: white })).toBeUndefined();
+    // 本机会话不受影响
+    expect(guard({ name: 'edit', arguments: { file_path: save, old_string: 'a', new_string: 'b' }, agent: {} })).toBeUndefined();
   });
 });

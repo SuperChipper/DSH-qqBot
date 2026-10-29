@@ -272,6 +272,7 @@ export async function bootstrapGateway(
         isFullAccess: (session) => toolAccess.isFullAccess(session),
         findSession: (agent) => manager.findByAgent(agent as never),
         roots: [MEDIA_ROOT, resolveTmpDir(config), ...(stickerStore !== undefined ? [stickerStore.root] : []), ...(config.toolAccess?.readRoots ?? [])],
+        noWriteRoots: dndService !== undefined ? [dndService.store.root] : [],
         cwd: config.cwd || process.cwd(),
       }));
       logger.info(`im-qqbot: 工具权限拦截已启用 白名单群=${config.toolAccess?.fullAccessGroups.length ?? 0}+${toolAccess.store.groups.length}`);

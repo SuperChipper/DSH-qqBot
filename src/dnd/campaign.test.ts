@@ -17,8 +17,14 @@ import {
   endInitiative,
   heal,
   grantTempHp,
+  fightRooms,
   joinInitiative,
+  leaveInitiative,
   moveParty,
+  outsideRooms,
+  reconcileKnownSites,
+  usesGreatWeaponFighting,
+  weaponAttackModifier,
   nextTurn,
   startInitiative,
   summarize,
@@ -28,7 +34,9 @@ import {
 import { validateDungeon } from './dungeon.ts';
 import { DndService } from './dnd-service.ts';
 import { buildMapSvg } from './map-render.ts';
-import { combatJoinHint } from './dnd-tools.ts';
+import { combatJoinHint, critExpression, diceCount, greatWeaponRoller } from './dnd-tools.ts';
+import { rollExpression } from './dice.ts';
+import type { Adventure } from './adventure.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
 import { AdventureLibrary, adventureFromDungeon } from './adventure.ts';
 
@@ -215,6 +223,11 @@ describe('中途入战', () => {
     expect(() => joinInitiative(c, ['卡拉'])).toThrow(/不在战斗中/);
   });
 
+  it('列出不在交战房间的参战者', () => {
+    const c = lateFight();
+    expect(outsideRooms(c, ['卡拉', '艾琳'], fightRooms(c))).toMatchObject([{ name: '卡拉' }]);
+  });
+
   it('有人赶到交战房间、或刷出新怪时提示用 join', () => {
     const c = lateFight();
     expect(combatJoinHint(c, 'nave', ['卡拉'], [])).toMatch(/dnd_initiative join participants=\[卡拉\]/);
@@ -223,6 +236,100 @@ describe('中途入战', () => {
     expect(combatJoinHint(c, 'nave', ['艾琳'], [])).toBeUndefined();
     endInitiative(c);
     expect(combatJoinHint(c, 'nave', ['卡拉'], [])).toBeUndefined();
+  });
+});
+
+describe('离场与回合指针', () => {
+  // 布洛克18 > 巨鼠2 14 > 艾琳13 > 巨鼠1 7 > 巨鼠3 5
+  function fight() {
+    const c = party();
+    moveParty(c, BELL, 'nave');
+    startInitiative(c, fixed(10, 18, 5, 12, 3));
+    return c;
+  }
+
+  it('当前行动的怪逃走：移出先攻表，next 落到原来排在它后面的人', () => {
+    const c = fight();
+    nextTurn(c); // 巨鼠2
+    expect(leaveInitiative(c, '巨鼠2')).toBe(true);
+    expect(c.initiative!.order.map((e) => e.name)).not.toContain('巨鼠2');
+    expect(nextTurn(c).current.name).toBe('艾琳');
+    expect(leaveInitiative(c, '巨鼠2')).toBe(false);
+  });
+
+  it('当前行动者在自己回合里倒下，next 不跳过下一个人', () => {
+    const c = fight();
+    nextTurn(c); // 巨鼠2
+    applyDamage(c, '巨鼠2', 99);
+    expect(nextTurn(c).current.name).toBe('艾琳');
+  });
+
+  it('排在最后的人倒下时正常进入下一轮', () => {
+    const c = fight();
+    for (let i = 0; i < 4; i++) nextTurn(c); // 巨鼠3
+    applyDamage(c, '巨鼠3', 99);
+    expect(nextTurn(c)).toMatchObject({ newRound: true, round: 2, current: { name: '布洛克' } });
+  });
+});
+
+describe('战斗风格、专精、魔法武器', () => {
+  it('命中加值：魔法 +N、不熟练去掉熟练、箭术只加远程', () => {
+    const c = party();
+    const { character: erin } = upsertCharacter(c, {
+      name: '艾琳',
+      traits: ['Archery'],
+      weapons: [
+        { name: '短弓', damage: '1d6', ability: 'dex' },
+        { name: '刺剑', damage: '1d8', ability: 'dex', magic: 1 },
+        { name: '弯刀', damage: '1d6', ability: 'dex', proficient: false },
+      ],
+    });
+    expect(erin.traits).toEqual(['箭术']);
+    // 敏捷 16 → +3，1 级熟练 +2
+    expect(weaponAttackModifier(erin, findWeapon(erin, '短弓'))).toBe(7);
+    expect(weaponAttackModifier(erin, findWeapon(erin, '刺剑'))).toBe(6);
+    expect(weaponDamage(erin, findWeapon(erin, '刺剑'))).toBe('1d8+4');
+    expect(weaponAttackModifier(erin, findWeapon(erin, '弯刀'))).toBe(3);
+  });
+
+  it('专精：熟练加值翻倍，并自动算熟练', () => {
+    const c = party();
+    const { character: erin } = upsertCharacter(c, { name: '艾琳', expertise: ['stealth', 'sleight_of_hand'] });
+    expect(checkModifier(erin, 'skill', 'dex', 'stealth')).toBe(7);
+    expect(checkModifier(erin, 'skill', 'dex', 'sleight_of_hand')).toBe(7);
+    expect(erin.skills).toContain('sleight_of_hand');
+    expect(checkModifier(erin, 'skill', 'wis', 'perception')).toBe(3);
+  });
+
+  it('巨武器战斗只作用在双手近战武器上', () => {
+    const c = party();
+    const { character: brock } = upsertCharacter(c, {
+      name: '布洛克',
+      traits: ['巨武器战斗'],
+      weapons: [{ name: '巨斧', damage: '1d12', notes: '挥砍，双手、重型' }, { name: '长剑', damage: '1d8', notes: '多用途' }],
+    });
+    expect(usesGreatWeaponFighting(brock, findWeapon(brock, '巨斧'))).toBe(true);
+    expect(usesGreatWeaponFighting(brock, findWeapon(brock, '长剑'))).toBe(false);
+    expect(usesGreatWeaponFighting(c.characters.find((ch) => ch.name === '艾琳')!, findWeapon(brock, '巨斧'))).toBe(false);
+  });
+
+  it('巨武器战斗重投只重投武器骰里的 1、2，附加骰不动', () => {
+    const gwf = greatWeaponRoller(fixed(1, 7, 2, 5, 1), diceCount(critExpression('1d12')));
+    const r = rollExpression('2d12+3+1d6', gwf.roller);
+    expect(r.total).toBe(7 + 5 + 3 + 1);
+    expect(gwf.rerolls).toEqual(['1→7', '2→5']);
+    expect(diceCount('2d6+3+1d4')).toBe(3);
+  });
+});
+
+describe('场景校准', () => {
+  it('补上模组里没写 knownWhen 的场景，有条件的不动，只增不减', () => {
+    const c = party();
+    c.knownSites = ['old'];
+    const adv = { sites: [{ id: 'town' }, { id: 'secret', knownWhen: { flag: 'x' } }] } as unknown as Adventure;
+    expect(reconcileKnownSites(c, adv)).toEqual(['town']);
+    expect(c.knownSites).toEqual(['old', 'town']);
+    expect(reconcileKnownSites(c, adv)).toEqual([]);
   });
 });
 

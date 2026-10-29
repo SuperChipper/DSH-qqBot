@@ -70,7 +70,15 @@ export interface ToolGuardDeps {
   roots: readonly string[];
   /** 相对路径按它解析（agent 工作目录） */
   cwd: string;
+  /**
+   * 所有 QQ 会话（含白名单）都不能用文件工具写的目录：跑团存档只能经 dnd_* 工具改，
+   * 模型手改 JSON 会绕过规则校验和 undo 快照。终端命令照旧拦不住，白名单会话本来就信任。
+   */
+  noWriteRoots?: readonly string[];
 }
+
+/** 会改文件的工具 */
+const WRITE_TOOLS = new Set(['write', 'edit', 'str_replace_editor']);
 
 interface GuardedExecution {
   readonly name: string;
@@ -139,6 +147,7 @@ const DENY_AGENT = '本会话不能派生子 agent 或后台流程（只有白�
 const DENY_PATH = '本会话只能访问 bot 自己的媒体、表情和临时目录，这个路径不在允许范围内。不要再尝试别的路径，也别把路径告诉用户。';
 const DENY_NO_PATH = '本会话搜索文件时必须用 path 指定 bot 的媒体、表情或临时目录，不能搜整个工作目录。';
 const DENY_SENSITIVE = '这个路径在敏感路径名单里，禁止访问。不要再尝试，也别把路径告诉用户。';
+const DENY_NO_WRITE = '跑团存档只能通过 dnd_* 工具修改，不能直接改文件。工具做不到的，在回复里说明，让主人处理。';
 
 /** 构造给 tools.guard() 用的拦截函数；返回字符串即拒绝 */
 export function createToolGuard(deps: ToolGuardDeps): (exec: GuardedExecution) => string | undefined {
@@ -146,6 +155,7 @@ export function createToolGuard(deps: ToolGuardDeps): (exec: GuardedExecution) =
   const sensitive = (deps.config.fileAccess?.sensitivePaths ?? [])
     .filter((p) => p.trim() !== '')
     .map((p) => canonical(resolve(deps.cwd, p)));
+  const noWrite = (deps.noWriteRoots ?? []).map((p) => canonical(resolve(deps.cwd, p)));
 
   return (exec) => {
     if (exec.agent === undefined) return undefined;
@@ -157,6 +167,7 @@ export function createToolGuard(deps: ToolGuardDeps): (exec: GuardedExecution) =
       ? []
       : pathArgs(exec.arguments, pathKeys).map((p) => canonical(resolve(deps.cwd, p)));
     if (paths.some((p) => sensitive.some((root) => isWithin(p, root)))) return DENY_SENSITIVE;
+    if (WRITE_TOOLS.has(exec.name) && paths.some((p) => noWrite.some((root) => isWithin(p, root)))) return DENY_NO_WRITE;
 
     if (deps.isFullAccess(session)) return undefined;
 

@@ -37,6 +37,8 @@ export interface Character {
   abilities: Record<Ability, number>;
   /** 熟练技能 */
   skills: Skill[];
+  /** 专精技能：熟练加值翻倍（游荡者、吟游诗人）；隐含熟练 */
+  expertise?: Skill[];
   /** 熟练豁免 */
   saves: Ability[];
   hp: number;
@@ -85,6 +87,14 @@ export interface Weapon {
   ability?: Ability;
   /** 伤害类型、特性等备注 */
   notes?: string;
+  /** 魔法武器 +N：命中和伤害都加 */
+  magic?: number;
+  /** 不熟练（如游荡者拿弯刀）：命中不加熟练加值；缺省熟练 */
+  proficient?: boolean;
+  /** 远程武器（弓、弩）：箭术战斗风格只加在这上面；缺省按名字里有没有弓/弩判断 */
+  ranged?: boolean;
+  /** 双手持用（双手或多用途双手握）：巨武器战斗只作用在这上面；缺省看备注里有没有「双手」 */
+  twoHanded?: boolean;
 }
 
 export interface InitiativeEntry {
@@ -181,6 +191,17 @@ export function createCampaign(key: string, adv: Adventure, now = Date.now()): C
 }
 
 /**
+ * 按当前模组补齐 knownSites：没写 knownWhen 的场景本来就该一开始知道。
+ * knownSites 只在开团时算一次，开团后模组再加场景、去掉 knownWhen，旧存档永远走不过去——
+ * 模型被逼得直接去改存档 JSON。每次加载都对一遍，只增不减（玩家已知的不会被收回）。
+ */
+export function reconcileKnownSites(c: Campaign, adv: Adventure): string[] {
+  const added = adv.sites.filter((s) => s.knownWhen === undefined && !c.knownSites.includes(s.id)).map((s) => s.id);
+  c.knownSites.push(...added);
+  return added;
+}
+
+/**
  * 解析存档 JSON，旧版本就地升级。load 和 undo 都走这里：
  * undo 恢复的快照可能是升级前存的 v1。
  */
@@ -242,6 +263,7 @@ export interface CharacterInput {
   level?: number;
   abilities?: Partial<Record<Ability, number>>;
   skills?: Skill[];
+  expertise?: Skill[];
   saves?: Ability[];
   maxHp?: number;
   hp?: number;
@@ -287,6 +309,11 @@ export function upsertCharacter(c: Campaign, input: CharacterInput): { character
     if (score !== undefined) next.abilities[ability] = clampInt(score, 1, 30);
   }
   if (input.skills !== undefined) next.skills = [...new Set(input.skills)];
+  if (input.expertise !== undefined) {
+    next.expertise = [...new Set(input.expertise)];
+    // 专精以熟练为前提，补上免得两个列表对不上
+    next.skills = [...new Set([...next.skills, ...next.expertise])];
+  }
   if (input.saves !== undefined) next.saves = [...new Set(input.saves)];
   if (input.ac !== undefined) next.ac = clampInt(input.ac, 1, 30);
   if (input.maxHp !== undefined) {
@@ -299,7 +326,7 @@ export function upsertCharacter(c: Campaign, input: CharacterInput): { character
   if (input.initBonus !== undefined) next.initBonus = Math.trunc(input.initBonus);
   if (input.weapons !== undefined) next.weapons = input.weapons;
   if (input.notes !== undefined) next.notes = input.notes;
-  if (input.traits !== undefined) next.traits = [...new Set(input.traits)];
+  if (input.traits !== undefined) next.traits = [...new Set(input.traits.map(normalizeTrait))];
   if (input.srd !== undefined) next.srd = input.srd;
   if (input.room !== undefined) next.room = input.room;
   if (input.hitDie !== undefined) next.hitDie = input.hitDie;
@@ -588,17 +615,52 @@ export function joinInitiative(c: Campaign, names: string[], roller: Roller = cr
   return rolls;
 }
 
+/**
+ * 角色离开战斗（怪物逃走报信、NPC 退场）：移出先攻表但不算击败。
+ * 正在行动的人离场时指针退一格，下一次 next 才落到排在他后面的人，不会跳过谁。
+ */
+export function leaveInitiative(c: Campaign, name: string): boolean {
+  if (c.initiative === undefined || !removeFromInitiative(c.initiative, name)) return false;
+  pushLog(c, `${name} 离开战斗`);
+  return true;
+}
+
+/** 交战房间：先攻表里所有人所在的房间（同一场战斗可能跨相邻房间） */
+export function fightRooms(c: Campaign): Set<string> {
+  const rooms = new Set<string>();
+  for (const e of c.initiative?.order ?? []) {
+    const ch = findCharacter(c, e.name);
+    const room = ch === undefined ? undefined : roomOf(c, ch);
+    if (room !== undefined) rooms.add(room);
+  }
+  return rooms;
+}
+
+/** names 里不在 rooms 中的人及其位置（给模型的提醒，不拦：远程隔着房间打也是可能的） */
+export function outsideRooms(c: Campaign, names: readonly string[], rooms: ReadonlySet<string>): { name: string; room: string }[] {
+  return names.flatMap((n) => {
+    const ch = requireCharacter(c, n);
+    const room = roomOf(c, ch);
+    return room === undefined || rooms.has(room) ? [] : [{ name: ch.name, room }];
+  });
+}
+
 /** 已在先攻表里的角色名 */
 export function inInitiative(c: Campaign, name: string): boolean {
   return c.initiative?.order.some((e) => e.name === name) ?? false;
 }
 
-function removeFromInitiative(state: InitiativeState, name: string): void {
+/**
+ * 移出先攻表。移走的是当前或之前的人时指针退一格，下一次 nextTurn 正好落到原来排在他后面的人；
+ * 原来只在 idx < turn 时退格，当前行动者在自己回合倒下/被移走时 next 会跳过下一个人。
+ */
+function removeFromInitiative(state: InitiativeState, name: string): boolean {
   const idx = state.order.findIndex((e) => e.name === name);
-  if (idx === -1) return;
+  if (idx === -1) return false;
   state.order.splice(idx, 1);
-  if (idx < state.turn) state.turn--;
-  if (state.turn >= state.order.length) state.turn = 0;
+  if (idx <= state.turn) state.turn--;
+  if (state.turn >= state.order.length) state.turn = state.order.length - 1;
+  return true;
 }
 
 export function requireInitiative(c: Campaign): InitiativeState {
@@ -808,7 +870,9 @@ export function moveParty(
     : [...new Set(who.map((n) => requireCharacter(c, n)))];
   if (candidates.length === 0) throw new Error('没有可以移动的角色');
   const monster = candidates.find((ch) => ch.kind === 'monster');
-  if (monster !== undefined) throw new Error(`${monster.name} 是怪物，怪物位置不用 dnd_move`);
+  if (monster !== undefined) {
+    throw new Error(`${monster.name} 是怪物，不用 dnd_move。怪物换房间/逃跑用 dnd_character update name=${monster.name} room=<房间 id>（战斗中会顺带移出先攻表）`);
+  }
   const from = roomOf(c, candidates[0]!)!;
   const fromName = findRoom(graph, from)?.name ?? from;
   const split = candidates.filter((ch) => roomOf(c, ch) !== from);
@@ -995,6 +1059,7 @@ export type CheckKind = 'skill' | 'ability' | 'save';
 export function checkModifier(ch: Character, kind: CheckKind, ability: Ability, skill?: Skill): number {
   const base = abilityModifier(ch.abilities[ability]);
   const prof = proficiencyBonus(ch.level);
+  if (kind === 'skill' && skill !== undefined && ch.expertise?.includes(skill)) return base + prof * 2;
   if (kind === 'skill' && skill !== undefined && ch.skills.includes(skill)) return base + prof;
   if (kind === 'save' && ch.saves.includes(ability)) return base + prof;
   return base;
@@ -1012,8 +1077,47 @@ export function findWeapon(ch: Character, name: string): Weapon {
 
 /** 武器伤害表达式：武器骰 + 属性调整值 */
 export function weaponDamage(ch: Character, weapon: Weapon): string {
-  const mod = abilityModifier(ch.abilities[weapon.ability ?? 'str']);
+  const mod = abilityModifier(ch.abilities[weapon.ability ?? 'str']) + (weapon.magic ?? 0);
   return mod === 0 ? weapon.damage : `${weapon.damage}${mod > 0 ? '+' : '-'}${Math.abs(mod)}`;
+}
+
+// 战斗风格写进 traits，由工具自动结算；模型不用每次记着手动加 bonus / 重投
+export const GREAT_WEAPON_FIGHTING = '巨武器战斗';
+export const ARCHERY = '箭术';
+const TRAIT_ALIASES: Record<string, string> = {
+  'great weapon fighting': GREAT_WEAPON_FIGHTING,
+  巨武器: GREAT_WEAPON_FIGHTING,
+  巨武器战斗风格: GREAT_WEAPON_FIGHTING,
+  archery: ARCHERY,
+  箭术战斗风格: ARCHERY,
+  弓术: ARCHERY,
+};
+
+/** 把别名统一成工具认的特性名（「巨武器战斗风格」→「巨武器战斗」） */
+export function normalizeTrait(trait: string): string {
+  const t = trait.trim();
+  return TRAIT_ALIASES[t.toLowerCase()] ?? t;
+}
+
+export function isRangedWeapon(weapon: Weapon): boolean {
+  return weapon.ranged ?? /弓|弩|bow/i.test(weapon.name);
+}
+
+export function isTwoHandedWeapon(weapon: Weapon): boolean {
+  return weapon.twoHanded ?? (!isRangedWeapon(weapon) && /双手/.test(weapon.notes ?? ''));
+}
+
+/** 巨武器战斗：双手近战武器的伤害骰掷出 1 或 2 可以重投一次（2014 版规则） */
+export function usesGreatWeaponFighting(ch: Character, weapon: Weapon | undefined): boolean {
+  return weapon !== undefined && ch.traits?.includes(GREAT_WEAPON_FIGHTING) === true && isTwoHandedWeapon(weapon);
+}
+
+/** 用某把武器攻击的命中加值：属性 + 熟练（不熟练则无）+ 魔法加值 + 箭术 */
+export function weaponAttackModifier(ch: Character, weapon: Weapon, ability?: Ability): number {
+  const use = ability ?? weapon.ability ?? 'str';
+  const prof = weapon.proficient === false ? 0 : proficiencyBonus(ch.level);
+  const archery = ch.traits?.includes(ARCHERY) === true && isRangedWeapon(weapon) ? 2 : 0;
+  return abilityModifier(ch.abilities[use]) + prof + (weapon.magic ?? 0) + archery;
 }
 
 /** PC 攻击加值：取力量/敏捷较高者 + 熟练；怪物用 attackBonus */
