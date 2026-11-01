@@ -8,12 +8,14 @@ import type { CommandDeps, CategorizedCommand } from './types.ts';
 import type { ReplyTarget } from '../types.ts';
 import { getScopePeer } from '../shared/index.ts';
 import { playerStatus } from '../dnd/campaign.ts';
+import { buildTextMap } from '../dnd/text-map.ts';
 
 const USAGE = [
   '用法：',
   '/dnd start [模组id] — 开团（同一模组的旧团会接着跑），群里会带签到按钮，人齐自动开场',
   '/dnd new [模组id] [blank] — 存档旧团开新团（默认带上 PC 卡，加 blank 从零建卡）',
   '/dnd status — 看团况',
+  '/dnd map — 在聊天框里画出当前场景的地图和你们的位置',
   '/dnd checkin — 再发一次签到按钮',
   '/dnd end — 暂停（让 DM 写摘要请直接说「今天先到这」）',
   '/dnd dungeons — 列出可用模组',
@@ -139,6 +141,12 @@ export function dndCommand({ manager }: CommandDeps): CategorizedCommand {
         const found = service.active(key);
         if (found === undefined) return '现在没有进行中的团。';
         return `🎲 ${found.adventure.name}\n${playerStatus(found.campaign, found.adventure)}`;
+      }
+
+      if (sub === 'map') {
+        const found = service.active(key);
+        if (found === undefined) return '现在没有进行中的团。';
+        return buildTextMap(found.campaign, found.adventure);
       }
 
       if (sub === 'checkin') {
