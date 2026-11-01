@@ -31,7 +31,7 @@ export interface BiliToolDeps {
   /** 把登录二维码发到当前 QQ 会话；返回 false/抛错时退化为返回本地路径 */
   sendQr?: (agent: unknown, qrPath: string, caption: string) => Promise<boolean>;
   /** 登录/使用登录态字幕的权限门；未提供时不做额外限制（本地 Web 场景） */
-  permission?: (agent: unknown) => { allowed: boolean; reason?: string };
+  permission?: (agent: unknown, kind?: 'login' | 'subtitle') => { allowed: boolean; reason?: string };
 }
 
 interface ToolRegistration {
@@ -79,9 +79,9 @@ function loginHint(): string {
 export function registerBiliTools(tools: ToolsRegistryLike, deps: BiliToolDeps): void {
   const client = deps.client ?? new BiliClient();
 
-  const ensurePermission = (agent: unknown): void => {
+  const ensurePermission = (agent: unknown, kind: 'login' | 'subtitle' = 'login'): void => {
     if (deps.permission === undefined) return;
-    const result = deps.permission(agent);
+    const result = deps.permission(agent, kind);
     if (!result.allowed) throw new Error(result.reason ?? '没有权限执行这个 B 站操作');
   };
 
@@ -195,7 +195,7 @@ export function registerBiliTools(tools: ToolsRegistryLike, deps: BiliToolDeps):
     async execute(args, exec) {
       const { bvid } = args as { bvid?: string };
       if (typeof bvid !== 'string' || bvid.trim().length === 0) throw new Error('bili_subtitle: bvid 不能为空');
-      if (client.hasCredential()) ensurePermission(exec.agent);
+      if (client.hasCredential()) ensurePermission(exec.agent, 'subtitle');
       try {
         const result = await client.subtitle(bvidOf(bvid));
         if (result === undefined) return '这个视频没有可用字幕（可能未上传字幕，或该字幕需要登录后才有权限）。';
@@ -221,7 +221,7 @@ export function registerBiliTools(tools: ToolsRegistryLike, deps: BiliToolDeps):
     parameters: { type: 'object', properties: {}, additionalProperties: false },
     output: TEXT_OUTPUT,
     async execute(_args, exec) {
-      ensurePermission(exec.agent);
+      ensurePermission(exec.agent, 'login');
       const start = await client.loginStart();
       const dir = join(PLUGIN_ROOT, 'media');
       mkdirSync(dir, { recursive: true });
@@ -264,7 +264,7 @@ export function registerBiliTools(tools: ToolsRegistryLike, deps: BiliToolDeps):
     async execute(args, exec) {
       const { qrcodeKey } = args as { qrcodeKey?: string };
       if (typeof qrcodeKey !== 'string' || qrcodeKey.length === 0) throw new Error('bili_login_check: qrcodeKey 不能为空');
-      ensurePermission(exec.agent);
+      ensurePermission(exec.agent, 'login');
       const status = await client.loginPoll(qrcodeKey);
       if (status.state === 'success') {
         const session = qrSessions.get(qrcodeKey);
