@@ -10,13 +10,14 @@
 
 ### 新功能
 
+- **`qqbot_booru_fetch` 搜图工具**：按 tag（如 `shinosawa_hiro rating:general -ai-generated`）在 safebooru 上取一张 `latest`/`random` 的图，自动去重（`media/fanart/seen.json`，发出去的那张由 send-file 回调记为已发）、校验文件头与大小、落地到 `tmp/fanart/yuri-<id>.<ext>` 并返回路径，直接喂给 `qqbot_send_file`。角色新图推送这类定时任务不用再每轮手搓下载脚本。danbooru 本体对这台机器走 Cloudflare 质询（API/cdn 全 403），safebooru 是同一套 tag 语法的镜像且同图同字节，故统一走它。
 - **纳入 DSH 插件管理**：可在 DSH Web 的「插件」页安装、启停 `@tencent-connect/dsh-qqbot`，并在组合包详情页直接调整配置，无需手改 profile 文件。
 - **配置项扩展**：新增群聊未 @ 回复概率、群历史条数、会话闲置超时、主人 openid、文件访问白名单/敏感路径等可编辑项。
 - **表情自动收藏**：bot 会根据自己看到图片时的情绪，决定是否调用 `qqbot_save_sticker` 收藏；工具按内容哈希去重、更新 `stickers/index.json`，并把新表情注入后续对话的表情清单，不再需要手改人设里的固定对照表。
 - **图文同发**：`qqbot_send_file` 新增 `caption`，图片/视频/文件可以和整段文字作为同一条富媒体消息发出；QQ 会话 prompt 优先使用 caption，不再单独回一段文字。
 - **B 站只读工具**：新增 `bili_search`、`bili_video`、`bili_comments`、`bili_subtitle` 及扫码登录 `bili_login` / `bili_login_check`；只读、凭证存本机、不注册发评论/投稿/私信等写操作。
 - **原生读图**：新增 `deepseek-native` pi-ai 路由（`deepseek-flash`，text+image）和 `vision.native`；QQ 入站图片经 attachments 转为 ImageBlock 直接交给主模型，跳过 `qqbot_describe_image` 的转述。`qqbot_describe_image` 保留为 OCR/图表 fallback。
-- **`/new` 自动迁移定时任务**：`/new` 时捕获旧会话 active 的 daily/weekly/every 任务，在新会话第一条消息注入 `schedule_list` / `schedule_create` 重建指令；一次性 after/at 不迁移。
+- **`/new` 自动迁移定时任务**：`/new` 时捕获旧会话 active 的 daily/weekly/cron/every 任务，在新会话第一条消息注入 `schedule_list` / `schedule_create` 重建指令（并提醒搜图类任务改用 `qqbot_booru_fetch`、临时文件落 `tmp/`）；一次性 after/at 不迁移。此前 cron 任务不在迁移范围内，会一直留在旧会话里按老 prompt 跑。
 - **桌宠余额兼容 `deepseek-native`**：通过 `petApi7340.balance.register` 注册同接口的余额 provider（`/user/balance` + `DEEPSEEK_API_KEY`），并带 DeepSeek 峰/谷档位；切换 native 后桌宠不再显示 `unsupported`。
 - **梗图/表情匹配**：新增 `qqbot_match_sticker`，按 SHA-256 在本地 `stickers/index.json` 查完全相同的图；配套 `meme-recognition` skill 在未命中时用 OCR + KnowYourMeme/萌娘百科/百度/B站等文本检索。当前仅精确哈希，感知哈希待后续。
 - **共享笔记（长期记忆）**：`notes.root`（默认 `cwd/notes`）下的 Markdown 作为所有会话共享的记忆；每条消息按内容自动召回相关段落注入，另有 `qqbot_notes_search` / `qqbot_notes_save` 工具。本地 BM25 + 中文二字切词，无需向量服务。

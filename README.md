@@ -6,6 +6,20 @@
 
 > 安装、扫码绑定、基础配置项、内置命令和整体架构都沿用上游，请看 **[上游 README](https://github.com/tencent-connect/dsh-qqbot#readme)**。本文只介绍这个仓库新增和改动的部分。
 
+## Playwright 浏览器
+
+在 QQ 机器人设置页的「浏览器」中启用，先配置 `ownerOpenid`。默认使用本机已安装的 Chrome、有窗口模式，登录态存放于 agent 工作目录的 `.qqbot-browser/`（自定义目录请自行排除 Git 和备份共享）。支持 Edge；选择 Chromium 时需先运行 `npx playwright-core install chromium`。
+
+保存设置触发插件重载后，在主人私聊里说「打开小红书，我先登录」或「打开 https://x.com」。在弹出的浏览器里手动扫码、登录或完成验证，然后让 bot 继续读取、搜索、滚动、截图。`qqbot_browser` 支持 `open/read/click/fill/press/scroll/back/screenshot/close`；截图返回临时 PNG 路径，可用 `qqbot_send_file` 发送。动态页面没加载完时可再次 `read`；遇到平台限制会正常显示登录/验证页面，不能保证免验证。默认关闭功能。
+
+需要在群内浏览、搜索或提取网页内容时，在「浏览群白名单」（`browser.allowedGroups`）逐行添加群 openid（不是普通 QQ 群号）。空名单仅主人私聊可用，名单内群的所有成员均可调用；此权限独立于终端和文件工具白名单。各群使用独立浏览器配置目录（`userDataDir/groups/<群标识哈希>`），同群共享登录态和页面，不与主人私聊或其他群共享。请在对应群触发的浏览器窗口中单独登录。群白名单不授予其他用户私聊访问权限。
+
+也可在群里对 bot 说「申请本群的浏览权限」，bot 会调用 `qqbot_browser_access(action="grant")`，在本群发出「同意 / 拒绝」按钮。只有主人在原群点击才有效，10 分钟过期；等待审批期间不会授予权限，相同申请不会重复发送。`status` 查询本群状态，`revoke` 申请撤销；主人私聊可直接指定 `group` openid 加入/移出。批准后先保存到当前运行 profile 的 `browser.allowedGroups`，再更新权限，保存失败则不授权；设置页、聊天审批使用同一份名单。保存会触发插件重载，旧申请按钮随重载失效。审批按钮发在申请群，不额外私聊通知主人。
+
+本机模式使用独立配置目录持久保存 Cookie、localStorage 等状态，不要填写日常 Chrome 的用户数据目录。同一目录不能被多个浏览器进程同时占用。插件重载会关闭其启动的浏览器，下次操作时重新打开并复用登录态。语言、时区、无头模式、超时和返回字数均可在设置页调整；第一次登录请保持有窗口模式。
+
+如需接入已有 Chromium 指纹浏览器，在其管理端启动配置文件，选择 CDP 模式，并给宿主进程设置 `QQBOT_BROWSER_CDP_ENDPOINT`（HTTP 或 WebSocket 调试地址）。主人私聊在已有 context 中新建专用标签页；授权群各自创建临时隔离 context，不继承主人登录态，关闭或重载后群登录态不保留（需要持久群登录态请用本机模式）。工具关闭时断开连接，保留外接浏览器。指纹和代理由外接浏览器管理；本机模式可选设 `QQBOT_BROWSER_PROXY_SERVER`。这些环境变量不会通过配置接口回传。普通 Chrome 模式不提供指纹伪装。
+
 ## 新增内容一览
 
 | 方向 | 内容 |
