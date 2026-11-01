@@ -16,6 +16,7 @@
  */
 import { createElement, useCallback, useEffect, useState, type CSSProperties, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { BIND_CONFIG_PATH } from '../shared/bind-protocol.ts';
+import type { BrowserConfig } from '../config.ts';
 
 /** 访问控制配置（与 src/config.ts 的 AccessControlConfig 对应的局部投影） */
 interface AccessControlWire {
@@ -68,6 +69,15 @@ interface AsrWire {
   model: string;
   preferQQ: boolean;
   timeoutMs: number;
+  fallback?: AsrFallbackWire;
+}
+
+/** 语音识别备用接口（与 src/config.ts 的 AsrFallbackConfig 对应，不含 apiKey） */
+interface AsrFallbackWire {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  timeoutMs: number;
 }
 
 /** 视频理解（与 src/config.ts 的 VideoConfig 对应） */
@@ -84,6 +94,17 @@ interface SendFileWire {
   extraRoots: string[];
 }
 
+/** 语音合成（与 src/config.ts 的 SpeakConfig 对应） */
+interface SpeakWire {
+  enabled: boolean;
+  voice: string;
+  rate: string;
+  maxChars: number;
+  command: string;
+  gsvUrl: string;
+  gsvSpeed: number;
+}
+
 /** 共享笔记库（与 src/config.ts 的 NotesConfig 对应） */
 interface NotesWire {
   enabled: boolean;
@@ -92,6 +113,18 @@ interface NotesWire {
   injectTopK: number;
   injectMaxChars: number;
   injectMinCoverage: number;
+  /** 密钥不上表单（GET 回显为空，POST 由服务端回填） */
+  semantic?: NotesSemanticWire;
+}
+
+/** 笔记语义检索（与 src/config.ts 的 NotesSemanticConfig 对应，不含 apiKey） */
+interface NotesSemanticWire {
+  enabled: boolean;
+  baseUrl: string;
+  model: string;
+  minSimilarity: number;
+  minMargin: number;
+  timeoutMs: number;
 }
 
 /** 工具权限（与 src/config.ts 的 ToolAccessConfig 对应） */
@@ -168,6 +201,8 @@ type ConfigWire = {
   processingTimeoutMs?: number;
   askTimeoutMs?: number;
   autoCompactTokens?: number;
+  autoCompactPrivateRatio?: number;
+  autoCompactDeferOnTools?: boolean;
   tmpDir?: string;
   tmpTtlHours?: number;
   tmpMaxTotalMB?: number;
@@ -183,8 +218,10 @@ type ConfigWire = {
   asr?: AsrWire;
   video?: VideoWire;
   sendFile?: SendFileWire;
+  speak?: SpeakWire;
   cleanup?: CleanupWire;
   fanart?: FanartWire;
+  browser?: BrowserConfig;
   dnd?: DndWire;
   replyDesire?: ReplyDesireWire;
   cwd?: string;
@@ -414,6 +451,17 @@ function SegmentedRow({ label, help, value, options, onChange }: {
 
 type AccessMode = AccessControlWire['c2cMode'];
 
+function BrowserSelectRow({ label, value, options, onChange }: {
+  label: string; value: string; options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}): ReactNode {
+  return createElement('label', { className: 'imqb2-field' },
+    createElement('span', { className: 'imqb2-label' }, label),
+    createElement('select', { value, onChange: (e: ChangeEvent<HTMLSelectElement>) => { onChange(e.target.value); } },
+      options.map((o) => createElement('option', { key: o.value, value: o.value }, o.label))),
+  );
+}
+
 const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
   { value: 'open', label: '所有人' },
   { value: 'allowlist', label: '白名单' },
@@ -552,21 +600,36 @@ export function ConfigPanel(): ReactNode {
   };
   const asr: AsrWire = form.asr ?? {
     enabled: false, baseUrl: 'https://api.siliconflow.cn/v1',
-    model: 'FunAudioLLM/SenseVoiceSmall', preferQQ: true, timeoutMs: 30000,
+    model: 'Qwen/Qwen3-ASR-1.7B', preferQQ: true, timeoutMs: 30000,
+  };
+  // 旧配置没有 fallback 组时按默认值显示
+  const asrFallback: AsrFallbackWire = asr.fallback ?? {
+    enabled: false, baseUrl: 'https://api.siliconflow.cn/v1', model: 'FunAudioLLM/SenseVoiceSmall', timeoutMs: 30000,
   };
   const video: VideoWire = form.video ?? { enabled: true, ffmpegPath: '', maxFrames: 8, maxSeconds: 300 };
   const notes: NotesWire = form.notes ?? {
     enabled: true, root: '', autoInject: true, injectTopK: 2, injectMaxChars: 600, injectMinCoverage: 0.4,
   };
+  // 旧配置没有 semantic 组时按默认值显示
+  const semantic: NotesSemanticWire = notes.semantic ?? {
+    enabled: false, baseUrl: 'https://api.siliconflow.cn/v1', model: 'BAAI/bge-m3', minSimilarity: 0.5, minMargin: 0.16, timeoutMs: 3000,
+  };
   const stickers: StickersWire = form.stickers ?? {
     enabled: true, root: '', extraRoots: [], maxBytes: 8 * 1024 * 1024, maxAutoEntries: 200,
   };
   const sendFile: SendFileWire = form.sendFile ?? { restrictPaths: true, extraRoots: [] };
+  const speak: SpeakWire = form.speak ?? {
+    enabled: true, voice: 'zh-CN-XiaoyiNeural', rate: '+8%', maxChars: 120, command: '', gsvUrl: '', gsvSpeed: 1.0,
+  };
   const toolAccess: ToolAccessWire = form.toolAccess ?? {
     enabled: true, fullAccessGroups: [], fullAccessUsers: [], readRoots: [],
   };
   const cleanup: CleanupWire = form.cleanup ?? { dryRun: false };
   const fanart: FanartWire = form.fanart ?? { enabled: true, proxy: '', poolDir: '' };
+  const browser: BrowserConfig = form.browser ?? {
+    enabled: false, allowedGroups: [], mode: 'local', channel: 'chrome', userDataDir: '', headless: false,
+    locale: 'zh-CN', timezoneId: 'Asia/Shanghai', timeoutMs: 30000, maxTextChars: 12000,
+  };
   const dnd: DndWire = form.dnd ?? { enabled: true, root: '', turnButtons: true, interjections: true };
   const replyDesire: ReplyDesireWire = {
     enabled: false, threshold: 0.6, names: [], engagedMs: 90000, engagedMaxTurns: 8,
@@ -689,10 +752,21 @@ export function ConfigPanel(): ReactNode {
       onChange: (v) => { patch('askTimeoutMs', v); },
     }),
     createElement(NumberRow, {
-      label: '自动压缩阈值（token）', value: form.autoCompactTokens ?? 120000,
+      label: '自动压缩阈值（token）', value: form.autoCompactTokens ?? 160000,
       min: 0, max: 1000000, step: 10000,
-      help: '上下文超过该值后自动压缩；0 = 交给 dsh 默认阈值',
+      help: '群聊上下文超过该值后自动压缩（私聊不低于它）；0 = 插件不自动压缩，交给 dsh 默认阈值',
       onChange: (v) => { patch('autoCompactTokens', v); },
+    }),
+    createElement(NumberRow, {
+      label: '私聊压缩阈值（占模型窗口）', value: form.autoCompactPrivateRatio ?? 0.5,
+      min: 0, max: 0.9, step: 0.05,
+      help: '私聊做多步任务需要更长上下文：按模型窗口比例算阈值，取不到窗口时用上面的固定值；0 = 与群聊相同',
+      onChange: (v) => { patch('autoCompactPrivateRatio', v); },
+    }),
+    createElement(SwitchRow, {
+      label: '工具链进行中推迟压缩', checked: form.autoCompactDeferOnTools ?? true,
+      help: '上一轮还在调工具时先不压，等一轮没调工具的收尾轮再压；上下文到阈值 1.5 倍时仍会强制压缩',
+      onChange: (v) => { patch('autoCompactDeferOnTools', v); },
     }),
     createElement(SwitchRow, {
       label: '调试模式', checked: form.debug ?? false,
@@ -906,7 +980,7 @@ export function ConfigPanel(): ReactNode {
       onChange: (v) => { patch('asr', { ...asr, baseUrl: v }); },
     }),
     createElement(FieldRow, {
-      label: '转写模型', value: asr.model, placeholder: 'FunAudioLLM/SenseVoiceSmall',
+      label: '转写模型', value: asr.model, placeholder: 'Qwen/Qwen3-ASR-1.7B',
       onChange: (v) => { patch('asr', { ...asr, model: v }); },
     }),
     createElement(SwitchRow, {
@@ -916,6 +990,23 @@ export function ConfigPanel(): ReactNode {
     createElement(NumberRow, {
       label: '转写超时（毫秒）', value: asr.timeoutMs, min: 5000, max: 120000, step: 5000,
       onChange: (v) => { patch('asr', { ...asr, timeoutMs: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '主接口连不上时改用备用接口', checked: asrFallback.enabled,
+      help: '如本机 whisper 优先、在线服务兜底；只在连不上或服务端 5xx 时切换。密钥同样用 QQBOT_ASR_API_KEY 或 patch 配置',
+      onChange: (v) => { patch('asr', { ...asr, fallback: { ...asrFallback, enabled: v } }); },
+    }),
+    createElement(FieldRow, {
+      label: '备用接口地址', value: asrFallback.baseUrl, placeholder: 'https://api.siliconflow.cn/v1',
+      onChange: (v) => { patch('asr', { ...asr, fallback: { ...asrFallback, baseUrl: v } }); },
+    }),
+    createElement(FieldRow, {
+      label: '备用转写模型', value: asrFallback.model, placeholder: 'FunAudioLLM/SenseVoiceSmall',
+      onChange: (v) => { patch('asr', { ...asr, fallback: { ...asrFallback, model: v } }); },
+    }),
+    createElement(NumberRow, {
+      label: '备用接口超时（毫秒）', value: asrFallback.timeoutMs, min: 5000, max: 120000, step: 5000,
+      onChange: (v) => { patch('asr', { ...asr, fallback: { ...asrFallback, timeoutMs: v } }); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '共享笔记'),
@@ -945,6 +1036,34 @@ export function ConfigPanel(): ReactNode {
       label: '最低查询词覆盖率', value: notes.injectMinCoverage, min: 0, max: 1, step: 0.05,
       help: '0-1，越高越保守',
       onChange: (v) => { patch('notes', { ...notes, injectMinCoverage: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '语义检索（向量）', checked: semantic.enabled,
+      help: '关键词和字面匹配之外再按意思找笔记（同义词、换种说法）；密钥请用环境变量 QQBOT_EMBEDDING_API_KEY 或 patch 配置',
+      onChange: (v) => { patch('notes', { ...notes, semantic: { ...semantic, enabled: v } }); },
+    }),
+    createElement(FieldRow, {
+      label: '向量接口地址', value: semantic.baseUrl, placeholder: 'https://api.siliconflow.cn/v1',
+      onChange: (v) => { patch('notes', { ...notes, semantic: { ...semantic, baseUrl: v } }); },
+    }),
+    createElement(FieldRow, {
+      label: '向量模型', value: semantic.model, placeholder: 'BAAI/bge-m3',
+      onChange: (v) => { patch('notes', { ...notes, semantic: { ...semantic, model: v } }); },
+    }),
+    createElement(NumberRow, {
+      label: '高出全库中位数至少', value: semantic.minMargin, min: 0, max: 1, step: 0.01,
+      help: '主门槛：片段要比这条消息对全部笔记的一般相似度明显更高；过门槛的片段即使没有关键词命中也会注入',
+      onChange: (v) => { patch('notes', { ...notes, semantic: { ...semantic, minMargin: v } }); },
+    }),
+    createElement(NumberRow, {
+      label: '最低语义相似度', value: semantic.minSimilarity, min: 0, max: 1, step: 0.05,
+      help: '绝对下限兜底（笔记很少时中位数不可靠）',
+      onChange: (v) => { patch('notes', { ...notes, semantic: { ...semantic, minSimilarity: v } }); },
+    }),
+    createElement(NumberRow, {
+      label: '向量请求超时（毫秒）', value: semantic.timeoutMs, min: 500, max: 30000, step: 500,
+      help: '超时的那条消息只用关键词检索，不会卡住回复',
+      onChange: (v) => { patch('notes', { ...notes, semantic: { ...semantic, timeoutMs: v } }); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '工具权限'),
@@ -980,6 +1099,43 @@ export function ConfigPanel(): ReactNode {
       onChange: (v) => { patch('sendFile', { ...sendFile, extraRoots: v }); },
     }),
 
+    createElement('div', { className: 'imqb2-group-title' }, '语音合成'),
+    createElement(SwitchRow, {
+      label: '启用 qqbot_speak', checked: speak.enabled,
+      help: '让 bot 用自己的声音说一两句；依赖本机的 edge-tts（pip install edge-tts）',
+      onChange: (v) => { patch('speak', { ...speak, enabled: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '音色', value: speak.voice, placeholder: 'zh-CN-XiaoyiNeural',
+      help: 'edge-tts 音色名，如 zh-CN-XiaoyiNeural、zh-CN-XiaoxiaoNeural',
+      onChange: (v) => { patch('speak', { ...speak, voice: v.trim() }); },
+    }),
+    createElement(FieldRow, {
+      label: '语速', value: speak.rate, placeholder: '+8%',
+      help: '带符号的百分比，如 +8% / -5%；留空用引擎默认',
+      onChange: (v) => { patch('speak', { ...speak, rate: v.trim() }); },
+    }),
+    createElement(NumberRow, {
+      label: '单条字数上限', value: speak.maxChars, min: 10, max: 600, step: 10,
+      help: 'QQ 语音最长约 60 秒，超过上限会被拒绝',
+      onChange: (v) => { patch('speak', { ...speak, maxChars: v }); },
+    }),
+    createElement(FieldRow, {
+      label: 'edge-tts 命令', value: speak.command, placeholder: '留空 = 自动探测',
+      help: '填可执行文件路径，比如 conda 里的 Scripts\\edge-tts.exe',
+      onChange: (v) => { patch('speak', { ...speak, command: v.trim() }); },
+    }),
+    createElement(FieldRow, {
+      label: '本地语音服务', value: speak.gsvUrl, placeholder: 'http://127.0.0.1:8765（留空 = edge-tts）',
+      help: '填了优先用本机 GPT-SoVITS 服务发声，服务没起来会自动退回 edge-tts',
+      onChange: (v) => { patch('speak', { ...speak, gsvUrl: v.trim() }); },
+    }),
+    createElement(NumberRow, {
+      label: '本地服务语速', value: speak.gsvSpeed, min: 0.5, max: 2, step: 0.01,
+      help: '倍率，1 = 原速；和上面 edge-tts 的百分比语速互不影响',
+      onChange: (v) => { patch('speak', { ...speak, gsvSpeed: v }); },
+    }),
+
     createElement('div', { className: 'imqb2-group-title' }, '临时目录与清理'),
     createElement(FieldRow, {
       label: '临时目录', value: form.tmpDir ?? '', placeholder: '留空 = 工作目录/tmp',
@@ -1000,6 +1156,54 @@ export function ConfigPanel(): ReactNode {
       label: '清理只记日志（dry run）', checked: cleanup.dryRun,
       help: '自定义清理规则（cleanup.rules）只能在 cordis.patch.yml 里配',
       onChange: (v) => { patch('cleanup', { ...cleanup, dryRun: v }); },
+    }),
+
+    createElement('div', { className: 'imqb2-group-title' }, '浏览器'),
+    createElement(SwitchRow, {
+      label: '启用 Playwright 浏览', checked: browser.enabled,
+      help: '主人私聊及白名单群可用，请先配置 ownerOpenid。第一次打开网站后在浏览器中手动登录。',
+      onChange: (v) => { patch('browser', { ...browser, enabled: v }); },
+    }),
+    createElement(ListRow, {
+      label: '浏览群白名单', value: browser.allowedGroups ?? [], rows: 3,
+      help: '每行一个群 openid（不是 QQ 群号）；留空仅主人私聊可用。授权群内所有成员均可调用，各群登录态与主人私聊隔离。',
+      onChange: (v) => { patch('browser', { ...browser, allowedGroups: v }); },
+    }),
+    createElement(BrowserSelectRow, {
+      label: '连接方式', value: browser.mode,
+      options: [{ value: 'local', label: '本机浏览器' }, { value: 'cdp', label: '指纹浏览器 CDP' }],
+      onChange: (v) => { patch('browser', { ...browser, mode: v as BrowserConfig['mode'] }); },
+    }),
+    createElement('p', { className: 'imqb2-help' }, 'CDP 地址请设环境变量 QQBOT_BROWSER_CDP_ENDPOINT；代理可设 QQBOT_BROWSER_PROXY_SERVER。本机模式保存登录态，指纹由外接浏览器管理。'),
+    createElement(BrowserSelectRow, {
+      label: '本机浏览器', value: browser.channel,
+      options: [{ value: 'chrome', label: 'Chrome' }, { value: 'msedge', label: 'Edge' }, { value: 'chromium', label: 'Chromium' }],
+      onChange: (v) => { patch('browser', { ...browser, channel: v as BrowserConfig['channel'] }); },
+    }),
+    createElement(FieldRow, {
+      label: '独立配置目录', value: browser.userDataDir, placeholder: '留空 = 工作目录/.qqbot-browser',
+      help: '不要填写日常使用的 Chrome 用户目录；此目录包含登录凭据，请勿提交或共享。',
+      onChange: (v) => { patch('browser', { ...browser, userDataDir: v }); },
+    }),
+    createElement(SwitchRow, {
+      label: '无头模式', checked: browser.headless, help: '首次登录请关闭，以便在窗口中扫码或验证。',
+      onChange: (v) => { patch('browser', { ...browser, headless: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '语言', value: browser.locale,
+      onChange: (v) => { patch('browser', { ...browser, locale: v }); },
+    }),
+    createElement(FieldRow, {
+      label: '时区', value: browser.timezoneId,
+      onChange: (v) => { patch('browser', { ...browser, timezoneId: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '操作超时（毫秒）', value: browser.timeoutMs, min: 1000, max: 120000, step: 1000,
+      onChange: (v) => { patch('browser', { ...browser, timeoutMs: v }); },
+    }),
+    createElement(NumberRow, {
+      label: '返回文本上限', value: browser.maxTextChars, min: 1000, max: 50000, step: 1000,
+      onChange: (v) => { patch('browser', { ...browser, maxTextChars: v }); },
     }),
 
     createElement('div', { className: 'imqb2-group-title' }, '搜图'),

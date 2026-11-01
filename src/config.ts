@@ -95,6 +95,19 @@ export interface AsrConfig {
   preferQQ: boolean;
   /** 转写调用超时(ms) */
   timeoutMs: number;
+  /** 主接口连不上或 5xx 时改用的备用接口（如本机 whisper 优先、在线服务兜底）；旧配置没有这一组 */
+  fallback?: AsrFallbackConfig;
+}
+
+/** 语音识别备用接口 */
+export interface AsrFallbackConfig {
+  enabled: boolean;
+  /** OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions） */
+  baseUrl: string;
+  /** 接口密钥（空 = 环境变量 QQBOT_ASR_API_KEY） */
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
 }
 
 export interface SendFileConfig {
@@ -102,6 +115,26 @@ export interface SendFileConfig {
   restrictPaths: boolean;
   /** 额外允许访问的根目录（media 和 agent cwd 始终默认允许） */
   extraRoots: string[];
+}
+
+export interface SpeakConfig {
+  /** 是否注册 qqbot_speak 语音合成工具 */
+  enabled: boolean;
+  /** edge-tts 音色名（ms neural voice） */
+  voice: string;
+  /** 语速调整，如 +8% / -5% */
+  rate: string;
+  /** 单条语音最多合成多少字（QQ 语音上限约 60 秒） */
+  maxChars: number;
+  /** edge-tts 可执行命令；空 = 依次尝试 edge-tts / python -m edge_tts / py -m edge_tts */
+  command: string;
+  /**
+   * 本地 GPT-SoVITS 服务地址（如 http://127.0.0.1:8765）；空 = 只用 edge-tts。
+   * 填了就先走本地服务，那边比 edge-tts 更像「有情绪的嗓子」，失败再退回 edge-tts。
+   */
+  gsvUrl: string;
+  /** GPT-SoVITS 语速倍率，1.0 = 原速（edge-tts 的 rate 是百分比，两者不通用） */
+  gsvSpeed: number;
 }
 
 export interface FileAccessConfig {
@@ -135,6 +168,19 @@ export interface StickersConfig {
   maxBytes: number;
   /** 自动收藏条目上限（防止索引无限增长） */
   maxAutoEntries: number;
+}
+
+export interface BrowserConfig {
+  enabled: boolean;
+  allowedGroups: string[];
+  mode: 'local' | 'cdp';
+  channel: 'chrome' | 'msedge' | 'chromium';
+  userDataDir: string;
+  headless: boolean;
+  locale: string;
+  timezoneId: string;
+  timeoutMs: number;
+  maxTextChars: number;
 }
 
 export interface FanartConfig {
@@ -191,6 +237,24 @@ export interface ReplyDesireConfig {
   judge: ReplyJudgeConfig;
 }
 
+/** 笔记语义检索（向量相似度，作为 RRF 第三路） */
+export interface NotesSemanticConfig {
+  /** 是否启用；关闭时只用 BM25 + 字面精确匹配 */
+  enabled: boolean;
+  /** OpenAI 兼容接口地址（POST {baseUrl}/embeddings） */
+  baseUrl: string;
+  /** 接口密钥（空 = 环境变量 QQBOT_EMBEDDING_API_KEY） */
+  apiKey: string;
+  /** 向量模型 id */
+  model: string;
+  /** 绝对下限：余弦相似度低于它的段一律不进语义榜（0-1） */
+  minSimilarity: number;
+  /** 相对门槛：要高出本次查询对全库相似度的中位数这么多才进语义榜/自动注入 */
+  minMargin: number;
+  /** 查询向量请求超时(ms)：超时这条消息就不走语义一路 */
+  timeoutMs: number;
+}
+
 export interface NotesConfig {
   /** 是否启用共享笔记库（检索/记录工具 + 自动召回） */
   enabled: boolean;
@@ -204,6 +268,8 @@ export interface NotesConfig {
   injectMaxChars: number;
   /** 自动注入的最低查询词覆盖率（0-1），越高越保守 */
   injectMinCoverage: number;
+  /** 语义检索 */
+  semantic: NotesSemanticConfig;
 }
 
 export interface ImQQBotConfig {
@@ -253,6 +319,10 @@ export interface ImQQBotConfig {
   historyLimit: number;
   /** QQ 会话上下文超过这么多 token 时，在轮次结束后自动压缩（0=关闭，交给 dsh 默认阈值） */
   autoCompactTokens: number;
+  /** 私聊自动压缩阈值 = 模型上下文窗口 × 该比例（不低于 autoCompactTokens；0=私聊也用固定阈值） */
+  autoCompactPrivateRatio: number;
+  /** 上一轮调用过工具（多步任务进行中）时推迟自动压缩，直到收尾轮或阈值 1.5 倍 */
+  autoCompactDeferOnTools: boolean;
   /** 访问控制 */
   access: AccessControlConfig;
   /** 是否展示工具调用成功结果（工具错误始终展示） */
@@ -269,6 +339,8 @@ export interface ImQQBotConfig {
   video: VideoConfig;
   /** 附件发送（qqbot_send_file 工具） */
   sendFile: SendFileConfig;
+  /** 语音合成（qqbot_speak 工具） */
+  speak: SpeakConfig;
   /** bot 主人 QQ openid（私聊识别，用于文件访问白名单） */
   ownerOpenid?: string;
   /** 额外的配置管理员 QQ openid（可修改模型/preset、点击审批） */
@@ -283,6 +355,7 @@ export interface ImQQBotConfig {
   notes: NotesConfig;
   /** 搜图工具（qqbot_fanart_pick） */
   fanart: FanartConfig;
+  browser?: BrowserConfig;
   /** 跑团（/dnd + dnd_* 工具） */
   dnd: DndConfig;
 }
@@ -337,6 +410,17 @@ export const StickersSchema: Schema<StickersConfig> = Schema.object({
   maxAutoEntries: Schema.number().default(200).description('自动收藏条目上限'),
 });
 
+/** 笔记语义检索子 Schema */
+export const NotesSemanticSchema: Schema<NotesSemanticConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('启用向量语义检索'),
+  baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址（POST {baseUrl}/embeddings）'),
+  apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_EMBEDDING_API_KEY）'),
+  model: Schema.string().default('BAAI/bge-m3').description('向量模型'),
+  minSimilarity: Schema.number().min(0).max(1).default(0.5).description('绝对下限：最低余弦相似度(0-1)'),
+  minMargin: Schema.number().min(0).max(1).default(0.16).description('相对门槛：高出全库相似度中位数多少'),
+  timeoutMs: Schema.number().min(500).max(30000).default(3000).description('查询向量超时(ms)'),
+});
+
 /** 共享笔记库子 Schema */
 export const NotesSchema: Schema<NotesConfig> = Schema.object({
   enabled: Schema.boolean().default(true).description('是否启用共享笔记库'),
@@ -345,9 +429,26 @@ export const NotesSchema: Schema<NotesConfig> = Schema.object({
   injectTopK: Schema.number().default(2).description('自动注入最多片段数'),
   injectMaxChars: Schema.number().default(600).description('自动注入总字数上限'),
   injectMinCoverage: Schema.number().default(0.4).description('自动注入最低查询词覆盖率(0-1)'),
+  semantic: NotesSemanticSchema.description('向量语义检索'),
 });
 
-/** 搜图工具子 Schema */
+/** 浏览器子 Schema */
+export const BrowserSchema: Schema<BrowserConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('启用主人私聊和授权群的浏览工具'),
+  allowedGroups: Schema.array(Schema.string()).default([]).description('允许浏览的群 openid；空=仅主人私聊'),
+  mode: Schema.union(['local', 'cdp']).default('local'),
+  channel: Schema.union(['chrome', 'msedge', 'chromium']).default('chrome'),
+  userDataDir: Schema.string().default('').description('独立浏览器目录；空=工作目录/.qqbot-browser'),
+  headless: Schema.boolean().default(false),
+  locale: Schema.string().default('zh-CN'),
+  timezoneId: Schema.string().default('Asia/Shanghai'),
+  timeoutMs: Schema.number().min(1000).max(120000).step(1).default(30000),
+  maxTextChars: Schema.number().min(1000).max(50000).step(1).default(12000),
+}).default({
+  enabled: false, allowedGroups: [], mode: 'local', channel: 'chrome', userDataDir: '', headless: false,
+  locale: 'zh-CN', timezoneId: 'Asia/Shanghai', timeoutMs: 30000, maxTextChars: 12000,
+});
+
 export const FanartSchema: Schema<FanartConfig> = Schema.object({
   enabled: Schema.boolean().default(true).description('是否启用 qqbot_fanart_pick 搜图工具'),
   proxy: Schema.string().default('').description('pixiv/safebooru 用的 HTTP 代理（空=HTTPS_PROXY 或系统代理）'),
@@ -430,20 +531,37 @@ export const VisionSchema: Schema<VisionConfig> = Schema.object({
 });
 
 /** 语音识别子 Schema（apiKey 不随表单回传，服务端在写入时保留旧值） */
+/** 语音识别备用接口子 Schema */
+export const AsrFallbackSchema: Schema<AsrFallbackConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('主接口连不上时改用备用接口'),
+  baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址'),
+  apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_ASR_API_KEY）'),
+  model: Schema.string().default('Qwen/Qwen3-ASR-1.7B').description('转写模型 id'),
+  timeoutMs: Schema.number().min(1000).max(300000).default(30000).description('转写调用超时(ms)'),
+});
+
 export const AsrSchema: Schema<AsrConfig> = Schema.object({
   enabled: Schema.boolean().default(false).description('是否启用在线语音识别（QQ 未给出识别文本时转写语音）'),
   baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions）'),
   apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_ASR_API_KEY）'),
-  model: Schema.string().default('FunAudioLLM/SenseVoiceSmall').description('转写模型 id'),
+  model: Schema.string().default('Qwen/Qwen3-ASR-1.7B').description('转写模型 id'),
   preferQQ: Schema.boolean().default(true).description('QQ 自带识别文本存在时优先使用'),
   timeoutMs: Schema.number().default(30000).description('转写调用超时(ms)'),
+  fallback: AsrFallbackSchema.description('备用接口：主接口连不上或 5xx 时改用'),
 }).default({
   enabled: false,
   baseUrl: 'https://api.siliconflow.cn/v1',
   apiKey: '',
-  model: 'FunAudioLLM/SenseVoiceSmall',
+  model: 'Qwen/Qwen3-ASR-1.7B',
   preferQQ: true,
   timeoutMs: 30000,
+  fallback: {
+    enabled: false,
+    baseUrl: 'https://api.siliconflow.cn/v1',
+    apiKey: '',
+    model: 'FunAudioLLM/SenseVoiceSmall',
+    timeoutMs: 30000,
+  },
 });
 
 /** 视频理解子 Schema */
@@ -466,6 +584,24 @@ export const SendFileSchema: Schema<SendFileConfig> = Schema.object({
 }).default({
   restrictPaths: true,
   extraRoots: [],
+});
+
+export const SpeakSchema: Schema<SpeakConfig> = Schema.object({
+  enabled: Schema.boolean().default(true).description('是否注册 qqbot_speak 语音合成工具'),
+  voice: Schema.string().default('zh-CN-XiaoyiNeural').description('edge-tts 音色名'),
+  rate: Schema.string().default('+8%').description('语速调整，如 +8% / -5%'),
+  maxChars: Schema.number().default(120).description('单条语音字数上限（QQ 语音约 60 秒）'),
+  command: Schema.string().default('').description('edge-tts 可执行命令（空=自动探测）'),
+  gsvUrl: Schema.string().default('').description('本地 GPT-SoVITS 服务地址（空=edge-tts）'),
+  gsvSpeed: Schema.number().default(1.0).description('GPT-SoVITS 语速倍率（1.0=原速）'),
+}).default({
+  enabled: true,
+  voice: 'zh-CN-XiaoyiNeural',
+  rate: '+8%',
+  maxChars: 120,
+  command: '',
+  gsvUrl: '',
+  gsvSpeed: 1.0,
 });
 
 export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
@@ -498,7 +634,11 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   processingTimeoutMs: Schema.number().default(30 * 60 * 1000).description('处理超时(ms)，超时中断当前 LLM 调用'),
   askTimeoutMs: Schema.number().default(5 * 60 * 1000).description('待答问题超时(ms)，超时自动拒绝并提示'),
   historyLimit: Schema.number().default(10).description('群历史缓冲条数'),
-  autoCompactTokens: Schema.number().default(120000).description('上下文超过此 token 数时自动压缩（0=关闭）'),
+  autoCompactTokens: Schema.number().default(160000).description('上下文超过此 token 数时自动压缩（0=关闭）；私聊另见 autoCompactPrivateRatio'),
+  autoCompactPrivateRatio: Schema.number().min(0).max(0.9).default(0.5)
+    .description('私聊自动压缩阈值占模型上下文窗口的比例（不低于 autoCompactTokens；0=私聊也用固定阈值）'),
+  autoCompactDeferOnTools: Schema.boolean().default(true)
+    .description('上一轮还在调工具时推迟自动压缩，等收尾轮或上下文到阈值 1.5 倍再压'),
   access: AccessControlSchema.default({
     c2cMode: 'open',
     c2cAllow: [],
@@ -512,6 +652,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
   asr: AsrSchema.description('语音识别配置'),
   video: VideoSchema.description('视频理解配置'),
   sendFile: SendFileSchema.description('附件发送工具配置'),
+  speak: SpeakSchema.description('语音合成工具配置（qqbot_speak）'),
   ownerOpenid: Schema.string().description('bot 主人 QQ openid（私聊识别，文件访问白名单）'),
   adminOpenids: Schema.array(Schema.string()).default([]).description('额外的配置管理员 openid（可修改模型/preset、点击审批）'),
   fileAccess: FileAccessSchema.default({
@@ -539,7 +680,17 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     injectTopK: 2,
     injectMaxChars: 600,
     injectMinCoverage: 0.4,
+    semantic: {
+      enabled: false,
+      baseUrl: 'https://api.siliconflow.cn/v1',
+      apiKey: '',
+      model: 'BAAI/bge-m3',
+      minSimilarity: 0.5,
+      minMargin: 0.16,
+      timeoutMs: 3000,
+    },
   }).description('共享笔记库配置'),
+  browser: BrowserSchema.description('Playwright 浏览器（CDP 地址用 QQBOT_BROWSER_CDP_ENDPOINT 环境变量）'),
   fanart: FanartSchema.default({
     enabled: true,
     proxy: '',
