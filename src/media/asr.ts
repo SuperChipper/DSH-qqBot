@@ -2,7 +2,7 @@
  * 在线语音识别 — 把 QQ 语音转成文本，供纯文本模型理解。
  *
  * 走 OpenAI 兼容的 POST {baseUrl}/audio/transcriptions（multipart: file + model），
- * SiliconFlow / Groq / OpenAI / 自建 whisper 服务均可直接换用。
+ * SiliconFlow / Groq / OpenAI / 自建 whisper 服务均可直接换用；可再配一个备用接口（如本机 whisper 优先、在线兜底）。
  *
  * 音频来源：优先 QQ 网关给的 voice_wav_url（已是 WAV），否则下载 url 的 SILK 并用 silk-wasm 解码成 WAV。
  */
@@ -80,38 +80,73 @@ export function isConnectionError(err: unknown): boolean {
   return codes.some(c => typeof c === 'string' && OFFLINE_CODES.has(c));
 }
 
-/** 读取接口密钥（配置为空时退到环境变量） */
-function resolveApiKey(asr: AsrConfig): string {
-  return asr.apiKey || process.env.QQBOT_ASR_API_KEY || '';
+/** 一个转写接口：主接口或备用接口 */
+interface AsrEndpoint {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  timeoutMs: number;
 }
 
-/** 调用 OpenAI 兼容转写接口；连不上时抛 AsrOfflineError */
-export async function requestTranscription(
-  audio: { data: Buffer; name: string },
-  asr: AsrConfig,
-): Promise<string> {
+/** 服务端出错（5xx）：服务在但坏了，和鉴权/参数错误（4xx）区分开，前者值得换备用接口 */
+class AsrServerError extends Error {
+  constructor(status: number, body: string) {
+    super(`HTTP ${status} ${body.slice(0, 200)}`);
+    this.name = 'AsrServerError';
+  }
+}
+
+/** 读取接口密钥（配置为空时退到环境变量） */
+function resolveApiKey(endpoint: AsrEndpoint): string {
+  return endpoint.apiKey || process.env.QQBOT_ASR_API_KEY || '';
+}
+
+/** 调用一个 OpenAI 兼容转写接口；连不上时抛 AsrOfflineError，5xx 抛 AsrServerError */
+async function postTranscription(audio: { data: Buffer; name: string }, endpoint: AsrEndpoint): Promise<string> {
   const form = new FormData();
   form.append('file', new Blob([new Uint8Array(audio.data)]), audio.name);
-  form.append('model', asr.model);
+  form.append('model', endpoint.model);
 
-  const apiKey = resolveApiKey(asr);
+  const apiKey = resolveApiKey(endpoint);
   let resp: Response;
   try {
-    resp = await fetch(`${asr.baseUrl.replace(/\/+$/, '')}/audio/transcriptions`, {
+    resp = await fetch(`${endpoint.baseUrl.replace(/\/+$/, '')}/audio/transcriptions`, {
       method: 'POST',
       headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
       body: form,
-      signal: AbortSignal.timeout(asr.timeoutMs),
+      signal: AbortSignal.timeout(endpoint.timeoutMs),
     });
   } catch (err) {
-    throw isConnectionError(err) ? new AsrOfflineError(asr.baseUrl, err) : err;
+    throw isConnectionError(err) ? new AsrOfflineError(endpoint.baseUrl, err) : err;
   }
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
+    if (resp.status >= 500) throw new AsrServerError(resp.status, body);
     throw new Error(`HTTP ${resp.status} ${body.slice(0, 200)}`);
   }
   const json = await resp.json() as { text?: unknown };
   return typeof json.text === 'string' ? json.text.trim() : '';
+}
+
+/**
+ * 转写：先走主接口，连不上或 5xx 且配了备用接口时改走备用接口。
+ * 超时不切换：本机服务处理长音频本来就慢，再把整段音频发去在线服务只会更久。
+ * 两边都连不上时抛备用接口的 AsrOfflineError。
+ */
+export async function requestTranscription(
+  audio: { data: Buffer; name: string },
+  asr: AsrConfig,
+  logger?: Logger,
+): Promise<string> {
+  try {
+    return await postTranscription(audio, asr);
+  } catch (err) {
+    const fallback = asr.fallback;
+    const switchable = err instanceof AsrOfflineError || err instanceof AsrServerError;
+    if (!switchable || fallback === undefined || !fallback.enabled) throw err;
+    logger?.info(`im-qqbot: ASR 主接口不可用（${err.message}），改用备用接口 ${fallback.baseUrl}`);
+    return postTranscription(audio, fallback);
+  }
 }
 
 /**
@@ -129,7 +164,7 @@ export async function transcribeVoice(
   try {
     const bytes = await fetchSafe(url, MAX_VOICE_BYTES);
     const audio = await toUploadableAudio(bytes, att.filename);
-    const text = await requestTranscription(audio, asr);
+    const text = await requestTranscription(audio, asr, logger);
     if (!text) return undefined;
     logger.debug(`im-qqbot: voice transcribed (${text.length} chars): ${att.filename}`);
     return { text, duration: audio.duration };

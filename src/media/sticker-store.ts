@@ -128,6 +128,9 @@ function hashFile(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+/** 收藏里的一张：pack = 手动维护的那套（bot 自己的形象），auto = bot 自己收藏的 */
+export type StickerCollectionKind = 'pack' | 'auto';
+
 export interface StickerMatchResult {
   matched: true;
   file: string;
@@ -147,6 +150,10 @@ export class StickerStore {
   private readonly maxAutoEntries: number;
   private readonly maxPromptEntries: number;
   private readonly logger?: Logger;
+  /** MD5（大写）→ 收藏类型；index.json 变了就重建 */
+  private collection?: { indexMtimeMs: number; kinds: Map<string, StickerCollectionKind> };
+  /** 每个文件的 MD5，按 mtime+size 缓存，重建清单时不用全部重算 */
+  private readonly md5Cache = new Map<string, { key: string; md5: string }>();
 
   constructor(options: StickerStoreOptions) {
     this.root = resolve(options.root);
@@ -284,6 +291,52 @@ export class StickerStore {
    * - 表情清单：手动维护的条目（bot 自带的那套）全列，自动收藏的按新近补满上限；文件已不在的跳过。
    *   清单原先只列自动收藏，自带表情写死在人设里，新加的图人设里没有，两边会对不上
    */
+  /**
+   * 按内容 MD5 判断一张图是不是收藏里的。QQ 附件的文件名就是内容 MD5，
+   * 回复欲望打分时拿文件名直接查，不用先下载图片。
+   */
+  collectionKind(md5: string): StickerCollectionKind | undefined {
+    return this.collectionKinds().get(md5.toUpperCase());
+  }
+
+  private collectionKinds(): Map<string, StickerCollectionKind> {
+    let indexMtimeMs: number;
+    try {
+      indexMtimeMs = statSync(this.indexPath).mtimeMs;
+    } catch {
+      return new Map();
+    }
+    if (this.collection?.indexMtimeMs === indexMtimeMs) return this.collection.kinds;
+
+    const kinds = new Map<string, StickerCollectionKind>();
+    try {
+      for (const entry of this.readIndex()) {
+        if (typeof entry.file !== 'string' || entry.file.length === 0) continue;
+        const md5 = this.md5Of(join(this.root, entry.file));
+        // 同一张图既在自带包里又被自动收藏过时，按自带包算
+        if (md5 !== undefined && kinds.get(md5) !== 'pack') kinds.set(md5, entry.auto === true ? 'auto' : 'pack');
+      }
+    } catch (err) {
+      this.logger?.warn(`im-qqbot: 读取表情索引失败，收藏比对跳过: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.collection = { indexMtimeMs, kinds };
+    return kinds;
+  }
+
+  private md5Of(path: string): string | undefined {
+    try {
+      const stat = statSync(path);
+      const key = `${stat.mtimeMs}:${stat.size}`;
+      const cached = this.md5Cache.get(path);
+      if (cached?.key === key) return cached.md5;
+      const md5 = createHash('md5').update(readFileSync(path)).digest('hex').toUpperCase();
+      this.md5Cache.set(path, { key, md5 });
+      return md5;
+    } catch {
+      return undefined;
+    }
+  }
+
   promptSections(): StickerPromptSection[] {
     const sections: StickerPromptSection[] = [{
       name: 'qqbot:sticker-capture',
@@ -295,7 +348,7 @@ export class StickerStore {
         '只在真正想用的时候存：普通截图、长文截图、与情绪无关的图不要存；重复图片会按内容哈希自动跳过，不要为了凑数反复存。',
         '必须通过真正的工具调用收藏：不要把 <qqbot_save_sticker>、<image>、<emotion> 这类标签写进回复正文——那不是调用，会被当普通文字发出去。',
         '如果要同时回复和收藏：先发起 qqbot_save_sticker 工具调用（正文留空），拿到工具结果后再写回复。',
-        '收藏后可以立即用 qqbot_send_file 发出；从下一回合起，它会自动出现在下面的表情清单里。',
+        '从下一回合起，新收藏的图会自动出现在下面的表情清单里；只在当前情绪明确、图也对得上时才用 qqbot_send_file 发出，收藏不代表必须回复一张图。',
       ].join('\n'),
     }];
 
@@ -323,7 +376,8 @@ export class StickerStore {
         '【你的表情包】',
         `路径前缀：${this.root}`,
         `情绪=文件：${visible.map((entry) => `${entry.emotion}=${entry.file}`).join(' ')}`,
-        '一次最多发 1 张；先文字后图片，别刷屏。',
+        '只在有明确情绪、且库里有对得上的那张时才发（被夸、被怼、困了、破防、撒娇）；纯信息性回复不发，也别连着两轮各挂一张。一次最多发 1 张。',
+        '配文放进 caption，不超过两句、不换行、不放列表；要讲道理另发一条纯文字，不重复配文。',
       ].join('\n'),
     });
     return sections;
@@ -341,6 +395,8 @@ export class StickerStore {
 
   /** 原子写回索引：临时文件 + rename，避免半截 JSON */
   private writeIndex(entries: StickerIndexEntry[]): void {
+    // 同一毫秒内连写两次时 index.json 的 mtime 不变，收藏比对的缓存要显式作废
+    this.collection = undefined;
     mkdirSync(this.root, { recursive: true });
     const tmp = `${this.indexPath}.tmp-${process.pid}-${Date.now()}`;
     writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`, 'utf8');

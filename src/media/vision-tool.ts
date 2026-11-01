@@ -54,19 +54,16 @@ interface DescribeImageArgs {
 export const DESCRIBE_IMAGE_TOOL_NAME = 'qqbot_describe_image';
 
 const DESCRIPTION =
-  'Inspect one image and return the text the user needs. The image is a local absolute path '
-  + '(downloaded by the QQ bot) or an http(s) URL. Use this when the user references an image, '
-  + 'or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, translation of '
-  + 'image text, or photo understanding. Always pass an explicit `prompt` with a precise '
-  + 'instruction (e.g. "transcribe all text", "extract the table as CSV", "translate the text '
-  + 'into Chinese") instead of relying on the generic default.';
+  'Inspect one image that is NOT in the current message and return what the task needs. '
+  + '`image` is a local absolute path (downloaded by the QQ bot) or an http(s) URL. '
+  + 'Images attached to the current message are already visible to you as pixels — read them '
+  + 'yourself, including any text, and do not call this tool for those. '
+  + 'Pass an explicit `prompt` with a precise instruction instead of relying on the default.';
 
 /** vision.native 时追加：主模型已直接看到本轮图片，这个工具只做兜底 */
 const NATIVE_NOTE =
   ' Images in the current message are already given to you natively (unless the message says '
-  + '"[图片未原生注入"); look at those directly. Use this tool only for images outside the current '
-  + 'input (quoted/earlier messages, downloaded files, extracted frames) or for small/dense text '
-  + 'you cannot read reliably.';
+  + '"[图片未原生注入"); read them directly, text included — this tool is not for those.';
 
 /** 图片 magic bytes 嗅探 → 标准 MIME（不信声明，安全底线） */
 function sniffImageMediaType(bytes: Uint8Array): ImageMediaType | null {

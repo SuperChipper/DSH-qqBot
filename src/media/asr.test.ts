@@ -69,6 +69,52 @@ describe('requestTranscription', () => {
       .rejects.toBeInstanceOf(AsrOfflineError);
   });
 
+  describe('fallback endpoint', () => {
+    const LOCAL = 'http://127.0.0.1:8080/v1';
+    const ONLINE = 'https://online.example.com/v1';
+    const withFallback: AsrConfig = {
+      ...asr, baseUrl: LOCAL, apiKey: '', model: 'large-v3-turbo',
+      fallback: { enabled: true, baseUrl: ONLINE, apiKey: 'sk-online', model: 'FunAudioLLM/SenseVoiceSmall', timeoutMs: 5000 },
+    };
+    const refused = (): TypeError => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    /** 本机按 local 的行为响应，在线接口回「在线结果」 */
+    function stub(local: () => Promise<Response>) {
+      const fetchMock = vi.fn(async (url: string) => (url.startsWith(LOCAL) ? local() : new Response(JSON.stringify({ text: '在线结果' }))));
+      vi.stubGlobal('fetch', fetchMock);
+      return fetchMock;
+    }
+
+    it('local offline → online endpoint with its own model and key', async () => {
+      const fetchMock = stub(async () => { throw refused(); });
+      expect(await requestTranscription({ data: Buffer.from('RIFF'), name: 'v.wav' }, withFallback)).toBe('在线结果');
+      const [url, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+      expect(url).toBe(`${ONLINE}/audio/transcriptions`);
+      expect(init.headers).toEqual({ Authorization: 'Bearer sk-online' });
+      expect((init.body as FormData).get('model')).toBe('FunAudioLLM/SenseVoiceSmall');
+    });
+
+    it('local 5xx → online; local 4xx → no switch', async () => {
+      stub(async () => new Response('boom', { status: 503 }));
+      expect(await requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, withFallback)).toBe('在线结果');
+      const fetchMock = stub(async () => new Response('bad request', { status: 400 }));
+      await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, withFallback)).rejects.toThrow('HTTP 400');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('fallback disabled or missing → original offline error', async () => {
+      stub(async () => { throw refused(); });
+      const disabled = { ...withFallback, fallback: { ...withFallback.fallback!, enabled: false } };
+      await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, disabled)).rejects.toBeInstanceOf(AsrOfflineError);
+      const { fallback: _f, ...legacy } = withFallback;
+      await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, legacy)).rejects.toBeInstanceOf(AsrOfflineError);
+    });
+
+    it('both offline → AsrOfflineError from the fallback', async () => {
+      vi.stubGlobal('fetch', vi.fn(async () => { throw refused(); }));
+      await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, withFallback)).rejects.toThrow(`ASR server unreachable: ${ONLINE}`);
+    });
+  });
+
   it('throws on HTTP errors', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('bad key', { status: 401 })));
     await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, asr)).rejects.toThrow('HTTP 401');

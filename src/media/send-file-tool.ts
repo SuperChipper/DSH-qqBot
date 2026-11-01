@@ -17,6 +17,7 @@ import type { Logger, ReplyTarget } from '../types.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
 import { isSensitivePath } from '../shared/file-access.ts';
 import { replyWindowMs } from '../transport/msgid-cache.ts';
+import { isVoiceFile, VOICE_REPLY_REMINDER, VOICE_REPLY_TOOL_HINT } from './voice-reply.ts';
 
 /**
  * 群聊被动回复窗口过期后清掉 msgId，降级为主动推送。
@@ -38,9 +39,11 @@ const DESCRIPTION =
   + 'of the current conversation. Pass the absolute path of a file that already exists on disk. '
   + 'Use this when the user asks you to deliver a generated file (chart, report, exported data, '
   + 'screenshot, etc.) or to send an existing media/file back to them. '
-  + 'If you want text together with an image/video/file, put the ENTIRE reply text in `caption` and do not '
-  + 'write the same text as a separate reply; QQ sends the caption in the same rich-media message. '
-  + 'After a captioned send, an empty final reply is fine: end the turn unless you have something new to say.';
+  + 'For an image/video/file, put the entire short companion reply in `caption`: at most two sentences, '
+  + 'no line breaks and no lists. Send any longer explanation as a separate text message. Do not repeat '
+  + 'the caption as a separate reply; QQ sends it in the same rich-media message. '
+  + 'After a captioned send, an empty final reply is fine: end the turn unless you have something new to say. '
+  + 'For audio files sent as voice messages: ' + VOICE_REPLY_TOOL_HINT;
 
 /** 发送器最小接口（QQBot 实例满足） */
 interface MediaSendResult {
@@ -73,7 +76,6 @@ interface SendFileArgs {
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
-const VOICE_EXTS = new Set(['.mp3', '.wav', '.ogg', '.aac', '.silk', '.amr']);
 
 /** 解析显式 target（"c2c:openid" / "group:openid"），非法返回 undefined */
 function parseTarget(input: string): ReplyTarget | undefined {
@@ -132,7 +134,7 @@ export function registerSendFileTool(
         },
         caption: {
           type: 'string',
-          description: 'Optional text to send in the SAME rich-media message. Put the whole reply here; do not write it again as separate text.',
+          description: 'Optional short reply for an image/video/generic file in the SAME message: at most two sentences, no line breaks, no lists. Put all companion text here; send longer explanations separately, without repeating the caption. Not supported for voice/audio files; omit caption for them.',
         },
       },
       required: ['file_path'],
@@ -154,6 +156,14 @@ export function registerSendFileTool(
       render: (args: unknown, value: unknown): ContentBlock[] => {
         const v = value as { fileName: string; target: string };
         const caption = (args as { caption?: unknown } | undefined)?.caption;
+        if (isVoiceFile(v.fileName)) {
+          return [{
+            type: 'text',
+            text: `已发送语音 ${v.fileName} → ${v.target}。`
+              + (typeof caption === 'string' && caption.trim() ? '本次 caption 未发送（语音不支持）。' : '')
+              + VOICE_REPLY_REMINDER,
+          }];
+        }
         const captionSent = typeof caption === 'string' && caption.trim().length > 0;
         return [{
           type: 'text',
@@ -210,7 +220,7 @@ export function registerSendFileTool(
         result = await bot.sendImage(replyTarget, source, captionText !== undefined ? { content: captionText } : undefined);
       } else if (VIDEO_EXTS.has(ext)) {
         result = await bot.sendVideo(replyTarget, source, captionText !== undefined ? { content: captionText } : undefined);
-      } else if (VOICE_EXTS.has(ext)) {
+      } else if (isVoiceFile(fileName)) {
         if (captionText !== undefined) {
           logger.warn('im-qqbot: qqbot_send_file 语音消息不支持 caption，已忽略');
         }

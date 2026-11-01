@@ -10,6 +10,9 @@ import {
   numberHistoryImages,
 } from './history-images.ts';
 import { buildAgentBody, wantsHistoryImages } from '../transport/inbound.ts';
+import { makeSenderLabeler } from '../features/message-format.ts';
+
+const label = makeSenderLabeler((id) => id.toUpperCase());
 
 const logger: Logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 const media = { enabled: true, maxMB: 10, ttlHours: 24 } as MediaConfig;
@@ -79,17 +82,17 @@ describe('buildAgentBody 历史图片', () => {
   it('历史行带 [图片#n] 标记，纯图片消息不再是空行', () => {
     const images = numberHistoryImages(history);
     images[1]!.localPath = 'C:/media/b.jpg';
-    const body = buildAgentBody('[当前]', history, true, true, images);
+    const body = buildAgentBody('[当前]', history, true, true, label, images);
 
-    expect(body).toContain('[甲 (u1)] 看这个 [图片#1: https://q/a.jpg]');
-    expect(body).toContain('[乙 (u2)] [图片#2: C:/media/b.jpg] [图片#3: https://q/c.jpg]');
+    expect(body).toContain('[甲 #U1] 看这个 [图片#1: https://q/a.jpg]');
+    expect(body).toContain('[乙 #U2] [图片#2: C:/media/b.jpg] [图片#3: https://q/c.jpg]');
     expect(body).toContain('[图片#n] 是历史消息里的图片');
   });
 
   it('没有历史图片时不加图片说明，但仍提醒只回当前这句', () => {
-    const body = buildAgentBody('[当前]', [history[2]!], true, true, []);
+    const body = buildAgentBody('[当前]', [history[2]!], true, true, label, []);
     expect(body).not.toContain('[图片#n]');
-    expect(body).toContain('回复只针对下面 [Current message] 那一句');
+    expect(body).toContain('以上是群聊背景');
   });
 });
 

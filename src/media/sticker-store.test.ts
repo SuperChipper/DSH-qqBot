@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -182,6 +183,20 @@ describe('StickerStore', () => {
     const text = capped.promptSections()[1]?.text ?? '';
     expect(text).toContain('手1=fish_手1.png 手2=fish_手2.png 自3=fish_自3.png');
     expect(text).not.toContain('自1=');
+  });
+
+  it('按内容 MD5 认出收藏里的表情，区分自带包和自动收藏，收藏新图后能马上认出', () => {
+    const { media, root, store } = setup();
+    writeFileSync(join(root, 'fish_投稿.png'), Buffer.from('pack-bytes'));
+    writeFileSync(join(root, 'index.json'), JSON.stringify([{ emotion: '投稿', file: 'fish_投稿.png', bytes: 10 }]));
+    const md5 = (text: string): string => createHash('md5').update(text).digest('hex');
+
+    expect(store.collectionKind(md5('pack-bytes'))).toBe('pack');
+    expect(store.collectionKind(md5('pack-bytes').toUpperCase())).toBe('pack');
+    expect(store.collectionKind(md5('new-bytes'))).toBeUndefined();
+
+    store.save({ source: writeImage(media, 'new.png', 'new-bytes'), emotion: '新图' });
+    expect(store.collectionKind(md5('new-bytes'))).toBe('auto');
   });
 
   it('拒绝含路径分隔符的 file 参数', () => {

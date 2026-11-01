@@ -271,7 +271,7 @@ export async function registerDescribeVideoTool(
           try {
             const wavPath = join(work, 'audio.wav');
             await extractAudioWav(bins, path, plan.span, wavPath);
-            const text = await requestTranscription({ data: await readFile(wavPath), name: 'audio.wav' }, asr);
+            const text = await requestTranscription({ data: await readFile(wavPath), name: 'audio.wav' }, asr, logger);
             return text ? { text } : { note: 'no speech detected' };
           } catch (err) {
             logger.warn(`im-qqbot: video audio transcription failed: ${err instanceof Error ? err.message : String(err)}`);
