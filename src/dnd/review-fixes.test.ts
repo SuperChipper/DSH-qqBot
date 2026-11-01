@@ -26,6 +26,7 @@ import { ACK, DndTurnButtons, buildTurnKeyboard } from './turn-buttons.ts';
 import { SUNKEN_BELL } from './dungeons/sunken-bell.ts';
 import { AdventureLibrary, adventureFromDungeon } from './adventure.ts';
 import { mergeWithSenders } from '../gateway/middleware-setup.ts';
+import { makeSenderLabeler } from '../features/message-format.ts';
 import { encodeButtonData } from '../features/button-utils.ts';
 
 const BELL = adventureFromDungeon(SUNKEN_BELL);
@@ -192,11 +193,26 @@ describe('合并消息保留发送者', () => {
   function ctx(senderId: string, senderName: string, content: string): MiddlewareContext {
     return { message: { senderId, senderName, content }, state: {} } as unknown as MiddlewareContext;
   }
+  const label = makeSenderLabeler((id) => (id === 'A' ? 'U1' : 'U2'));
 
-  it('不是第一个人说的行带上自己的昵称和 openid', () => {
-    const merged = mergeWithSenders([ctx('A', '玩家丁', '躲到暗处'), ctx('B', '玩家乙', '跟上去'), ctx('A', '玩家丁', '再看看')]);
-    expect(merged.message.content).toBe('躲到暗处\n[玩家乙 (B)] 跟上去\n再看看');
+  it('多人合并时每行都带自己的昵称和群内别名，第一个人的后续行不会被算到别人头上', () => {
+    const merged = mergeWithSenders([ctx('A', '玩家丁', '躲到暗处'), ctx('B', '玩家乙', '跟上去'), ctx('A', '玩家丁', '再看看')], label);
+    expect(merged.message.content).toBe('[玩家丁 #U1] 躲到暗处\n[玩家乙 #U2] 跟上去\n[玩家丁 #U1] 再看看');
     expect(merged.state.mergedSenders).toEqual(['A', 'B']);
+    expect(merged.state.senderTagged).toBe(true);
+  });
+
+  it('(@you) 只跟在真的 @ 了 bot 的那一行后面', () => {
+    const b = ctx('B', '玩家乙', '跟上去');
+    b.state.mention = { wasMentioned: true };
+    const merged = mergeWithSenders([ctx('A', '玩家丁', '笑死'), b], label);
+    expect(merged.message.content).toBe('[玩家丁 #U1] 笑死\n[玩家乙 #U2] 跟上去 (@you)');
+  });
+
+  it('同一个人连发几条时不加行标签，交给入站组装整体加', () => {
+    const merged = mergeWithSenders([ctx('A', '玩家丁', '一'), ctx('A', '玩家丁', '二')], label);
+    expect(merged.message.content).toBe('一\n二');
+    expect(merged.state.senderTagged).toBeUndefined();
   });
 });
 

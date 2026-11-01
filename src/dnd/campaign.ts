@@ -107,6 +107,10 @@ export interface InitiativeState {
   /** 当前行动者在 order 里的下标 */
   turn: number;
   order: InitiativeEntry[];
+  /** 这场战斗已经给过完整回合提示的角色类别；之后的回合只给精简提示（见 turnPrompt） */
+  briefed?: Array<'pc' | 'monster'>;
+  /** 出现了反应/借机攻击/指针修正等破例：下一个 PC 回合重新给完整提示 */
+  rebrief?: boolean;
 }
 
 export interface CampaignSummary {
@@ -149,11 +153,15 @@ export interface Campaign {
   announced: string[];
   /** false = 还在开场（没进第一个场景）；旧存档没有这个字段，当作已开始 */
   begun?: boolean;
+  /** 这一次开团（/dnd start）的时间：停团时据此判断这次有没有写过进度 */
+  sessionStartedAt?: number;
 }
 
 const MAX_LOG = 30;
 const MAX_SNAPSHOTS = 40;
 const MAX_SUMMARIES = 10;
+/** 一条进度/结团摘要的上限：每次开团都整条注入 */
+export const SUMMARY_MAX_CHARS = 1500;
 const SUMMARY_LOG_LINES = 5;
 
 /** 不在这里列出的状态也允许，只是不做特殊处理 */
@@ -981,7 +989,7 @@ export function partyPositions(c: Campaign): Map<string, Character[]> {
 // ── 行动界限 ──
 
 export interface ActOptions {
-  /** 宣告这个行动的玩家 openid（来自消息里的 [昵称 (openid)]） */
+  /** 宣告这个行动的玩家 openid（模型填消息标签 [昵称 #U3] 里的别名，dnd_* 工具换回 openid） */
   declaredBy?: string;
   /** DM 要求的对抗/反应/借机攻击：不受回合和玩家绑定限制 */
   reaction?: boolean;
@@ -998,7 +1006,7 @@ function assertDeclaredByOwner(ch: Character, options: ActOptions, what: string)
   const owner = `〈${ch.player ?? ch.playerId}〉`;
   if (options.declaredBy !== ch.playerId) {
     throw new Error(
-      `${ch.name} 是${owner}的角色，${what}只能由他本人宣告（declared_by 填他的 openid）。`
+      `${ch.name} 是${owner}的角色，${what}只能由他本人宣告（declared_by 填他消息标签里的编号，如 U3）。`
       + '别人说的只当提议，去问他本人；DM 要求的对抗检定或反应传 reaction=true。',
     );
   }
@@ -1282,8 +1290,25 @@ export function resourceTag(ch: Character): string {
 export function addSummary(c: Campaign, text: string, now = Date.now()): void {
   const value = text.trim();
   if (value.length === 0) return;
-  c.summaries.push({ at: now, text: value.slice(0, 1500) });
+  c.summaries.push({ at: now, text: value.slice(0, SUMMARY_MAX_CHARS) });
   if (c.summaries.length > MAX_SUMMARIES) c.summaries.splice(0, c.summaries.length - MAX_SUMMARIES);
+}
+
+/** 停团兜底摘要取的日志条数 */
+const FALLBACK_LOG_LINES = 15;
+
+/**
+ * 停团时这次开团没写过进度（/dnd end 直接停、模型没调 dnd_progress/dnd_end），就用上一条进度 + 最近日志拼一条，
+ * 下次开团的「上次进度」至少接得上。只注入最后一条摘要，所以要把上一条带上，不然旧线头会丢。
+ */
+export function ensureSessionSummary(c: Campaign, now = Date.now()): boolean {
+  const last = c.summaries.at(-1);
+  if (last !== undefined && last.at >= (c.sessionStartedAt ?? 0)) return false;
+  const recent = c.log.slice(-FALLBACK_LOG_LINES);
+  if (recent.length === 0) return false;
+  const previous = last === undefined ? '' : `${last.text.slice(0, 700)}\n之后：`;
+  addSummary(c, `（停团时没写进度，以下是自动整理的最近记录）\n${previous}${recent.join('；')}`, now);
+  return true;
 }
 
 // ── 每回合注入的精简摘要 ──

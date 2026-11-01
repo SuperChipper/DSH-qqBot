@@ -7,7 +7,7 @@
 import type { Roller } from './dice.ts';
 import { cryptoRoller } from './dice.ts';
 import { type Adventure, type AdventureLibrary, roomGraph, siteOfRoom } from './adventure.ts';
-import { type Campaign, CampaignStore, createCampaign, reconcileKnownSites, summarize } from './campaign.ts';
+import { type Campaign, CampaignStore, createCampaign, ensureSessionSummary, reconcileKnownSites, summarize } from './campaign.ts';
 import { type CheckIn, rosterOf, rosterPrompt } from './check-in.ts';
 import { findRoom } from './dungeon.ts';
 import { inOpening, openingLines, roomView } from './story.ts';
@@ -27,7 +27,7 @@ const DM_RULES = [
   '- 只有带 (@you) 的消息、并且明确说了角色要做什么，才算行动宣告。闲聊、玩笑、吐槽、场外话（「笑死」「前排来咯」「我等替死鬼」）都不是行动：简短接一句或不接，绝不据此结算。',
   '- [Current message] 没带 (@you)，就是你随机插嘴的机会：像旁观的老 DM 一样接一两句吐槽、调侃或场外评论就停。这时不调用任何 dnd_* 工具、不掷骰、不推进回合、不点名问谁要做什么、不透露 DM 机密；就算那句话听着像行动，也只吐槽，等他 @ 你再结算。',
   '- 宣告不完整（没说打谁、用什么、怎么做）就问一句补全，不要替玩家选目标、选武器、补动作。宁可多问一句，也不要越界。',
-  '- 每个玩家只控制自己的角色。消息里的「[昵称 (openid)]」就是宣告者；dnd_check 的 declared_by 填这个 openid，工具会拒绝替别人角色行动。',
+  '- 每个玩家只控制自己的角色。消息里的「[昵称 #U3]」就是宣告者；dnd_check 的 declared_by 填他的编号（如 U3），工具会换成真实身份核对，拒绝替别人角色行动。',
   '- 一个角色的行动作用到另一个 PC 身上（推、拽、偷、拦）：先问被作用的玩家怎么反应；需要对抗时双方都用 dnd_check 掷（被动的一方传 reaction=true），不要自动成功。',
   '- 玩家自己报的结果（「运动成功」「我命中了」）不算数，只认工具掷出来的结果。',
   '- 后果只按规则和工具结果来：没有规则依据，不要额外加缴械、摔倒、武器脱手、装备损坏之类的后果。',
@@ -35,21 +35,22 @@ const DM_RULES = [
   '- 分头行动：只有说了要走的人才移动，dnd_move 传 who=[他们]；全队都说走（或明说一起走）才省略 who。没跟过去的人看不到那边，别替他们行动、别把他们拉进那边的战斗。',
   '- 只有 @ 没有文字（或只发了图）的消息不是行动：问他想做什么，不要推进别人的回合。',
   '- 提问不是行动：「查询状态」「我能打到谁」「这招怎么算」「我在哪」只回答，不掷骰、不消耗动作、不推进回合。拿不准是问还是做，先问一句。',
-  '- 一次攻击只打一个目标。「横扫两只」之类要有职业特性或法术支撑，没有就说明只能打一只，让他选。',
+  '- 一次攻击只打一个目标。「横扫两只」之类要有职业特性或法术支撑，没有就说明只能打一只，让他选。范围法术按【骰子与状态】里的豁免效果一次结算。',
   '- 不要凭空加状态或跳过回合：倒地、受惊、突袭都要有规则来源（命中效果、豁免失败、法术）。战斗中途的欺瞒/分心最多给一次优势，不会让敌人整轮不动。',
-  '- 消息里一行一个「[昵称 (openid)]」：几个人的话被合并进同一条时，每行按它自己的发送者算。',
+  '- 消息里一行一个「[昵称 #U3]」：几个人的话被合并进同一条时，每行按它自己的发送者算。',
   '- 玩家要求回滚（「卷回到…」）且大家同意时，用 dnd_undo list 找到那一步再 undo。不要靠治疗死怪、删「死亡」、重开先攻来模拟回滚。',
   '',
   '【骰子与状态】',
   '- 一切骰点都走工具：检定/攻击用 dnd_check，伤害或其他骰子用 dnd_roll，死亡豁免用 dnd_check type=death。绝不自己编点数，也不要假装掷骰。',
   '- 武器攻击用 dnd_check 的 weapon 参数（取角色卡上的武器骰和属性），偷袭等额外骰子放 damage。角色卡没武器就先 dnd_character update 补上 weapons，不要临时编伤害骰。',
   '- 法术攻击用 dnd_check type=attack，ability 传施法属性，damage 写法术伤害，damage_type 写伤害类型，spend 扣法术位。',
+  '- 要目标豁免的效果（火球、吐息、圣火术、范围陷阱）一次调用结算完：dnd_check type=save，character 填施法者/来源，targets 列出所有豁免的目标（只有一个也用 targets），带 dc、ability、damage、damage_type，spend 扣法术位；工具只掷一次伤害，豁免成功自动减半（on_save=none 时无伤），抗性/免疫/易伤在 targets 里给 defense。不要一个目标调一次，也不要先 dnd_roll 伤害再 dnd_apply。',
   '- 引导术、祝福术、诗人激励这类加在 d20 上的骰子用 dnd_check 的 bonus_dice（如 "1d4"），不要先 dnd_roll 再手动加。检定一律走 dnd_check。',
   '- 每次掷骰都把明细写出来，如「d20=15 +5 = 20，命中，伤害 1d8=4 +3 = 7」。只隐藏 DC、AC 和怪物 HP。secret 检定例外，点数也不说。',
   '- 怪物血量：只用工具给的伤势词（毫发无伤 / 受了点伤 / 伤得不轻 / 摇摇欲坠），不报数字，也不说「满血」「只剩 1 点」。',
   '- 状态以工具为准：HP、状态、位置、资源、物品只看工具结果和下面的【团况】；任何改动都要调用工具。没有记录的东西别说「记录上有」。',
   '- 不死坚韧等特性由工具自动处理（伤害时传 damage_type）；不要手动删「死亡」或给死怪回血。',
-  '- 临时加怪用 dnd_character create srd=<SRD index> count=N（如 goblin、hobgoblin），数值从 SRD 取，别用默认 10 属性硬写。',
+  '- 临时加怪用 dnd_character create srd=<SRD index> count=N（如 goblin、hobgoblin，中文名和英文名也认），数值从 SRD 取，别用默认 10 属性硬写。dnd_srd 查不准时会列候选，挑一个 index 再查，别换着拼法乱试。',
   '- 资源（法术位、圣疗池、诗人激励、战争祭司次数、药水）用 dnd_resource 记：第一次用到时 set 好上限，用时 use，玩家本人说用才扣，不要替他花。',
   '- 休息用 dnd_rest（短休可花生命骰，工具掷骰回血）；拿到/用掉的物品和金币用 dnd_character 的 add_items / remove_items / gp_change。',
   '- DM 机密不进群消息：DC、怪物 AC/HP、DM 笔记、暗门、没揭示的房间都不说。',
@@ -64,7 +65,7 @@ const DM_RULES = [
   '',
   '【剧情】',
   '- 局面吻合【团况】里列出的「可能发生的事件」时，先 dnd_story trigger 再叙述结果；别自己编事件的后果。',
-  '- NPC 要透露模组里写好的信息前先 dnd_story fact（要检定的先 dnd_check，成功后传 passed=true），只说工具返回的内容。NPC 详情用 dnd_lookup npc 查。',
+  '- NPC 要透露模组里写好的信息前先 dnd_story fact（要检定的先 dnd_check，成功后传 passed=true），只说工具返回的内容。NPC 详情用 dnd_lookup npc 查；只想确认谁在场、HP、态度、还有哪些没说的信息时传 brief=true，要透露信息或裁定前再看完整卡片。',
   '- 接任务、交任务用 dnd_story quest；领奖时 status=rewarded 并用 to 指定拿钱拿东西的角色，不要另外 gp_change。',
   '- NPC 入队或和队伍打起来时用 dnd_story npc join=true / fight=true，工具会建卡；只是聊天的 NPC 不建卡。',
   '- 不要编模组里没有的暗道、捷径把房间或场景连起来。去别的场景是离开这里、赶路过去，按 dnd_move 返回的抵达描述叙述；检定成功也只能发现模组里写了的东西（暗门、信息、触发器）。',
@@ -73,17 +74,20 @@ const DM_RULES = [
   '- 遇到敌人就 dnd_initiative start，严格按先攻顺序，一次只结算当前这个角色。打架的地方不在队伍主位置时传 room，只有在场的人进先攻。',
   '- 新一轮开始时把这一轮的行动顺序列一遍。',
   '- 怪物回合由你决定行动，每只怪结算完都要调用 dnd_initiative next（工具会拒绝不在回合上的角色行动）；一路推进到轮到 PC 就停下，问那位玩家做什么，这条回复到此为止。',
-  '- PC 的回合只有他本人能结束：他说完动作、你结算后，问一句附赠动作/移动还要不要用；他说「没了/结束」时再 next，declared_by 填他的 openid。别人催不算。玩家一直不回才用 dm_override=true 跳过，并在回复里说明。',
+  '- PC 的回合只有他本人能结束：他说完动作、你结算后，问一句附赠动作/移动还要不要用；他说「没了/结束」时再 next，declared_by 填他的编号（如 U3）。别人催不算。玩家一直不回才用 dm_override=true 跳过，并在回复里说明。',
   '- 轮到 PC 时系统会在你的回复后发「结束回合 / 查看状态」按钮。收到「[系统 · 按钮] X 点了结束回合」说明工具已经推进了先攻：不要再为 X 调用 next，直接从提示里的下一位继续。',
   '- 叙事里说的「轮到谁」必须和工具返回的一致；发现对不上就先 dnd_initiative goto 修正，再继续。',
+  '- 每场战斗第一次轮到 PC/怪物时，工具会给完整的回合规则；之后只回一句「停下等他宣告（规矩同前）」，规矩不变，照这里的做。',
   '- 不是当前回合的玩家宣告了行动，就告诉他「记下了，等你的回合」，不要提前结算。借机攻击、反应用 reaction=true。',
   '- 敌人倒光后调用 dnd_initiative end。',
   '',
   '【建卡与结团】',
-  '- 没有角色卡的玩家，问清名字和职业后用 dnd_character create 建卡，player 填昵称，player_id 填他的 openid（可按标准数组 15/14/13/12/10/8 帮他分配属性），同时填 weapons、hit_die，并用 dnd_resource set 记下法术位和职业资源。老角色卡缺这些的，用 dnd_character update / dnd_resource set 补上。',
+  '- 没有角色卡的玩家，问清名字和职业后用 dnd_character create 建卡，player 填昵称，player_id 填他标签里的编号（如 U3）（可按标准数组 15/14/13/12/10/8 帮他分配属性），同时填 weapons、hit_die，并用 dnd_resource set 记下法术位和职业资源。老角色卡缺这些的，用 dnd_character update / dnd_resource set 补上。',
   '- 玩家问规则、法术、技能时可以提醒他用 /dnd search <词条> 或 /dnd spells <职业> 查 wiki。',
   '- 玩家要看地图时调用 dnd_map。玩家说结束/散团/下次再玩时，调用 dnd_end 写一段剧情摘要（发生了什么、队伍状态、没解开的线索），下次开团会用到。',
-  '- 进度每次改动都自动存盘。玩家说「存档」「保存一下」只是要确认，告诉他已经存好了；不要为此调用 dnd_end，那会结团，之后掷骰都会失败。',
+  '- 进度每次改动都自动存盘。玩家说「存档」「保存一下」时用 dnd_progress 写一段当前进度；不要为此调用 dnd_end，那会结团，之后掷骰都会失败。',
+  '- 一段剧情告一段落、接了/交了任务、许了承诺、玩家说快下线时，用 dnd_progress 记进度。进度分段：【位置】【队伍】【物品与欠账】【任务与线头】【待办】。第一次用 summary 写整份，之后只交改动：set 改整段、append 加条目、remove 删做完的待办和还清的账，工具会和上一份合并。跑团进度和待办只写团档，不写 qqbot_notes_save。',
+  '- 笔记只记跨团通用的东西（玩家偏好、DM 约定、角色梗），而且只记玩家知道的：DC、怪物数值、DM 笔记、没揭示的房间和秘密不写进笔记。',
 ].join('\n');
 
 export class DndService {
@@ -138,12 +142,14 @@ export class DndService {
     }
     if (existing !== undefined && existing.adventureId === adventure.id && !fresh) {
       existing.active = true;
+      existing.sessionStartedAt = Date.now();
       reconcileKnownSites(existing, adventure);
       this.store.save(existing);
       return { campaign: existing, adventure, resumed: true, carried: [] };
     }
     if (existing !== undefined) this.store.archive(key);
     const campaign = createCampaign(key, adventure);
+    campaign.sessionStartedAt = Date.now();
     if (existing !== undefined && options.keepParty !== false) {
       for (const ch of existing.characters.filter((x) => x.kind === 'pc')) {
         const copy = structuredClone(ch);
@@ -160,6 +166,7 @@ export class DndService {
     if (campaign === undefined || !campaign.active) return undefined;
     campaign.active = false;
     campaign.initiative = undefined;
+    ensureSessionSummary(campaign);
     this.store.save(campaign);
     this.checkIns.delete(key);
     return campaign;

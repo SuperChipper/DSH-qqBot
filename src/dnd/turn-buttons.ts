@@ -15,7 +15,7 @@ import { decodeButtonData, encodeButtonData } from '../features/button-utils.ts'
 import { type Campaign, findCharacter, nextTurn, playerStatus } from './campaign.ts';
 import { type CheckIn, arrivalNotice, checkInHint, createCheckIn, isComplete, kickoffMessage, markArrived, rosterOf, rosterText } from './check-in.ts';
 import type { DndService } from './dnd-service.ts';
-import { turnPrompt } from './dnd-tools.ts';
+import { combatTurnPrompt } from './dnd-tools.ts';
 
 /** acknowledgeInteraction 的返回码：QQ 客户端据此弹提示 */
 export const ACK = { ok: 0, failed: 1, duplicate: 3, denied: 4 } as const;
@@ -294,7 +294,7 @@ export class DndTurnButtons {
 
     const next = this.service.store.update(key, (c) => {
       const { round, current, newRound } = nextTurn(c);
-      return { round, newRound, prompt: turnPrompt(findCharacter(c, current.name), current.name) };
+      return { round, newRound, prompt: combatTurnPrompt(c, current.name) };
     }, `按钮 结束回合 ${pc.name}`);
     this.logger.info(`im-qqbot: 跑团按钮结束回合 key=${key} ${pc.name} by=${clicker ?? '?'}`);
 

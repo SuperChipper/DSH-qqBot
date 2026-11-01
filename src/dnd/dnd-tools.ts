@@ -19,6 +19,7 @@ import {
   type CharacterKind,
   type HpChange,
   addSummary,
+  SUMMARY_MAX_CHARS,
   UNDEAD_FORTITUDE,
   applyDamage,
   assertCanAct,
@@ -48,6 +49,7 @@ import {
   pushLog,
   recordDeathFailures,
   removeCharacter,
+  resourceTag,
   requireCharacter,
   requireInitiative,
   rest,
@@ -76,6 +78,7 @@ import {
   leadsCard,
   learnLead,
   npcAlive,
+  npcBrief,
   npcCard,
   npcCharacterInput,
   npcRoom,
@@ -83,6 +86,7 @@ import {
   pendingTriggers,
   questCard,
   revealFact,
+  roomBrief,
   roomCard,
   setChapter,
   setFlag,
@@ -92,6 +96,9 @@ import {
   updateNpc,
 } from './story.ts';
 import { ABILITIES, ABILITY_NAMES, type Ability, type Skill, SKILLS, parseAbility, parseSkill, skillLabel } from './rules.ts';
+import { applyProgressPatch, isEmptyPatch, parseProgressPatch } from './progress-patch.ts';
+import { type SrdEntry, type SrdKind, candidatesText, resolveSrdQuery, zhTable } from './srd-lookup.ts';
+import { DEFENSE_NAMES, type SaveTarget, parseDefense, parseSaveTargets, resolveSaveEffect, saveDamage } from './save-effect.ts';
 
 export const DND_TOOL_PREFIX = 'dnd_';
 
@@ -107,6 +114,16 @@ export interface DndToolDeps {
   sendImage(record: SessionRecord, path: string, caption?: string): Promise<void>;
   /** 先攻指针变了（start/next/goto）：轮到 PC 时由按钮模块在回复发完后发「结束回合」按钮 */
   onTurnChange?(record: SessionRecord): void;
+  /** 群成员短别名（#U3）和 openid 互换；不传时 declared_by / player_id 按原样当 openid */
+  members?: MemberIds;
+}
+
+/** 模型只看得到群内短别名，要真实 openid 的参数由这里换回去 */
+export interface MemberIds {
+  /** U3 / #U3（或本群已知的 openid）→ openid；查不到返回 undefined */
+  toOpenid(record: SessionRecord, value: string): string | undefined;
+  /** openid → 给模型看的别名（如 U3）；没见过的人返回 undefined */
+  display(record: SessionRecord, openid: string): string | undefined;
 }
 
 type Exec = { agent?: unknown; label?: string };
@@ -192,10 +209,11 @@ function weaponTags(w: Weapon): string {
   return tags.length > 0 ? `［${tags.join('，')}］` : '';
 }
 
-function sheet(ch: Character): string {
+/** who：把角色卡上绑定的 openid 换成给模型看的成员编号 */
+function sheet(ch: Character, who: (openid: string) => string = (id) => id): string {
   const abilities = ABILITIES.map((a) => `${ABILITY_NAMES[a]}${ch.abilities[a]}`).join(' ');
   const lines = [
-    `${ch.name}${ch.player ? `〈${ch.player}${ch.playerId ? ` ${ch.playerId}` : ''}〉` : ''}｜${ch.kind === 'pc' ? 'PC' : (ch.kind === 'npc' ? 'NPC' : '怪物')}${ch.className ? ` ${ch.className}` : ''} ${ch.level} 级`,
+    `${ch.name}${ch.player ? `〈${ch.player}${ch.playerId ? ` ${who(ch.playerId)}` : ''}〉` : ''}｜${ch.kind === 'pc' ? 'PC' : (ch.kind === 'npc' ? 'NPC' : '怪物')}${ch.className ? ` ${ch.className}` : ''} ${ch.level} 级`,
     `HP ${ch.hp}/${ch.maxHp}${ch.tempHp > 0 ? ` +${ch.tempHp}` : ''}  AC ${ch.ac}`,
     abilities,
   ];
@@ -218,6 +236,13 @@ function sheet(ch: Character): string {
   if (ch.srd) lines.push(`SRD：${ch.srd}`);
   if (ch.notes) lines.push(`备注：${ch.notes}`);
   return lines.join('\n');
+}
+
+/** dnd_character show brief=true：一行状态，够回答「我还剩多少血/法术位」 */
+export function characterBrief(c: Campaign, ch: Character): string {
+  const room = roomOf(c, ch);
+  return `${ch.name} HP ${ch.hp}/${ch.maxHp}${ch.tempHp > 0 ? `+${ch.tempHp}` : ''} AC ${ch.ac}`
+    + `${ch.conditions.length > 0 ? ` [${ch.conditions.join(',')}]` : ''}${resourceTag(ch)}${room !== undefined ? ` @${room}` : ''}`;
 }
 
 function parseSkills(values: string[] | undefined): Skill[] | undefined {
@@ -290,6 +315,64 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
 
   const sendersOf = (exec: Exec): string[] => recentSenderIds(recordOf(exec), SENDER_WINDOW_MS);
 
+  /** 模型写的成员编号（U3）→ openid；未知编号直接报错，不能原样当 openid 存进角色卡或拿去校验 */
+  const memberId = (exec: Exec, value: unknown, param: string): string | undefined => {
+    const raw = str(value);
+    if (raw === undefined || deps.members === undefined) return raw;
+    const openid = deps.members.toOpenid(recordOf(exec), raw);
+    if (openid === undefined) {
+      throw new Error(`不认识的成员编号「${raw}」：${param} 填那位玩家消息标签里的编号，例如「[阿乙 #U3]」就填 U3。`);
+    }
+    return openid;
+  };
+  const whoOf = (exec: Exec) => (openid: string): string => {
+    const alias = deps.members?.display(recordOf(exec), openid);
+    return alias === undefined ? openid : `#${alias}`;
+  };
+
+  /**
+   * dnd_check type=save 的伤害/多目标结算。spendFrom：花资源的人（施法者，或没有 targets 时掷豁免的人）；
+   * 来源不是角色（陷阱）时不扣资源。
+   */
+  const saveEffectText = (c: Campaign, args: Record<string, unknown>, targets: SaveTarget[], source: string | undefined, hasSheet: boolean): string => {
+    const ability = parseAbility(String(args.ability ?? ''));
+    if (ability === undefined) throw new Error(`dnd_check: 豁免要给 ability（如 敏捷），收到 ${String(args.ability ?? '')}`);
+    const spendKey = str(args.spend);
+    const spender = source ?? targets[0]!.name;
+    if (spendKey !== undefined && !hasSheet) throw new Error(`「${spender}」不是角色卡上的人，不能 spend`);
+    const spent = spendKey === undefined ? undefined : useResource(c, spender, spendKey);
+    const dc = int(args.dc);
+    const damage = str(args.damage);
+    const result = resolveSaveEffect(c, {
+      targets, ability, dc, damage, damageType: str(args.damage_type), onSave: args.on_save === 'none' ? 'none' : 'half',
+      advantage: advantageOf(args.advantage), bonus: int(args.bonus), bonusDice: str(args.bonus_dice), roller: service.roller,
+    });
+    const label = `${ABILITY_NAMES[ability]}豁免`;
+    const head = [
+      source !== undefined ? `${source} 的效果：` : '',
+      `${label}${dc !== undefined ? ` DC ${dc}` : ''}`,
+      result.damageRoll !== undefined
+        ? `，伤害 ${result.damageRoll.detail}${str(args.damage_type) ? ` ${str(args.damage_type)}` : ''}（成功${args.on_save === 'none' ? '无伤' : '减半'}）`
+        : '',
+    ].join('');
+    const lines = [head];
+    for (const o of result.outcomes) {
+      if (o.skipped !== undefined) {
+        lines.push(`- ${o.name}：${o.skipped}，跳过`);
+        continue;
+      }
+      const verdict = o.saved === undefined ? '' : ` → ${o.saved ? '成功' : '失败'}`;
+      const nat = o.natural === 20 ? '（天然 20）' : (o.natural === 1 ? '（天然 1）' : '');
+      const dmg = o.damage === undefined
+        ? ''
+        : `，${o.defense !== undefined ? `${DEFENSE_NAMES[o.defense]} ` : ''}受 ${o.damage}${o.change !== undefined ? `；${hpLine(o.change)}` : ''}`;
+      lines.push(`- ${o.name} ${o.detail}${verdict}${nat}${dmg}`);
+    }
+    if (spent !== undefined) lines.push(`用掉「${spent.key}」，剩 ${spent.resource.current}/${spent.resource.max}`);
+    lines.push(args.secret === true ? '（暗骰：点数和 DC 都不要告诉玩家）' : SECRET_NOTE);
+    return lines.join('\n');
+  };
+
   const register = (
     name: string,
     description: string,
@@ -338,7 +421,11 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     'dnd_check',
     'Resolve a d20 roll for a character: skill check, ability check, saving throw, attack, or death save. '
     + 'The DC (or the target\'s AC) stays hidden from players. For attacks with a known damage expression the hit '
-    + 'damage is rolled (crits double the dice) and applied to the target automatically.',
+    + 'damage is rolled (crits double the dice) and applied to the target automatically. '
+    + 'Save effects (fireball, breath weapon, sacred flame, a trap on several PCs): ONE call with type=save, '
+    + '`character` = the caster/source, `targets` = everyone who saves, plus dc, ability, damage; the tool rolls '
+    + 'damage once, rolls each save, halves on success (on_save), applies resistance/immunity and HP. Never loop '
+    + 'one call per target or pre-roll the damage.',
     {
       character: { type: 'string', description: 'Who rolls (character name or the player\'s nickname).' },
       type: { type: 'string', enum: ['skill', 'ability', 'save', 'attack', 'death'] },
@@ -350,13 +437,36 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       },
       dc: { type: 'integer', description: 'Difficulty class for skill/ability/save. Secret.' },
       target: { type: 'string', description: 'For type=attack: the character being attacked.' },
+      targets: {
+        type: 'array',
+        description: 'For type=save: creatures that make the save (then `character` is the caster or source, e.g. '
+          + 'a trap name). Only `name` is required per item. Use it even for one target.',
+        // 只用对象形式：不确定宿主/模型端是否支持 anyOf；运行时仍兼容纯字符串
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            advantage: { type: 'string', enum: ['none', 'advantage', 'disadvantage'] },
+            bonus: { type: 'integer' },
+            defense: { type: 'string', enum: ['resistant', 'immune', 'vulnerable'], description: 'Against this damage type.' },
+          },
+          required: ['name'],
+          additionalProperties: false,
+        },
+      },
+      on_save: { type: 'string', enum: ['half', 'none'], description: 'For type=save with damage: what a successful save takes (default half).' },
+      defense: {
+        type: 'string',
+        enum: ['resistant', 'immune', 'vulnerable'],
+        description: 'The attack target (or the lone saver when there are no `targets`) resists / is immune / vulnerable to this damage type.',
+      },
       weapon: { type: 'string', description: 'For type=attack: weapon name from the attacker\'s sheet; damage and ability come from it.' },
       damage: {
         type: 'string',
         description: 'For type=attack: damage expression for spells/special attacks, or extra dice such as sneak attack "1d6". '
-          + 'With `weapon` it is ADDED to the weapon damage.',
+          + 'With `weapon` it is ADDED to the weapon damage. For type=save: the effect\'s full damage, rolled once for all targets.',
       },
-      damage_type: { type: 'string', description: 'For type=attack: damage type, e.g. 光耀/穿刺 (radiant beats Undead Fortitude).' },
+      damage_type: { type: 'string', description: 'For attack/save damage: damage type, e.g. 光耀/穿刺/火焰 (radiant beats Undead Fortitude).' },
       advantage: { type: 'string', enum: ['none', 'advantage', 'disadvantage'] },
       bonus: {
         type: 'integer',
@@ -376,7 +486,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       secret: { type: 'boolean', description: 'Hidden check (passive perception, insight): do not reveal the roll.' },
       declared_by: {
         type: 'string',
-        description: 'openid of the player whose message declared this action (the id in "[昵称 (openid)]"). '
+        description: 'Member id of the player whose message declared this action: the #U number in their tag "[昵称 #U3]" (pass "U3"). '
           + 'Required for a PC acting on their own; omit for monsters/NPCs.',
       },
       reaction: {
@@ -387,13 +497,31 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     },
     ['character', 'type'],
     (args, exec) => mutate(exec, (c) => {
-      const ch = requireCharacter(c, String(args.character ?? ''));
       const type = String(args.type);
+      const actOptions = () => ({ declaredBy: memberId(exec, args.declared_by, 'declared_by'), reaction: args.reaction === true, recentSenders: sendersOf(exec) });
+      const targets = type === 'save' ? parseSaveTargets(args.targets) : undefined;
+      if (targets !== undefined && targets.length > 0) {
+        // character 是施法者/来源：是角色卡上的人就按主动行动校验并从他身上扣资源；陷阱之类的来源不校验
+        const source = findCharacter(c, String(args.character ?? ''));
+        if (source !== undefined) {
+          if (args.reaction === true && c.initiative !== undefined) c.initiative.rebrief = true;
+          assertCanAct(c, source, actOptions());
+        }
+        return saveEffectText(c, args, targets, source?.name ?? str(args.character) ?? '效果', source !== undefined);
+      }
+      const ch = requireCharacter(c, String(args.character ?? ''));
       const adv = advantageOf(args.advantage);
       const secret = args.secret === true;
+      if (type === 'save' && str(args.damage) !== undefined) {
+        // 没有 targets 但带了伤害：掷豁免的人自己挨这一下（踩中陷阱），走同一套减半/抗性结算
+        const defense = parseDefense(args.defense);
+        return saveEffectText(c, args, [{ name: ch.name, ...(defense !== undefined ? { defense } : {}) }], undefined, true);
+      }
       // 豁免和死亡豁免是被动发生的，不需要宣告；攻击和检定是主动行动
       if (type !== 'save' && type !== 'death') {
-        assertCanAct(c, ch, { declaredBy: str(args.declared_by), reaction: args.reaction === true, recentSenders: sendersOf(exec) });
+        // 打断回合顺序的反应/借机攻击之后，下一个 PC 回合重新给完整的停手提示
+        if (args.reaction === true && c.initiative !== undefined) c.initiative.rebrief = true;
+        assertCanAct(c, ch, actOptions());
       }
       const spendKey = str(args.spend);
       const spent = spendKey === undefined ? undefined : useResource(c, ch.name, spendKey);
@@ -434,8 +562,10 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
               : undefined;
             const dmg = rollExpression(crit ? critExpression(expression) : expression, gwf?.roller ?? service.roller);
             const rerolled = gwf !== undefined && gwf.rerolls.length > 0 ? `（巨武器战斗重投：${gwf.rerolls.join('、')}）` : '';
-            lines.push(`伤害 ${dmg.detail}${rerolled}`);
-            const change = applyDamage(c, target.name, dmg.total, { crit, damageType: str(args.damage_type), roller: service.roller });
+            const defense = parseDefense(args.defense);
+            const amount = saveDamage(dmg.total, false, 'half', defense);
+            lines.push(`伤害 ${dmg.detail}${rerolled}${defense !== undefined ? `，${DEFENSE_NAMES[defense]} → ${amount}` : ''}`);
+            const change = applyDamage(c, target.name, amount, { crit, damageType: str(args.damage_type), roller: service.roller });
             // 倒地的 PC 被重击：死亡豁免记两次失败（applyDamage 已记一次）
             if (crit && change.before === 0 && target.kind === 'pc' && !target.conditions.includes('死亡')) {
               change.events.push(...recordDeathFailures(c, target.name, 1));
@@ -533,7 +663,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       gp_change: { type: 'integer', description: 'Gold gained (+) or spent (-).' },
       kind: { type: 'string', enum: ['pc', 'npc', 'monster'] },
       player: { type: 'string', description: 'Player nickname in the group (PCs).' },
-      player_id: { type: 'string', description: 'Player openid from "[昵称 (openid)]" (PCs). Binds the PC so only this player can act for it.' },
+      player_id: { type: 'string', description: 'Player member id from their tag "[昵称 #U3]" (pass "U3") (PCs). Binds the PC so only this player can act for it.' },
       class_name: { type: 'string', description: 'e.g. 战士 / 法师 / 游荡者' },
       level: { type: 'integer' },
       str: { type: 'integer' }, dex: { type: 'integer' }, con: { type: 'integer' },
@@ -564,6 +694,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         },
       },
       notes: { type: 'string' },
+      brief: { type: 'boolean', description: 'For show: one line (HP, AC, conditions, resources, room) instead of the full sheet.' },
     },
     ['action'],
     async (args, exec) => {
@@ -575,11 +706,12 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
             ? '还没有角色。'
             : campaign.characters.map((ch) => `${ch.name}${ch.player ? `〈${ch.player}〉` : ''} ${ch.kind} HP ${ch.hp}/${ch.maxHp}${roomOf(campaign, ch) ? ` @${roomOf(campaign, ch)}` : ''}`).join('\n');
         }
-        return sheet(requireCharacter(campaign, String(args.name ?? '')));
+        const target = requireCharacter(campaign, String(args.name ?? ''));
+        return args.brief === true ? characterBrief(campaign, target) : sheet(target, whoOf(exec));
       }
       // SRD 数据先取回来（网络请求不能放进同步的 mutate 里）
       const srdIndex = action === 'create' ? str(args.srd) : undefined;
-      const srdBase = srdIndex === undefined ? undefined : srdMonsterInput(await fetchSrd('monsters', srdIndex));
+      const srdBase = srdIndex === undefined ? undefined : srdMonsterInput(await requireSrd('monsters', srdIndex));
       return mutate(exec, (c) => {
         const name = str(args.name);
         if (name === undefined) throw new Error('dnd_character: name 不能为空');
@@ -594,7 +726,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const kind = str(args.kind) ?? (srdBase !== undefined ? 'monster' : undefined);
         if (kind !== undefined) input.kind = kind as CharacterKind;
         const optional = {
-          player: str(args.player), playerId: str(args.player_id), className: str(args.class_name), level: int(args.level), maxHp: int(args.max_hp),
+          player: str(args.player), playerId: memberId(exec, args.player_id, 'player_id'), className: str(args.class_name), level: int(args.level), maxHp: int(args.max_hp),
           ac: int(args.ac), attackBonus: int(args.attack_bonus), damage: str(args.damage), notes: str(args.notes),
           skills: parseSkills(strList(args.skills)), expertise: parseSkills(strList(args.expertise)), saves: parseAbilities(strList(args.saves)),
           weapons: parseWeapons(args.weapons), room: str(args.room), hitDie: str(args.hit_die), traits: strList(args.traits),
@@ -609,7 +741,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         if (count > 1) {
           const names = numberedNames(c, name, count);
           const made = names.map((n) => upsertCharacter(c, { ...input, name: n }).character);
-          return `已建卡 ${made.length} 个：${names.join('、')}\n${sheet(made[0]!)}`;
+          return `已建卡 ${made.length} 个：${names.join('、')}\n${sheet(made[0]!, whoOf(exec))}`;
         }
         if (action === 'create' && findCharacter(c, name)?.name === name) throw new Error(`已经有「${name}」了，改数据用 update，再加一只换个名字或传 count`);
         const roomsBefore = fightRooms(c);
@@ -626,7 +758,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const remove = strList(args.remove_items) ?? [];
         const gp = int(args.gp_change) ?? 0;
         if (add.length > 0 || remove.length > 0 || gp !== 0) changeInventory(c, character.name, add, remove, gp);
-        lines.push(sheet(requireCharacter(c, character.name)));
+        lines.push(sheet(requireCharacter(c, character.name), whoOf(exec)));
         return lines.join('\n');
       });
     },
@@ -705,7 +837,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       room: { type: 'string', description: 'For start: room id where the fight happens (default: the party\'s main room).' },
       name: { type: 'string', description: 'For goto.' },
       round: { type: 'integer', description: 'For goto.' },
-      declared_by: { type: 'string', description: 'For next on a PC turn: openid of that PC\'s player, who said they are done.' },
+      declared_by: { type: 'string', description: 'For next on a PC turn: member id (the #U number in "[昵称 #U3]", pass "U3") of that PC\'s player, who said they are done.' },
       dm_override: { type: 'boolean', description: 'For next: skip an absent player\'s turn. Say so in the reply.' },
     },
     ['action'],
@@ -723,7 +855,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const rolls = startInitiative(c, service.roller, strList(args.participants), room);
         turnChanged();
         const away = positionNote(c, adventure, rolls.map((r) => r.name), new Set([room ?? c.currentRoom]));
-        return `先攻：\n${rolls.map((r, i) => `${i + 1}. ${r.name} ${r.detail}`).join('\n')}\n第 1 轮，${turnPrompt(findCharacter(c, rolls[0]!.name), rolls[0]!.name)}${away}`;
+        return `先攻：\n${rolls.map((r, i) => `${i + 1}. ${r.name} ${r.detail}`).join('\n')}\n第 1 轮，${combatTurnPrompt(c, rolls[0]!.name, { recentSenders: sendersOf(exec) })}${away}`;
       }
       if (action === 'join') {
         const rooms = fightRooms(c);
@@ -738,15 +870,15 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           + away;
       }
       if (action === 'next') {
-        assertCanEndTurn(c, { declaredBy: str(args.declared_by), recentSenders: sendersOf(exec), dmOverride: args.dm_override === true });
+        assertCanEndTurn(c, { declaredBy: memberId(exec, args.declared_by, 'declared_by'), recentSenders: sendersOf(exec), dmOverride: args.dm_override === true });
         const { round, current, newRound } = nextTurn(c);
         turnChanged();
-        return `${newRound ? `进入第 ${round} 轮。` : ''}${turnPrompt(findCharacter(c, current.name), current.name)}`;
+        return `${newRound ? `进入第 ${round} 轮。` : ''}${combatTurnPrompt(c, current.name, { recentSenders: sendersOf(exec) })}`;
       }
       if (action === 'goto') {
         const entry = gotoTurn(c, String(args.name ?? ''), int(args.round));
         turnChanged();
-        return `已调整：第 ${requireInitiative(c).round} 轮，${turnPrompt(findCharacter(c, entry.name), entry.name)}`;
+        return `已调整：第 ${requireInitiative(c).round} 轮，${combatTurnPrompt(c, entry.name, { recentSenders: sendersOf(exec), force: true })}`;
       }
       if (action === 'end') {
         const { rounds, defeated } = endInitiative(c);
@@ -866,15 +998,18 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     'dnd_lookup',
     'Read adventure content (DM eyes only, never read it aloud wholesale): npc (who they are, what they know and '
     + 'whether it was said, quests they offer), quest, site (rules, rooms, what groups there know), room (notes, '
-    + 'events, NPCs), leads (all leads and which the players know). Omit id to list everything of that kind.',
+    + 'events, NPCs), leads (all leads and which the players know). Omit id to list everything of that kind. '
+    + 'brief=true (npc/room) returns one line: who is there with HP/conditions, attitude, unfired event and '
+    + 'unsaid fact ids. Use it for quick checks; read the full card before revealing facts or ruling on DM notes.',
     {
       kind: { type: 'string', enum: ['npc', 'quest', 'site', 'room', 'leads'] },
       id: { type: 'string', description: 'Id or name; omit to list.' },
+      brief: { type: 'boolean', description: 'npc/room only: one-line summary instead of the full card (default false).' },
     },
     ['kind'],
     (args, exec) => {
       const { campaign, adventure } = service.require(recordOf(exec).sessionKey);
-      return lookup(campaign, adventure, String(args.kind), str(args.id));
+      return lookup(campaign, adventure, String(args.kind), str(args.id), args.brief === true);
     },
   );
 
@@ -892,6 +1027,54 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       await deps.sendImage(record, path, str(args.caption));
       const { site, seen, total } = explored(campaign, adventure);
       return `「${site?.name ?? adventure.name}」地图已发到群里（已探索 ${seen}/${total} 个房间）。不用再复述地图内容。`;
+    },
+  );
+
+  register(
+    'dnd_progress',
+    'Save where the campaign stands without ending it: after a scene wraps up, a deal or quest changes, players '
+    + 'say they will stop soon, or they ask to save (存档). Progress is organised in sections 【位置】【队伍】'
+    + '【物品与欠账】【任务与线头】【待办】. Send ONLY what changed: `set` replaces whole sections, `append` adds '
+    + 'items, `remove` deletes items (any line containing the text); the tool merges them into the latest save. '
+    + 'Use `summary` only for the first save or a full rewrite. Only the merged latest one is injected next time. '
+    + 'Player-known information only: no DCs, monster stats or DM-only notes. Use this instead of '
+    + 'qqbot_notes_save for campaign progress.',
+    {
+      summary: { type: 'string', description: 'Full rewrite (replaces the whole save). Prefer set/append/remove.' },
+      set: {
+        type: 'object',
+        additionalProperties: { type: 'string' },
+        description: 'Section → new content, e.g. {"位置":"修道院地窖门口"}. "" deletes the section.',
+      },
+      append: {
+        type: 'object',
+        additionalProperties: { type: 'array', items: { type: 'string' } },
+        description: 'Section → items to add, e.g. {"待办":["给铁匠还 5gp"]}.',
+      },
+      remove: {
+        type: 'object',
+        additionalProperties: { type: 'array', items: { type: 'string' } },
+        description: 'Section → items to drop (finished to-dos, paid debts), matched by contained text.',
+      },
+    },
+    [],
+    (args, exec) => {
+      const text = str(args.summary);
+      const patch = parseProgressPatch(args);
+      if (text === undefined && isEmptyPatch(patch)) throw new Error('dnd_progress: 要给 summary（整份）或 set/append/remove（改动）');
+      return mutate(exec, (c) => {
+        // 先整份再叠改动：同一次调用里两者都给也说得通（重写 + 顺手勾掉一条）
+        const base = text ?? c.summaries.at(-1)?.text;
+        const result = isEmptyPatch(patch) ? { text: text!, changed: [], missed: [] } : applyProgressPatch(base, patch);
+        if (result.text.trim() === '') throw new Error('dnd_progress: 合并后进度为空，没有写入');
+        addSummary(c, result.text);
+        const notes = [
+          result.changed.length > 0 ? `改了：${result.changed.join('、')}` : '',
+          result.missed.length > 0 ? `没找到要删的：${result.missed.join('；')}` : '',
+          result.text.length > SUMMARY_MAX_CHARS ? `进度超过 ${SUMMARY_MAX_CHARS} 字被截断，删掉做完的条目或精简一下` : '',
+        ].filter(Boolean);
+        return `已写进团档，下次开团的「上次进度」用这一条。${notes.length > 0 ? `\n${notes.join('\n')}` : ''}`;
+      });
     },
   );
 
@@ -943,16 +1126,20 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
 
   register(
     'dnd_srd',
-    'Look up official 5e SRD data (monster stat block or spell) from dnd5eapi.co. Use the SRD index slug, e.g. '
-    + 'monster "goblin", "owlbear"; spell "fire-bolt", "cure-wounds".',
+    'Look up official 5e SRD data (monster stat block or spell) from dnd5eapi.co. `index` takes the SRD slug '
+    + '("goblin", "fire-bolt"), the English name, or a common Chinese name (地精, 火球术); typos, case and '
+    + 'spaces/hyphens are tolerated. When several entries fit, it lists candidates: pick one index and call again.',
     {
       kind: { type: 'string', enum: ['monster', 'spell'] },
-      index: { type: 'string' },
+      index: { type: 'string', description: 'Slug, English name or Chinese name.' },
     },
     ['kind', 'index'],
     async (args) => {
       const kind = args.kind === 'spell' ? 'spells' : 'monsters';
-      return formatSrd(kind, await fetchSrd(kind, String(args.index ?? '')));
+      const query = String(args.index ?? '');
+      const found = await lookupSrd(kind, query);
+      if ('candidates' in found) return candidatesText(query, found.candidates);
+      return `${found.note !== undefined ? `${found.note}\n` : ''}${formatSrd(kind, found.data)}`;
     },
   );
 
@@ -1036,7 +1223,7 @@ export function storyAction(
 }
 
 /** dnd_lookup：模组内容的 DM 视角卡片；不传 id 时列出这一类 */
-export function lookup(c: Campaign, adventure: Adventure, kind: string, id: string | undefined): string {
+export function lookup(c: Campaign, adventure: Adventure, kind: string, id: string | undefined, brief = false): string {
   if (kind === 'leads') return leadsCard(c, adventure);
   if (kind === 'npc') {
     if (id === undefined) {
@@ -1045,7 +1232,7 @@ export function lookup(c: Campaign, adventure: Adventure, kind: string, id: stri
     }
     const npc = findNpc(adventure, id);
     if (npc === undefined) throw new Error(`没有这个 NPC: ${id}`);
-    return npcCard(c, adventure, npc);
+    return brief ? npcBrief(c, npc) : npcCard(c, adventure, npc);
   }
   if (kind === 'quest') {
     if (id === undefined) {
@@ -1066,7 +1253,7 @@ export function lookup(c: Campaign, adventure: Adventure, kind: string, id: stri
   if (kind === 'room') {
     const room = resolveRoom(roomGraph(adventure), id ?? c.currentRoom);
     if (room === undefined) throw new Error(`没有这个房间: ${id}`);
-    return roomCard(c, adventure, room);
+    return brief ? roomBrief(c, adventure, room) : roomCard(c, adventure, room);
   }
   throw new Error(`dnd_lookup 不认识的 kind: ${kind}`);
 }
@@ -1103,17 +1290,98 @@ export function combatJoinHint(c: Campaign, room: string, movers: string[], spaw
     + '不要 end 再 start。';
 }
 
+export interface TurnPromptOptions {
+  /** false = 这场战斗已经给过完整规则，只给一句精简提示；缺省 true */
+  full?: boolean;
+  /** 轮到的 PC 的玩家最近没发过言 */
+  absent?: boolean;
+}
+
 /** 轮到某角色时给模型的指引：怪物继续结算，PC 必须停下等玩家 */
-export function turnPrompt(ch: Character | undefined, name: string): string {
+export function turnPrompt(ch: Character | undefined, name: string, options: TurnPromptOptions = {}): string {
+  const full = options.full !== false;
   if (ch === undefined || ch.kind !== 'pc') {
-    return `轮到 ${name}（由你决定行动）。结算完调用 dnd_initiative next，直到轮到某个 PC 为止。`;
+    return full
+      ? `轮到 ${name}（由你决定行动）。结算完调用 dnd_initiative next，直到轮到某个 PC 为止。`
+      : `轮到 ${name}（你决定），结算完 next。`;
   }
   if (ch.hp === 0 && !ch.conditions.includes('稳定') && !ch.conditions.includes('死亡')) {
     return `轮到 ${name}（0 HP）：掷死亡豁免 dnd_check type=death，然后 dnd_initiative next。`;
   }
-  return `轮到 ${name}〈${ch.player ?? '玩家'}〉。到此停下：描述局面后问他做什么，等他本人宣告；`
+  const player = ch.player ?? '玩家';
+  const absent = options.absent === true
+    ? `${player} 最近 10 分钟没发过言：问一句等他，一直不回才 next dm_override=true 跳过并在回复里说明。`
+    : '';
+  if (!full) return `轮到 ${name}〈${player}〉：停下等他本人宣告（规矩同前）。${absent}`;
+  return `轮到 ${name}〈${player}〉。到此停下：描述局面后问他做什么，等他本人宣告；`
     + '不要替他选目标、选武器或推断行动，这条回复里也不要再结算别人的回合。'
-    + '回复发出后系统会自动给他发「结束回合」按钮，不用你在回复里画按钮或列菜单。';
+    + `回复发出后系统会自动给他发「结束回合」按钮，不用你在回复里画按钮或列菜单。${absent}`;
+}
+
+/**
+ * 战斗里的回合提示：每场战斗 PC、怪物各给一次完整规则，之后只给精简一句——完整规则在 DM 守则里本来就有，
+ * 每个回合整段重复只是在上下文里堆 token。破例（反应/借机攻击打断了顺序、goto 修过指针）后下一个 PC 回合再给一次完整的。
+ * 会改 c.initiative 上的记录，调用方要在 store.update 里用。
+ */
+export function combatTurnPrompt(c: Campaign, name: string, extra: { recentSenders?: readonly string[]; force?: boolean } = {}): string {
+  const ch = findCharacter(c, name);
+  const state = c.initiative;
+  const kind = ch?.kind === 'pc' ? 'pc' : 'monster';
+  const absent = ch?.kind === 'pc' && ch.playerId !== undefined && extra.recentSenders !== undefined
+    && !extra.recentSenders.includes(ch.playerId);
+  if (state === undefined) return turnPrompt(ch, name, { absent });
+  const briefed = state.briefed ?? [];
+  const full = extra.force === true || !briefed.includes(kind) || (kind === 'pc' && state.rebrief === true);
+  if (!briefed.includes(kind)) state.briefed = [...briefed, kind];
+  if (kind === 'pc') delete state.rebrief;
+  else if (extra.force === true) state.rebrief = true;
+  return turnPrompt(ch, name, { full, absent });
+}
+
+const srdLists = new Map<SrdKind, SrdEntry[]>();
+
+/** SRD 全量索引（几百条 index+name），进程内只取一次；取不到时返回空，只靠中文名表和原样 slug */
+async function srdList(kind: SrdKind): Promise<SrdEntry[]> {
+  const cached = srdLists.get(kind);
+  if (cached !== undefined) return cached;
+  try {
+    const res = await fetch(`https://www.dnd5eapi.co/api/2014/${kind}`, { signal: AbortSignal.timeout(10_000) });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { results?: Array<{ index?: unknown; name?: unknown }> };
+    const list = (body.results ?? [])
+      .filter((r) => typeof r.index === 'string')
+      .map((r) => ({ index: String(r.index), name: String(r.name ?? r.index) }));
+    if (list.length > 0) srdLists.set(kind, list);
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+export type SrdLookup =
+  | { data: Record<string, unknown>; note?: string }
+  | { candidates: SrdEntry[] };
+
+/** 名字/拼错的 slug/中文名 → SRD 数据；有几个差不多的候选时不猜，交给调用方列出来 */
+export async function lookupSrd(kind: SrdKind, query: string, list?: SrdEntry[]): Promise<SrdLookup> {
+  const available = list ?? await srdList(kind);
+  const resolved = resolveSrdQuery(query, available, zhTable(kind));
+  if (resolved.kind === 'ambiguous') return { candidates: resolved.candidates };
+  if (resolved.kind === 'none') {
+    if (/\p{Script=Han}/u.test(query)) throw new Error(`SRD 里找不到「${query}」：中文名表没收录，换英文名或 index 再查`);
+    // 索引没取到（网络问题）时按原样试一次，至少不比以前差
+    if (available.length === 0) return { data: await fetchSrd(kind, query) };
+    throw new Error(`SRD 里找不到「${query}」，也没有相近的名字。换个英文名再查`);
+  }
+  const data = await fetchSrd(kind, resolved.index);
+  return resolved.kind === 'fuzzy' ? { data, note: `（「${query}」按 ${resolved.index} 查到）` } : { data };
+}
+
+/** 建卡用：拿不准是哪只就报错并列候选（建错怪比多问一次贵） */
+async function requireSrd(kind: SrdKind, query: string): Promise<Record<string, unknown>> {
+  const found = await lookupSrd(kind, query);
+  if ('candidates' in found) throw new Error(candidatesText(query, found.candidates));
+  return found.data;
 }
 
 export async function fetchSrd(kind: 'monsters' | 'spells', rawIndex: string): Promise<Record<string, unknown>> {

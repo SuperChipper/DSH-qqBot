@@ -529,6 +529,44 @@ export function roomCard(c: Campaign, adv: Adventure, room: DungeonRoom): string
   return lines.join('\n');
 }
 
+// ── brief=true 的一行摘要：只回答「谁在、状态怎样、还有什么没做」，详情再查完整卡片 ──
+
+function statusTag(ch: Character): string {
+  return `${ch.name} HP${ch.hp}/${ch.maxHp}${ch.conditions.length > 0 ? `[${ch.conditions.join(',')}]` : ''}`;
+}
+
+export function roomBrief(c: Campaign, adv: Adventure, room: DungeonRoom): string {
+  // 和 campaign.roomOf 同一口径；这里只能引类型，所以内联
+  const here = c.characters.filter((ch) => (ch.kind === 'monster' ? ch.room : (ch.room ?? c.currentRoom)) === room.id);
+  const npcs = npcsIn(c, adv, room.id);
+  const pending = pendingTriggers(c, adv, room.id);
+  const unsaid = (room.knowledge ?? []).flatMap((b) => b.facts).filter((f) => !c.facts.includes(f.id));
+  return [
+    `${room.name}(${room.id})${c.revealed.includes(room.id) ? '' : '[未探索]'}`,
+    `在场：${here.map(statusTag).join('、') || '无'}`,
+    npcs.length > 0 ? `NPC：${npcs.map((n) => `${n.name}(${n.id},${ATTITUDE_NAMES[npcAttitude(c, n)]})`).join('、')}` : '',
+    pending.length > 0 ? `待触发：${pending.map((t) => t.id).join(',')}` : '',
+    unsaid.length > 0 ? `未说信息：${unsaid.map((f) => f.id).join(',')}` : '',
+    room.shop !== undefined ? '有店铺' : '',
+  ].filter(Boolean).join('｜');
+}
+
+export function npcBrief(c: Campaign, npc: Npc): string {
+  const ch = npcCharacter(c, npc.id);
+  const unsaid = npc.knows.filter((f) => !c.facts.includes(f.id));
+  const offers = (npc.offers ?? []).map((id) => `${id}:${c.quests[id] ?? '未提'}`);
+  return [
+    `${npc.name}(${npc.id})`,
+    ATTITUDE_NAMES[npcAttitude(c, npc)],
+    `@${npcRoom(c, npc)}`,
+    npcAlive(c, npc.id) ? '' : '已死',
+    c.npcs[npc.id]?.met === true ? '见过' : '没见过',
+    ch !== undefined ? `已上场 ${statusTag(ch)}` : '',
+    unsaid.length > 0 ? `未说：${unsaid.map((f) => f.id).join(',')}` : '',
+    offers.length > 0 ? `任务 ${offers.join(',')}` : '',
+  ].filter(Boolean).join('｜');
+}
+
 export function leadsCard(c: Campaign, adv: Adventure): string {
   if (adv.leads.length === 0) return '这个模组没有线索。';
   return adv.leads.map((l) => {
