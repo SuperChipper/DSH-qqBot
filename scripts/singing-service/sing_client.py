@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 import uuid
 
@@ -84,7 +85,16 @@ def main():
     elif a.action == 'list':
         value = rpc(url+'/jobs', token=token)
     elif a.action == 'submit':
-        payload = {key: getattr(a, key) for key in ('song', 'stems_from', 'repair_from') if getattr(a, key)}
+        payload = {}
+        for key in ('song', 'stems_from', 'repair_from'):
+            value = getattr(a, key)
+            if not value:
+                continue
+            # 服务端用 Path.resolve() 校验输入路径，而服务是 WMI 隐藏启动的，cwd 不可预期；
+            # 相对路径在客户端（调用者的 cwd）就锚成绝对路径，免得被解析到别处或直接判越界。
+            if urlsplit(value).scheme not in ('http', 'https'):
+                value = str(Path(value).resolve())
+            payload[key] = value
         payload.update(options=json.loads(a.options_json), idempotency_key=a.idempotency_key)
         value = rpc(url+'/jobs', payload, token=token)
     elif a.action == 'status':

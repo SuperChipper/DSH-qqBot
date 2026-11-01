@@ -3,11 +3,13 @@ import argparse
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 
 SOURCE = Path(__file__).resolve().parent
-ROOT = Path(r'C:\Users\16257\Desktop\Dsh-bot\voice-lab')
+# voice-lab 与 dsh-qqbot 同级，按脚本位置推导，仓库整体搬家也不用改；目标不在该位置时用 VOICE_LAB_ROOT 覆盖。
+ROOT = Path(os.environ.get('VOICE_LAB_ROOT') or SOURCE.parents[2] / 'voice-lab')
 FILES = ['sing_service.py', 'sing_rvc_worker.py', 'sing_bridge.py', 'sing_api.py',
          'sing_process.py', 'sing_client.py', 'start-singing.ps1']
 MANIFEST = SOURCE/'deployment-plan.json'

@@ -6,19 +6,19 @@ Demucs / HP5 仍按任务运行。现有 `cover.py` 的独立 CLI 保留，仍�
 
 ## Agent 调用
 
-在 `C:\Users\16257\Desktop\Dsh-bot\voice-lab` 执行：
+在 `voice-lab` 目录执行（与 `dsh-qqbot` 同级）。输入与输出路径可以写相对路径，按**执行命令时的当前目录**解析：
 
 ```powershell
 # 按需幂等启动，提交后立即返回任务 ID；不要把整首推理绑在一次工具等待里。
-.\env\python.exe scripts\sing_client.py --ensure submit --song "C:\path\song.wav" --options-json '{"lead_back":"hp5"}'
+.\env\python.exe scripts\sing_client.py --ensure submit --song "..\tmp\song.wav" --options-json '{"lead_back":"hp5"}'
 .\env\python.exe scripts\sing_client.py status <id>
 .\env\python.exe scripts\sing_client.py logs <id>
 .\env\python.exe scripts\sing_client.py cancel <id>
-.\env\python.exe scripts\sing_client.py result <id> --out "C:\path\song_feiyu.mp3"
+.\env\python.exe scripts\sing_client.py result <id> --out "..\tmp\song_feiyu.mp3"
 
 # 可复用已有分离轨 / 局部修复，分别生成独立任务目录。
-.\env\python.exe scripts\sing_client.py --ensure submit --stems-from "C:\path\old-job" --options-json '{"lead_back":"hp5"}'
-.\env\python.exe scripts\sing_client.py --ensure submit --repair-from "C:\path\old-job" --options-json '{"repair_start":88,"repair_dur":12}'
+.\env\python.exe scripts\sing_client.py --ensure submit --stems-from "..\tmp\singing-service\jobs\<旧任务ID>\work" --options-json '{"lead_back":"hp5"}'
+.\env\python.exe scripts\sing_client.py --ensure submit --repair-from "..\tmp\singing-service\jobs\<旧任务ID>\work" --options-json '{"repair_start":88,"repair_dur":12}'
 ```
 
 `wait <id> --timeout 1800` 可用于终端。Agent 需要自动回传时，使用 pwsh 工具的
@@ -45,11 +45,12 @@ Demucs / HP5 仍按任务运行。现有 `cover.py` 的独立 CLI 保留，仍�
 请求示例：
 
 ```json
-{"song":"C:\\path\\song.wav","options":{"pitch":0,"lead_back":"hp5"},"idempotency_key":"chat-song-001"}
+{"song":"../tmp/song.wav","options":{"pitch":0,"lead_back":"hp5"},"idempotency_key":"chat-song-001"}
 ```
 
 也可把 `song` 换成 `stems_from` 或 `repair_from`，三者只能给一个。可选项只接受白名单，不能传任意 CLI
 参数、输出路径或工作目录。默认本地文件只允许位于 `Dsh-bot` / 服务数据目录内；URL 支持 HTTP/HTTPS。
+直接打 HTTP 接口时路径必须写绝对路径（服务端按自己的 cwd 解析），走 `sing_client.py` 则可以用相对路径。
 
 ## 启停与生命周期
 

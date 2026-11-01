@@ -3,19 +3,19 @@
 RVC 翻唱现在有异步服务，端口 `127.0.0.1:8766`。点歌优先使用此入口，旧笔记中的直接运行 cover.py 仍可用，
 但不会复用服务里的常驻 RVC 模型。
 
-从 `C:\Users\16257\Desktop\Dsh-bot\voice-lab` 执行：
+从 `voice-lab` 目录执行（与 `dsh-qqbot` 同级）：
 
 ```powershell
-.\env\python.exe scripts\sing_client.py --ensure submit --song "C:\Users\16257\Desktop\Dsh-bot\tmp\song.wav"
+.\env\python.exe scripts\sing_client.py --ensure submit --song "..\tmp\song.wav"
 .\env\python.exe scripts\sing_client.py status <id>
 .\env\python.exe scripts\sing_client.py logs <id>
 .\env\python.exe scripts\sing_client.py cancel <id>
-.\env\python.exe scripts\sing_client.py result <id> --out "C:\Users\16257\Desktop\Dsh-bot\tmp\song_feiyu.mp3"
+.\env\python.exe scripts\sing_client.py result <id> --out "..\tmp\song_feiyu.mp3"
 ```
 
 `submit` 立即返回 ID；不要等待整首推理才确认收到点歌。`--ensure` 会在服务没起时调用启动器，重复调用不会再开一份。
 选项用 `--options-json '{"lead_back":"hp5"}'`，也支持 `--stems-from <旧任务目录>` 和 `--repair-from <旧任务目录>`。
-本地输入文件需位于 Dsh-bot 内；URL 可直接作为 song。服务自动为每单分配独立目录并排队。
+本地输入文件需位于 Dsh-bot 内；URL 可直接作为 song。相对路径按执行命令时的当前目录解析，服务自动为每单分配独立目录并排队。
 
 要在唱完后自动发回：把 `sing_client.py wait <id> --timeout 1800` 放到 **pwsh 工具的
 `run_in_background: true`** 调用中，拿到后台 job ID 后结束当前回合，继续接聊天。
