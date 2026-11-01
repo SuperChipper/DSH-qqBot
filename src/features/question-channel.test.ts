@@ -342,44 +342,93 @@ describe('QuestionChannel.cancelPending', () => {
   });
 });
 
+/** 最小 waterfall：按注册顺序调用监听器，最后落到 fallback（模拟 Web 端 answerer） */
+function fakeWaterfall() {
+  const listeners: Array<{ handler: (...args: unknown[]) => unknown; options?: { global?: boolean; prepend?: boolean } }> = [];
+  const ctx = {
+    on: vi.fn((event: string, handler: (...args: unknown[]) => unknown, options?: { global?: boolean; prepend?: boolean }) => {
+      expect(event).toBe('user-questions/request');
+      const entry = { handler, options };
+      if (options?.prepend) listeners.unshift(entry); else listeners.push(entry);
+      return () => {
+        const i = listeners.indexOf(entry);
+        if (i >= 0) listeners.splice(i, 1);
+        return i >= 0;
+      };
+    }),
+  };
+  const fallback = vi.fn(async () => ({ answers: [] }) as UserQuestionResult);
+  const request = (req: UserQuestionRequest): Promise<UserQuestionResult> => {
+    const run = (i: number): Promise<UserQuestionResult> =>
+      i < listeners.length
+        ? (listeners[i]!.handler(req, () => run(i + 1)) as Promise<UserQuestionResult>)
+        : fallback();
+    return run(0);
+  };
+  return { ctx, request, fallback, listeners };
+}
+
 describe('QuestionChannel.install routing', () => {
-  it('routes QQ sessions to QQ channel and delegates others', async () => {
+  function qqChannel() {
     const sent: SentMessage[] = [];
     const record = makeRecord(sessionKey('c2c', 'u9'));
     (record as { sessionId?: string }).sessionId = 'sess-qq';
     const manager = createManager({ findBySessionId: (id) => (id === 'sess-qq' ? record : undefined) });
-    const ch = new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    let origCalled = 0;
-    const uq = { ask: vi.fn(async () => { origCalled += 1; return { answers: [] }; }) };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
+    return new QuestionChannel(manager, createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
+  }
 
-    await uq.ask({ questions: [q2('x')], agent: { id: 'sess-web' } });
-    expect(origCalled).toBe(1);
+  it('以 global + prepend 注册 user-questions/request answerer', () => {
+    const wf = fakeWaterfall();
+    qqChannel().install(wf.ctx);
+    expect(wf.ctx.on).toHaveBeenCalledWith('user-questions/request', expect.any(Function), { global: true, prepend: true });
+  });
 
-    const p = uq.ask({ questions: [q2()], agent: { id: 'sess-qq' } });
+  it('QQ 会话走 QQ 通道，其他会话 next() 交给 Web answerer', async () => {
+    const wf = fakeWaterfall();
+    const ch = qqChannel();
+    ch.install(wf.ctx);
+
+    await wf.request({ questions: [q2('x')], agent: { id: 'sess-web' } });
+    expect(wf.fallback).toHaveBeenCalledTimes(1);
+
+    const p = wf.request({ questions: [q2()], agent: { id: 'sess-qq' } });
     await new Promise((r) => setTimeout(r, 10));
     expect(ch.tryAnswer('c2c', 'u9', '1')).toBe(true);
     expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
-    expect(origCalled).toBe(1); // QQ 路径未触碰原实现
+    expect(wf.fallback).toHaveBeenCalledTimes(1); // QQ 路径未落到 Web
   });
 
-  it('uninstall restores the original ask', async () => {
-    const sent: SentMessage[] = [];
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, createLogger());
-    const uq: { ask: (r: UserQuestionRequest) => Promise<UserQuestionResult>; __qqQuestionPatched?: boolean } = {
-      ask: async () => ({ answers: [] }),
-    };
-    ch.install({ get: (n: string) => (n === 'userQuestions' ? uq : undefined) });
-    expect(uq.__qqQuestionPatched).toBe(true);
+  it('插件重载：旧实例卸载后新实例接管，QQ 会话仍走 QQ', async () => {
+    const wf = fakeWaterfall();
+    const stale = qqChannel();
+    stale.install(wf.ctx);
+    stale.uninstall();
+    expect(wf.listeners).toHaveLength(0);
+
+    const fresh = qqChannel();
+    fresh.install(wf.ctx);
+    const p = wf.request({ questions: [q2()], agent: { id: 'sess-qq' } });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(fresh.tryAnswer('c2c', 'u9', '1')).toBe(true);
+    expect(await p).toEqual({ answers: [{ id: 'q', selected: ['A'] }] });
+    expect(wf.fallback).not.toHaveBeenCalled();
+  });
+
+  it('重复 install 不会叠加监听器', () => {
+    const wf = fakeWaterfall();
+    const ch = qqChannel();
+    ch.install(wf.ctx);
+    ch.install(wf.ctx);
+    expect(wf.listeners).toHaveLength(1);
+  });
+
+  it('uninstall 让待答问题以 ASK_ABORTED 结束', async () => {
+    const wf = fakeWaterfall();
+    const ch = qqChannel();
+    ch.install(wf.ctx);
+    const p = wf.request({ questions: [q2()], agent: { id: 'sess-qq' } });
+    await new Promise((r) => setTimeout(r, 10));
     ch.uninstall();
-    expect(uq.__qqQuestionPatched).toBeUndefined();
-  });
-
-  it('disables gracefully when the userQuestions service is missing', () => {
-    const sent: SentMessage[] = [];
-    const logger = createLogger();
-    const ch = new QuestionChannel(createManager(), createSender(sent), { requireMention: false, askTimeoutMs: 60_000 }, logger);
-    ch.install({ get: () => undefined });
-    expect(logger.warn).not.toHaveBeenCalled();
+    await expect(p).rejects.toMatchObject({ code: 'ASK_ABORTED' });
   });
 });

@@ -65,13 +65,14 @@ function makeRequest(opts?: {
   };
 }
 
-function makeEvent(data: string | undefined, peer: { user?: string; group?: string }): InteractionEvent {
+function makeEvent(data: string | undefined, peer: { user?: string; group?: string; member?: string }): InteractionEvent {
   return {
     id: 'i1',
     type: 1,
     version: 1,
     ...(peer.group ? { group_openid: peer.group } : {}),
     ...(peer.user ? { user_openid: peer.user } : {}),
+    ...(peer.member ? { group_member_openid: peer.member } : {}),
     data: { type: 1, resolved: { ...(data !== undefined ? { button_data: data } : {}) } },
   } as InteractionEvent;
 }
@@ -203,6 +204,49 @@ describe('ApprovalChannel.install', () => {
 });
 
 describe('ApprovalChannel.handleInteraction', () => {
+  it.each([
+    { member: 'owner', decision: 'allow', outcome: 'allowed-once' },
+    { member: 'admin', decision: 'allow', outcome: 'allowed-once' },
+    { member: 'owner', decision: 'deny', outcome: 'rejected' },
+  ])('真实群回调只含 group_member_openid：$member 点击 $decision', async ({ member, decision, outcome }) => {
+    const rec = makeRecord(sessionKey('group', 'group-1'), 'group');
+    const sent: SentMessage[] = [];
+    const logger = createLogger();
+    const ch = new ApprovalChannel(createManager({ findBySessionId: () => rec, getSessionRecord: () => rec }),
+      createSender(sent), logger, (id) => id === 'owner' || id === 'admin');
+    const { handler } = installAndCapture(ch, sent);
+    const pending = handler(makeRequest(), () => Promise.resolve('unavailable'));
+    const event = makeEvent(JSON.stringify({ t: 'approval', d: decision }), { group: 'group-1', member });
+    expect(event.user_openid).toBeUndefined();
+    expect(ch.handleInteraction(event)).toBe(true);
+    await expect(pending).resolves.toBe(outcome);
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { member: 'stranger' },
+    {},
+    { member: 'stranger', user: 'owner' },
+  ])('普通成员、无身份和字段冲突不放行：%j', async (peer) => {
+    const rec = makeRecord(sessionKey('group', 'group-1'), 'group');
+    const sent: SentMessage[] = [];
+    const logger = createLogger();
+    const ch = new ApprovalChannel(createManager({ findBySessionId: () => rec, getSessionRecord: () => rec }),
+      createSender(sent), logger, (id) => id === 'owner');
+    const { handler } = installAndCapture(ch, sent);
+    const pending = handler(makeRequest(), () => Promise.resolve('unavailable'));
+    const settle = vi.fn();
+    void Promise.resolve(pending).then(settle);
+    const data = JSON.stringify({ t: 'approval', d: 'allow' });
+    expect(ch.handleInteraction(makeEvent(data, { group: 'group-1', ...peer }))).toBe(true);
+    await Promise.resolve();
+    expect(settle).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining(`sender=${peer.member ?? 'unknown'}`));
+    expect(sent.at(-1)?.text).toContain('只有 bot 主人或管理员');
+    ch.handleInteraction(makeEvent(data, { group: 'group-1', member: 'owner' }));
+    await expect(pending).resolves.toBe('allowed-once');
+  });
+
   it('settles deny as rejected and ignores unknown buttons', async () => {
     const sent: SentMessage[] = [];
     const ch = new ApprovalChannel(

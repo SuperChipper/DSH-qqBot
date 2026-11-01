@@ -1,8 +1,12 @@
 /**
  * QuestionChannel — 把 dsh 的 ask_user_question 桥接到 QQ 通道。
  *
- * 接入方式：包装 `userQuestions.ask`（而非 registerProvider），按 `request.agent.id`
- * 路由到 QQ 会话；非 QQ 会话委托宿主默认 provider（如 Web 弹出框），多通道共存。
+ * 接入方式：监听 `user-questions/request` waterfall（与 Web 端 answerer 同一条 seam），
+ * 按 `request.agent.id` 路由到 QQ 会话；非 QQ 会话 `next()` 交给链上其他 answerer。
+ *
+ * 不再包装 `userQuestions.ask`：那样的补丁挂在宿主服务实例上，插件单独重载（保存设置）时
+ * 旧补丁和旧 manager 留在原地，新实例又因「已打补丁」跳过安装，问题全落到 Web 端。
+ * 监听器归插件作用域所有，重载时由 Cordis 一起卸掉。
  *
  * 每会话一个显式状态机，三态语义：
  *   - 待答（pending 中）：等待当前题的回答
@@ -46,9 +50,13 @@ export interface UserQuestionResult {
   answers: UserQuestionAnswer[];
 }
 
-export interface UserQuestionsServiceLike {
-  ask: (request: UserQuestionRequest) => Promise<UserQuestionResult>;
-  __qqQuestionPatched?: boolean;
+/** 注册 waterfall 监听器所需的最小 ctx */
+export interface QuestionChannelContext {
+  on(
+    event: string,
+    handler: (...args: unknown[]) => unknown,
+    options?: { global?: boolean; prepend?: boolean },
+  ): () => unknown;
 }
 
 // ── 依赖接口（结构化，便于单测） ──
@@ -105,8 +113,7 @@ interface PendingEntry {
 
 export class QuestionChannel {
   private readonly pending = new Map<string, PendingEntry>();
-  private uq?: UserQuestionsServiceLike;
-  private origAsk?: UserQuestionsServiceLike['ask'];
+  private disposeListener?: () => unknown;
   private readonly manager: QuestionChannelManagerLike;
   private readonly sender: QuestionChannelSenderLike;
   private readonly config: QuestionChannelConfigLike;
@@ -125,37 +132,28 @@ export class QuestionChannel {
   }
 
   /**
-   * 包装 userQuestions.ask：QQ 会话走 QQ 通道，其余委托原实现。
-   * 幂等（已 patch 则跳过）；服务缺失或 ask 非函数时优雅禁用。
+   * 注册 user-questions/request answerer：QQ 会话走 QQ 通道，其余 next()。
+   *
+   * `global`：请求按 agent 作用域派发，根作用域监听器不带 global 会被过滤（同 approval/request）。
+   * `prepend`：排在 Web 端 answerer 前面，QQ 会话不会先被 Web 弹框认领。
+   * 不探测 userQuestions 服务：它可能晚于本插件挂载，没挂载时自然不会有请求到达。
    */
-  public install(ctx: { get(name: string): unknown }): void {
-    const uq = ctx.get('userQuestions') as UserQuestionsServiceLike | undefined;
-    if (!uq || uq.__qqQuestionPatched) return;
-    if (typeof uq.ask !== 'function') {
-      this.logger.warn('im-qqbot: userQuestions service lacks ask() — QQ question channel disabled');
-      return;
-    }
-
-    const self = this;
-    this.origAsk = uq.ask.bind(uq);
-    uq.ask = async function qqRoutedAsk(request: UserQuestionRequest): Promise<UserQuestionResult> {
+  public install(ctx: QuestionChannelContext): void {
+    this.disposeListener?.();
+    this.disposeListener = ctx.on('user-questions/request', (req: unknown, next: unknown) => {
+      const request = req as UserQuestionRequest;
+      const nextFn = next as () => Promise<UserQuestionResult>;
       const sessionId = request?.agent?.id;
-      const record = sessionId ? self.manager.findBySessionId(sessionId) : undefined;
-      if (record) return self.askViaQQ(record, request);
-      return self.origAsk!(request);
-    };
-    Object.defineProperty(uq, '__qqQuestionPatched', { value: true, configurable: true, enumerable: false });
-    this.uq = uq;
+      const record = sessionId ? this.manager.findBySessionId(sessionId) : undefined;
+      if (record) return this.askViaQQ(record, request);
+      return nextFn();
+    }, { global: true, prepend: true });
     this.logger.info('im-qqbot: QQ question channel installed');
   }
 
   public uninstall(): void {
-    if (this.uq && this.origAsk) {
-      this.uq.ask = this.origAsk;
-      delete this.uq.__qqQuestionPatched;
-      this.uq = undefined;
-      this.origAsk = undefined;
-    }
+    this.disposeListener?.();
+    this.disposeListener = undefined;
     for (const [, entry] of this.pending) {
       this.clearTimer(entry);
       this.removeAbort(entry);

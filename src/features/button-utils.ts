@@ -49,7 +49,13 @@ export interface AccessButtonData {
   d: 'allow' | 'deny';
 }
 
-export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData | AccessButtonData;
+export interface BrowserAccessButtonData {
+  t: 'browser-access';
+  p: string;
+  d: 'allow' | 'deny';
+}
+
+export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData | AccessButtonData | BrowserAccessButtonData;
 
 /** 编码 button_data（JSON 字符串） */
 export function encodeButtonData(data: ButtonData): string {
@@ -60,7 +66,7 @@ export function encodeButtonData(data: ButtonData): string {
 export function decodeButtonData(raw: string): ButtonData | undefined {
   try {
     const parsed = JSON.parse(raw) as Partial<ButtonData>;
-    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd' || parsed.t === 'access')) {
+    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd' || parsed.t === 'access' || parsed.t === 'browser-access')) {
       return parsed as ButtonData;
     }
   } catch {

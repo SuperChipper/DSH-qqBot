@@ -7,11 +7,16 @@
  *   - 对话窗口内：刚和 bot 聊过的人 +0.6，其他人 +0.2
  *   - 像在提问：+0.2
  *
- * 表情包（QQ 用 faceType=6 标记的单张图，或单张 gif）：人一般用表情包回表情包
+ * 表情包（QQ 用 faceType=6 标记的单张图，或单张 gif）：人会用表情包回表情包，但不会每张都回
  *   - 群友在复读同一张表情包（连续 3 条、至少两个人）：跟一张，同一串只跟一次
- *   - bot 刚说完话就有人甩表情包（在回应 bot）：+0.7
- *   - 对话窗口内刚聊过的人：+0.6
+ *   - bot 刚用表情包接过一张：这个群 5 分钟内不再靠表情包接话（复读除外）
  *   - bot 已经用表情包接过这个人，他还没说过文字又甩一张：不接（防止互刷）
+ *   - bot 刚说完话就有人甩表情包（在回应 bot）：+0.4
+ *   - 对话窗口内：刚聊过的人 +0.3，其他人 +0.1（表情包多半是在收尾，不像文字那样要接）
+ *   - 是 bot 自带的那套表情（画的就是它本人）：+0.7，基本是在逗它
+ *   - 是 bot 自己收藏过的表情：+0.2
+ *   单独一条理由（除了自带表情）都不够，要「刚说完话 + 窗口里的人」这类叠起来才接：
+ *   热闹的群里 bot 几乎一直在说话，「刚说完话」单独放行时差不多每张表情包都会被接
  *
  * 对话窗口：bot 被 @ 或接话后开窗（turn/end 时从回复结束起续期），窗口内刚聊过的人
  * 再说话基本都会被接，表现为连续对话；靠打分接的轮数到上限就关窗，避免和人无限对聊。
@@ -50,8 +55,12 @@ export interface DesireInput {
   stickerAnswered?: boolean;
   /** 这串复读 bot 已经跟过 */
   chainAnswered?: string;
+  /** bot 上次靠表情包接话距今(ms)；没接过为 undefined */
+  sinceStickerReply?: number;
   /** 开团中：不复读 */
   dnd?: boolean;
+  /** 当前这张表情包在 bot 收藏里的类型（按内容 MD5 比对） */
+  collection?: 'pack' | 'auto';
 }
 
 export interface DesireResult {
@@ -78,6 +87,8 @@ export interface ClassifiedMessage {
 
 /** bot 说完话后多久内的表情包算在回应 bot */
 export const STICKER_REACT_MS = 30_000;
+/** bot 用表情包接过一张后，这个群多久内不再靠表情包接话 */
+export const STICKER_COOLDOWN_MS = 5 * 60_000;
 /** 复读判定：连续几条同一张表情包（含当前） */
 const CHAIN_LENGTH = 3;
 const RECENT_LIMIT = 5;
@@ -155,15 +166,29 @@ function scoreSticker(input: DesireInput, stickerId: string): DesireResult {
   if (!input.dnd && stickerId !== input.chainAnswered && isChain(stickerId, input.senderId, input.recent ?? [])) {
     return { score: 1, reasons: ['sticker-chain'], mode: 'sticker-chain', stickerId };
   }
+  if (input.sinceStickerReply !== undefined && input.sinceStickerReply < STICKER_COOLDOWN_MS) {
+    return { score: 0, reasons: ['sticker-cooldown'], stickerId };
+  }
   if (input.stickerAnswered === true) return { score: 0, reasons: ['sticker-volley'], stickerId };
 
   let score = 0;
   const reasons: string[] = [];
   if (input.sinceBotSpoke !== undefined && input.sinceBotSpoke <= STICKER_REACT_MS) {
-    score += 0.7;
+    score += 0.4;
     reasons.push('sticker-react');
   }
-  score += engagementBonus(input, reasons);
+  if (input.engagement !== undefined) {
+    const peer = input.engagement.peers.has(input.senderId);
+    score += peer ? 0.3 : 0.1;
+    reasons.push(peer ? 'engaged-peer' : 'engaged');
+  }
+  if (input.collection === 'pack') {
+    score += 0.7;
+    reasons.push('sticker-mine');
+  } else if (input.collection === 'auto') {
+    score += 0.2;
+    reasons.push('sticker-known');
+  }
   return { score: Math.min(1, score), reasons, mode: 'sticker', stickerId };
 }
 
@@ -211,6 +236,8 @@ interface GroupReplyState {
   stickerAnswered: Set<string>;
   /** bot 已经跟过的那串复读 */
   chainAnswered?: string;
+  /** bot 上次靠表情包（回应或复读）接话的时间 */
+  stickerReplyAt?: number;
   /** bot 最近说的话 */
   botLines: Array<{ text: string; timestamp: number }>;
 }
@@ -312,10 +339,17 @@ export class EngagementTracker {
   }
 
   /** 放行了一条表情包：复读记下这一串，回应记下这个人 */
-  public markSticker(groupId: string, senderId: string, result: DesireResult): void {
+  public markSticker(groupId: string, senderId: string, result: DesireResult, now: number): void {
+    if (result.mode === undefined) return;
     const state = this.group(groupId);
+    state.stickerReplyAt = now;
     if (result.mode === 'sticker-chain') state.chainAnswered = result.stickerId;
-    else if (result.mode === 'sticker') state.stickerAnswered.add(senderId);
+    else state.stickerAnswered.add(senderId);
+  }
+
+  public sinceStickerReply(groupId: string, now: number): number | undefined {
+    const at = this.groups.get(groupId)?.stickerReplyAt;
+    return at === undefined ? undefined : now - at;
   }
 }
 

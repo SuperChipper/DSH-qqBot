@@ -164,6 +164,8 @@ export class ApprovalChannel {
     const peerId = event.group_openid ?? event.user_openid;
     if (!peerId) return false;
     const scope: ChatScope = event.group_openid ? 'group' : 'c2c';
+    // QQ 群按钮回调只带 group_member_openid；user_openid 是私聊/旧版回调字段。
+    const senderId = scope === 'group' ? (event.group_member_openid ?? event.user_openid) : event.user_openid;
     const record = this.manager.getSessionRecord(scope, peerId);
     if (!record) {
       // 会话已经不存在（常见于插件重载/会话回收后点旧卡片）：消费事件并 ack 成功，
@@ -182,7 +184,7 @@ export class ApprovalChannel {
       // 卡片还在，但 pending 已经因超时/插件重载/会话回收消失：给用户一个明确提示，
       // 而不是让 QQ 显示“审批失败”。
       this.logger.warn(
-        `im-qqbot: approval click ignored, no pending key=${record.sessionKey} sender=${event.user_openid ?? 'unknown'}`,
+        `im-qqbot: approval click ignored, no pending key=${record.sessionKey} sender=${senderId ?? 'unknown'}`,
       );
       void this.sender
         .sendMarkdown(record.replyTarget, '这条审批已失效或已被处理了。请让发起人重新发起请求，我再弹一次审批。')
@@ -197,11 +199,11 @@ export class ApprovalChannel {
     // - group：只允许主人/管理员，避免任意群成员放行影响群/配置的操作。
     // 未授权点击直接消费但不 settle，审批保持等待，真正的审批人仍可操作。
     const selfApproval = record.scope === 'c2c'
-      && event.user_openid !== undefined
-      && event.user_openid === record.replyTarget.targetId;
-    if (!selfApproval && !this.isPrivileged(event.user_openid)) {
+      && senderId !== undefined
+      && senderId === record.replyTarget.targetId;
+    if (!selfApproval && !this.isPrivileged(senderId)) {
       this.logger.warn(
-        `im-qqbot: approval click denied sender=${event.user_openid ?? 'unknown'} key=${record.sessionKey}`,
+        `im-qqbot: approval click denied sender=${senderId ?? 'unknown'} key=${record.sessionKey}`,
       );
       void this.sender
         .sendMarkdown(record.replyTarget, '只有 bot 主人或管理员可以审批这条操作。')

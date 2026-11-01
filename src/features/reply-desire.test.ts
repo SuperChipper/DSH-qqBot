@@ -68,12 +68,29 @@ describe('scoreReplyDesire 文字', () => {
 describe('scoreReplyDesire 表情包', () => {
   const s = { ...base, content: STICKER, attachments: sticker('abc') };
 
-  it('bot 刚说完话就甩表情包：用表情包回应', () => {
-    const r = scoreReplyDesire({ ...s, sinceBotSpoke: 5_000 });
-    expect(r).toMatchObject({ mode: 'sticker', stickerId: 'ABC' });
-    expect(r.score).toBeGreaterThanOrEqual(0.6);
+  it('bot 刚说完话就甩表情包：单独不够，刚和 bot 聊过的人才接', () => {
+    const peer = { until: Infinity, peers: new Set(['u1']), turns: 0 };
+    expect(scoreReplyDesire({ ...s, sinceBotSpoke: 5_000 })).toMatchObject({ mode: 'sticker', stickerId: 'ABC', reasons: ['sticker-react'] });
+    expect(scoreReplyDesire({ ...s, sinceBotSpoke: 5_000 }).score).toBeLessThan(0.65);
+    expect(scoreReplyDesire({ ...s, sinceBotSpoke: 5_000, engagement: peer }).score).toBeGreaterThanOrEqual(0.65);
+    expect(scoreReplyDesire({ ...s, sinceBotSpoke: 5_000, engagement: { ...peer, peers: new Set(['u2']) } }).score).toBeLessThan(0.65);
+    expect(scoreReplyDesire({ ...s, engagement: peer }).score).toBeLessThan(0.65);
     expect(scoreReplyDesire({ ...s, sinceBotSpoke: 60_000 }).score).toBe(0);
-    expect(scoreReplyDesire(s).score).toBe(0);
+  });
+
+  it('刚用表情包接过：5 分钟内这个群的表情包都不接，复读除外', () => {
+    const recent = [{ senderId: 'u2', stickerId: 'ABC' }, { senderId: 'u3', stickerId: 'ABC' }];
+    expect(scoreReplyDesire({ ...s, collection: 'pack', sinceStickerReply: 60_000 }).reasons).toEqual(['sticker-cooldown']);
+    expect(scoreReplyDesire({ ...s, collection: 'pack', sinceStickerReply: 6 * 60_000 }).reasons).toEqual(['sticker-mine']);
+    expect(scoreReplyDesire({ ...s, recent, sinceStickerReply: 60_000 }).mode).toBe('sticker-chain');
+  });
+
+  it('bot 自带的表情包单独就接，自己收藏过的要叠别的理由', () => {
+    expect(scoreReplyDesire({ ...s, collection: 'pack' })).toMatchObject({ score: 0.7, reasons: ['sticker-mine'], mode: 'sticker' });
+    expect(scoreReplyDesire({ ...s, collection: 'auto' }).score).toBeLessThan(0.6);
+    expect(scoreReplyDesire({ ...s, collection: 'auto', sinceBotSpoke: 5_000 })).toMatchObject({ reasons: ['sticker-react', 'sticker-known'] });
+    expect(scoreReplyDesire({ ...s, collection: 'auto', sinceBotSpoke: 5_000 }).score).toBeLessThan(0.65);
+    expect(scoreReplyDesire({ ...s, collection: 'pack', stickerAnswered: true }).reasons).toEqual(['sticker-volley']);
   });
 
   it('已经用表情包接过这个人：不再接（防互刷）', () => {
@@ -122,8 +139,9 @@ describe('EngagementTracker', () => {
 
   it('说了文字解除互刷限制，换了表情包结束这串复读', () => {
     const t = new EngagementTracker();
-    t.markSticker('g', 'u1', { score: 1, reasons: [], mode: 'sticker', stickerId: 'A' });
-    t.markSticker('g', 'u2', { score: 1, reasons: [], mode: 'sticker-chain', stickerId: 'B' });
+    t.markSticker('g', 'u1', { score: 1, reasons: [], mode: 'sticker', stickerId: 'A' }, 100);
+    t.markSticker('g', 'u2', { score: 1, reasons: [], mode: 'sticker-chain', stickerId: 'B' }, 200);
+    expect(t.sinceStickerReply('g', 260)).toBe(60);
     t.record('g', { senderId: 'u1', stickerId: 'B' });
     expect(t.stickerAnswered('g', 'u1')).toBe(true);
     expect(t.chainAnswered('g')).toBe('B');
