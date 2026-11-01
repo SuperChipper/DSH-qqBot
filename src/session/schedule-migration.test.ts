@@ -26,7 +26,7 @@ afterEach(() => {
 const oldSession = 'old-session';
 
 describe('schedule migration', () => {
-  it('只迁移旧 session 的 active daily/weekly/every 任务', () => {
+  it('只迁移旧 session 的 active daily/weekly/cron/every 任务', () => {
     const home = homeWith({
       a: {
         sessionId: oldSession,
@@ -43,16 +43,24 @@ describe('schedule migration', () => {
         status: 'active',
         record: { kind: 'weekly', prompt: '周报', time: '20:00:00', timeZone: 'Asia/Shanghai', weekdays: [7] },
       },
+      g: {
+        sessionId: oldSession,
+        status: 'active',
+        record: { kind: 'cron', title: '同人图', prompt: '取一张', expression: '0 8,12-13 * * *', timeZone: 'Asia/Shanghai' },
+      },
+      h: { sessionId: oldSession, status: 'active', record: { kind: 'cron', title: '坏表达式', prompt: 'x', expression: '0 8 *' } },
       d: { sessionId: 'other', status: 'active', record: { kind: 'daily', prompt: 'x', time: '10:00:00' } },
       e: { sessionId: oldSession, status: 'inactive', record: { kind: 'daily', prompt: 'x', time: '10:00:00' } },
       f: { sessionId: oldSession, status: 'active', record: { kind: 'after', prompt: '一次性', afterSeconds: 60 } },
     });
 
     const tasks = readScheduleMigrations(home, oldSession);
-    expect(tasks).toHaveLength(3);
+    expect(tasks).toHaveLength(4);
     expect(tasks[0]).toMatchObject({ title: '早报', prompt: '读 RSS 写简报', daily: { time: '11:00:00.000', time_zone: 'Asia/Shanghai' } });
     expect(tasks[1]).toMatchObject({ every_seconds: 7200 });
     expect(tasks[2]).toMatchObject({ weekly: { time: '20:00:00', weekdays: [7] } });
+    // cron 不迁移的话，/new 之后这类任务会一直留在旧 session 里跑，永远拿不到新 prompt
+    expect(tasks[3]).toMatchObject({ cron: { expression: '0 8,12-13 * * *', time_zone: 'Asia/Shanghai' } });
   });
 
   it('缺失/损坏存储返回空数组，hint 为空', () => {
@@ -68,6 +76,14 @@ describe('schedule migration', () => {
     expect(hint).toContain('schedule_create');
     expect(hint).toContain('"daily": {');
     expect(hint).toContain('"prompt": "读 RSS"');
+  });
+
+  it('hint 里带上「搜图用工具、别每轮搓临时脚本」的提醒', () => {
+    const hint = formatScheduleMigrationHint([
+      { title: '同人图', prompt: '取一张', cron: { expression: '0 8 * * *', time_zone: 'Asia/Shanghai' } },
+    ]);
+    expect(hint).toContain('qqbot_booru_fetch');
+    expect(hint).toContain('tmp/');
   });
 
   it('记录旧任务 id，但 hint 里不暴露', () => {

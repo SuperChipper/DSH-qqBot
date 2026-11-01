@@ -29,6 +29,7 @@ import type { ToolAccess } from '../features/tool-access.ts';
 import type { DndService } from '../dnd/dnd-service.ts';
 import type { DndTurnButtons } from '../dnd/turn-buttons.ts';
 import { resolveTmpDir } from '../media/tmp-dir.ts';
+import { isVoiceFile, VOICE_REPLY_REMINDER } from '../media/voice-reply.ts';
 import { join } from 'node:path';
 import {
   formatScheduleMigrationHint,
@@ -40,6 +41,8 @@ import {
 } from './schedule-migration.ts';
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
+import { GROUP_MESSAGE_FORMAT_PROMPT } from '../features/message-format.ts';
+import { compactThreshold, decideAutoCompact, deferCeiling, lastTurnUsedTools } from '../features/compact-policy.ts';
 import type {
   SessionEventLike,
   DshAgent,
@@ -65,6 +68,11 @@ const COMPACTION_ERROR_HINTS: Record<string, string> = {
   commit: '压缩提交失败',
   persistence: '压缩完成但保存失败',
 };
+
+/** ctx.llm 查模型窗口的最小接口 */
+interface ModelInfoLlm {
+  resolveModelInfo?(provider: string, model: string): Promise<{ context?: { contextWindow?: number } } | undefined>;
+}
 
 /** system-prompt section 最小结构（name/order/text） */
 interface PromptSection {
@@ -106,6 +114,8 @@ export class SessionManager {
   private retiredSessionIds = new Map<string, string>();
   /** /new 后待新会话重建的定时任务（会话 key → 各旧 session 的任务批次） */
   private pendingScheduleMigrations = new Map<string, Array<{ oldSessionId: string; tasks: ScheduleMigrationTask[] }>>();
+  /** provider/model → 上下文窗口（自动压缩阈值用；undefined = 查过但宿主没给） */
+  private readonly contextWindows = new Map<string, number | undefined>();
   private readonly evictor: IdleEvictor;
   private readonly modelResolver: ModelResolver;
   private readonly ctx: Context;
@@ -156,6 +166,38 @@ export class SessionManager {
     );
 
     this.registerScopePromptInjection();
+    this.registerVoiceReplyDelivery();
+  }
+
+  /** 语音后的文字继续生成，出站层改用独立静态消息，投递队列负责发送间隔。 */
+  private registerVoiceReplyDelivery(): void {
+    interface Execution {
+      name: string;
+      arguments: unknown;
+      agent?: unknown;
+      signal: AbortSignal;
+    }
+    interface Result {
+      isError?: boolean;
+      error?: unknown;
+    }
+    const handler = async (exec: Execution, next: () => Promise<Result>): Promise<Result> => {
+      const record = exec.agent === undefined ? undefined : this.findByAgent(exec.agent as DshAgent);
+      const args = exec.arguments as { file_path?: unknown; target?: unknown } | null;
+      const voice = exec.name === 'qqbot_speak'
+        || (exec.name === 'qqbot_send_file' && typeof args?.file_path === 'string' && isVoiceFile(args.file_path));
+      const currentTarget = record === undefined ? undefined : `${record.replyTarget.scope}:${record.replyTarget.targetId}`;
+      const sameChat = args?.target === undefined || args.target === '' || args.target === currentTarget;
+      const result = await next();
+      if (record === undefined || !voice || !sameChat || exec.signal.aborted || result.isError || result.error !== undefined) return result;
+      record.voiceReplySentAt = Date.now();
+      this.logger.info(`im-qqbot: 语音已送达，后续文字单独投递 key=${record.sessionKey}`);
+      return result;
+    };
+    (this.ctx as unknown as {
+      on(event: 'tools/execute', listener: typeof handler): void;
+    }).on('tools/execute', handler);
+    this.logger.info('im-qqbot: 语音后文字独立发送已启用（保留模型续写）');
   }
 
   /**
@@ -185,14 +227,16 @@ export class SessionManager {
 
       // 水群：模型看到一整屏历史时容易挨个点评，真人只会接触发自己的那一句。
       if (record.scope === 'group') {
+        // 不解释标签的话，模型按昵称认人：重名、没昵称（只剩 openid 前缀）或多人合并时就会认错发言人
+        sections.push({ name: 'qqbot:message-format', order: 91, text: GROUP_MESSAGE_FORMAT_PROMPT });
         sections.push({
           name: 'qqbot:group-focus',
           order: 91,
           text: [
             '【水群】',
-            '你被 @ 或随机冒泡时，只接 [Current message] 那一句：先弄懂这句话本身在说什么、冲谁说的，再回它。',
-            '[Chat history] 是你刚好扫到的聊天记录，只用来理解语境（这句话在接谁、在聊什么）；别把前面的消息、图片挨个点评一遍，也别总结群聊。',
-            '只有当前这句明确提到前面的内容（「上面那张图」「刚才说的」、引用了某条消息）时，才回到前文去看。',
+            '你被 @ 或随机冒泡时，落点是 [Current message]：先弄懂这句在说什么、冲谁说的。',
+            '[Chat history] 是你扫到的背景，用来判断语境（在接谁的话、在聊什么）。可以顺着一两句往下接，但不用逐条回应，也别把整段群聊总结一遍。',
+            '当前这句明确指向前面（「上面那张图」「刚才说的」、引用了某条消息）时，就回去看。',
             '一句话能回完就一句话；不知道对方指什么就直接问，别自己脑补一大段。',
           ].join('\n'),
         });
@@ -227,7 +271,8 @@ export class SessionManager {
             '【共享笔记】',
             '你有一个所有群和私聊共享的笔记库，是你的长期记忆。消息前出现「[共享笔记 · 可能相关]」时，是按这条消息自动检索到的片段，相关就自然地用上，不相关就忽略，别生硬复述。',
             '想不起来但可能记过的东西，用 qqbot_notes_search 查；看完/学到/群里沉淀下来值得长期记住的，用 qqbot_notes_save 记下（提炼后再记，别记隐私和闲聊）。',
-            '只属于当前群的东西（跑团的队伍、角色、进度、DM 约定，这个群成员自己的事）用 qqbot_notes_save(scope="chat") 记，别的群看不到；共享笔记里提到的人和事不一定发生在这个群，别把别的群的跑团进度、角色当成这个群的。跑团进度以 dnd_* 工具查到的为准。',
+            '只属于当前群的东西（跑团的玩家偏好、DM 约定，这个群成员自己的事）用 qqbot_notes_save(scope="chat") 记，别的群看不到；共享笔记里提到的人和事不一定发生在这个群，别把别的群的跑团进度、角色当成这个群的。',
+            '跑团进度、物品、任务线头和待办用 dnd_progress 写进团档，不写笔记；进度以 dnd_* 工具查到的为准。DC、怪物数值、DM 笔记、没揭示的东西任何时候都不写进笔记。',
             '记笔记是你自己的事，不用每次都告诉用户「我记下了」。',
             '另外有一本《人类观察日记》，所有群和私聊共用：遇到人类的回复和你预测的不一样，就往里追加一条，用 qqbot_notes_save(file="人类观察日记.md")，格式固定「预测 / 实际 / 差在哪」，编号取文末最后一个 +1。只记判断失误，不记流水账。',
           ].join('\n'),
@@ -237,7 +282,17 @@ export class SessionManager {
       // 跑团：开团的会话每回合注入 DM 守则 + 精简团况（不注入整份 campaign JSON）
       if (this.dndService !== undefined) {
         try {
-          sections.push(...this.dndService.promptSections(record.sessionKey));
+          const dndSections = this.dndService.promptSections(record.sessionKey);
+          sections.push(...dndSections);
+          // 开团时本群笔记不走自动注入（见 notesHint），这里只列个目录，玩的时候要用的约定让模型自己去查
+          const titles = dndSections.length > 0 ? this.notesStore?.chatNoteTitles(chatKeyOf(record.scope, record.peerId)) ?? [] : [];
+          if (titles.length > 0) {
+            sections.push({
+              name: 'qqbot:dnd-chat-notes',
+              order: 98,
+              text: `本群笔记（开团期间不自动注入，需要时用 qqbot_notes_search 查，进度以【团况】为准）：${titles.join('；')}`,
+            });
+          }
         } catch (err) {
           this.logger.warn(`im-qqbot: 注入团况失败: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -262,15 +317,16 @@ export class SessionManager {
         ].join('\n'),
       });
 
-      // 媒体 caption：QQ 支持图片/视频/文件与文字同一条发出。
-      // 这条优先于人设里的「先文字后图片」，避免用户看到两个气泡。
+      // 配文只放短回应；完整解释另发，避免动态提示把人设的两句上限覆盖掉。
       sections.push({
         name: 'qqbot:media-caption',
         order: 93,
         text: [
           '【发图配文】',
-          '用 qqbot_send_file 发图片/视频/文件并配文字时，把整段回复放进 caption，调用后不要再单独回复同一段文字；caption 会和媒体同一条消息发出。',
-          '没有媒体要发时正常文字回复。这条优先于人设里的「先文字后图片」。',
+          '用 qqbot_send_file 发图片/视频/文件并配文字时，整段配文放进 caption，但不超过两句、不换行、不放列表；要讲道理另发一条纯文字。caption 会和媒体同一条消息发出，不要再单独复述这段配文。',
+          '没有媒体要发时正常文字回复。语音不支持 caption，按下面的语音发送规则处理。',
+          '【语音单独发送】',
+          '通过 qqbot_speak 或 qqbot_send_file 发送语音时：' + VOICE_REPLY_REMINDER,
         ].join('\n'),
       });
 
@@ -280,10 +336,10 @@ export class SessionManager {
         text: [
           '【图片路由】',
           '用户发图时：',
-          '1. 如果上下文里已有「[本地表情库]」命中提示，直接用它的情绪/文件，不要重复猜。',
-          '2. 用户问“这是谁 / 出自哪 / 什么动漫”时，调用 skill 加载 anime-recognition，再按它的流程识别。',
+          '1. 用户发图且有情绪可对时，优先用库存里那张回应；只在情绪明确、且库里有对得上的图时发。已有「[本地表情库]」命中提示时，用它判断情绪，不必重复识别；命中不代表必须配图。',
+          '2. 用户问“这是谁 / 出自哪 / 什么动漫”时，先查本地表情库与梗库；查不到就如实说认不出，不要硬认。',
           '3. 用户问“什么梗 / 表情包 / 怎么回”时，调用 skill 加载 meme-recognition。',
-          '4. 用户只是随手发图、没提问时，按人设自然反应，不必强行识别。',
+          '4. 用户只是分享内容时，以文字为主，不必配图，也不必强行识别。纯信息性回复不发表情包，别连着两轮各挂一张。',
           '不要只凭肉眼断言角色或梗；需要外部检索时走对应 skill。',
         ].join('\n'),
       });
@@ -541,11 +597,14 @@ export class SessionManager {
   }
 
   /** 按当前消息检索笔记（共享 + 本会话私有），返回要注入的提示块（未启用/无相关结果/出错时返回空串） */
-  notesHint(query: string, scope: ChatScope, peerId: string): string {
+  async notesHint(query: string, scope: ChatScope, peerId: string): Promise<string> {
     const notes = this.config.notes;
     if (this.notesStore === undefined || !notes?.autoInject || query.trim().length === 0) return '';
     try {
-      return formatNotesHint(this.notesStore.search(query, notes.injectTopK * 2, chatKeyOf(scope, peerId)), {
+      // 开着团时本群的跑团笔记（旧进度、旧待办）会和每回合注入的实时团况打架，只召回共享笔记
+      const campaignRunning = this.dndService?.active(this.sessionKey(scope, peerId)) !== undefined;
+      const hits = await this.notesStore.searchHybrid(query, notes.injectTopK * 2, chatKeyOf(scope, peerId), { sharedOnly: campaignRunning });
+      return formatNotesHint(hits, {
         topK: notes.injectTopK,
         maxChars: notes.injectMaxChars,
         minCoverage: notes.injectMinCoverage,
@@ -933,34 +992,82 @@ export class SessionManager {
    * 轮次结束后按上下文大小自动压缩（后台执行，不阻塞下一条消息）。
    *
    * dsh 默认阈值按模型窗口算（deepseek-flash 约 678k token），群聊会话几乎碰不到；
-   * 这里只对 QQ 会话、按 autoCompactTokens 主动压缩。压缩期间进来的消息由 agent 排队，压完再跑。
-   * 正忙、正在压缩或还不知道上下文大小时跳过，下一轮再判断。
+   * 这里对 QQ 会话主动压缩，阈值与推迟规则见 features/compact-policy。压缩期间进来的消息由
+   * agent 排队，压完再跑。正忙、正在压缩或还不知道上下文大小时跳过，下一轮再判断。
    */
   maybeAutoCompact(record: SessionRecord): void {
-    const threshold = this.config.autoCompactTokens ?? 0;
-    if (threshold <= 0 || record.compacting) return;
-    if (record.contextTokens === undefined || record.contextTokens < threshold) return;
-    if (record.agent.status !== 'idle') return;
+    if ((this.config.autoCompactTokens ?? 0) <= 0 || record.compacting) return;
+    if (record.contextTokens === undefined || record.agent.status !== 'idle') return;
 
-    const before = record.contextTokens;
+    // 先占住标记：查窗口是异步的，期间不能再触发一次
     record.compacting = true;
-    void this.compact(record.scope, record.peerId)
-      .then((outcome) => {
-        if (outcome.ok) {
-          record.contextTokens = undefined; // 下一次请求后重新测量
-          this.logger.info(
-            `im-qqbot: 自动压缩 key=${record.sessionKey} 上下文≈${before} tokens → 摘要替换 ${outcome.shadowed ?? 0} 条（约 ${outcome.tokens ?? 0} tokens）`,
-          );
-        } else {
-          this.logger.warn(`im-qqbot: 自动压缩跳过 key=${record.sessionKey} reason=${outcome.reason}${outcome.message ? ` ${outcome.message}` : ''}`);
-        }
-      })
+    void this.autoCompact(record)
       .catch((err: unknown) => {
         this.logger.warn(`im-qqbot: 自动压缩失败 key=${record.sessionKey}: ${err instanceof Error ? err.message : String(err)}`);
       })
       .finally(() => {
         record.compacting = false;
       });
+  }
+
+  private async autoCompact(record: SessionRecord): Promise<void> {
+    const before = record.contextTokens;
+    const contextWindow = await this.contextWindowOf(record);
+    const threshold = compactThreshold(record.scope, contextWindow, {
+      autoCompactTokens: this.config.autoCompactTokens ?? 0,
+      autoCompactPrivateRatio: this.config.autoCompactPrivateRatio ?? 0,
+      autoCompactDeferOnTools: this.config.autoCompactDeferOnTools ?? false,
+    });
+    const usedTools = lastTurnUsedTools(record.agent.session.events);
+    const decision = decideAutoCompact({
+      contextTokens: before,
+      threshold,
+      contextWindow,
+      lastTurnUsedTools: usedTools,
+      deferOnTools: this.config.autoCompactDeferOnTools ?? false,
+    });
+    if (decision === 'defer') {
+      this.logger.info(
+        `im-qqbot: 自动压缩推迟 key=${record.sessionKey} 上下文≈${before} tokens ≥ 阈值 ${threshold}，上一轮还在调工具，等收尾轮或到 ${deferCeiling(threshold, contextWindow)} 再压`,
+      );
+      return;
+    }
+    if (decision !== 'compact') return;
+    // 查窗口期间可能已经开始了下一轮
+    if (record.agent.status !== 'idle') return;
+
+    const outcome = await this.compact(record.scope, record.peerId);
+    if (outcome.ok) {
+      record.contextTokens = undefined; // 下一次请求后重新测量
+      this.logger.info(
+        `im-qqbot: 自动压缩 key=${record.sessionKey} 上下文≈${before} tokens（阈值 ${threshold}）→ 摘要替换 ${outcome.shadowed ?? 0} 条（约 ${outcome.tokens ?? 0} tokens）`,
+      );
+    } else {
+      this.logger.warn(`im-qqbot: 自动压缩跳过 key=${record.sessionKey} reason=${outcome.reason}${outcome.message ? ` ${outcome.message}` : ''}`);
+    }
+  }
+
+  /** 按会话实际路由的模型查上下文窗口（按 provider/model 缓存）；查不到返回 undefined，私聊退回固定阈值 */
+  private async contextWindowOf(record: SessionRecord): Promise<number | undefined> {
+    const header = record.agent.session.requestHeader?.()?.config;
+    const route = header?.provider && header.model
+      ? { provider: header.provider, model: header.model }
+      : this.modelResolver.getEffectiveRoute(record.sessionKey);
+    if (!route?.provider || !route.model) return undefined;
+    const key = `${route.provider}/${route.model}`;
+    if (this.contextWindows.has(key)) return this.contextWindows.get(key);
+
+    let window: number | undefined;
+    try {
+      const llm = this.ctx.get('llm') as ModelInfoLlm | undefined;
+      const info = await llm?.resolveModelInfo?.(route.provider, route.model);
+      window = info?.context?.contextWindow;
+    } catch (err) {
+      this.logger.debug(`contextWindowOf ${key} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // 查不到也缓存，免得每轮都查；换模型会换 key
+    this.contextWindows.set(key, window);
+    return window;
   }
 
   async disposeAll(): Promise<void> {

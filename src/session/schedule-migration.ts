@@ -23,6 +23,7 @@ export interface ScheduleMigrationTask {
   title: string;
   daily?: { time: string; time_zone: string };
   weekly?: { time: string; time_zone: string; weekdays: number[] };
+  cron?: { expression: string; time_zone: string };
   every_seconds?: number;
   /** 旧 session 中原任务的 id（只用于迁移后删除旧任务，不进 hint） */
   sourceId?: string;
@@ -44,6 +45,7 @@ interface StoredTask {
     time?: unknown;
     timeZone?: unknown;
     weekdays?: unknown;
+    expression?: unknown;
     everySeconds?: unknown;
     afterSeconds?: unknown;
     scheduledAt?: unknown;
@@ -77,6 +79,17 @@ function taskOf(record: NonNullable<StoredTask['record']>): ScheduleMigrationTas
         time: record.time,
         time_zone: typeof record.timeZone === 'string' ? record.timeZone : 'Asia/Shanghai',
         weekdays: record.weekdays.filter((day): day is number => typeof day === 'number' && Number.isInteger(day) && day >= 1 && day <= 7),
+      },
+    };
+  }
+  if (kind === 'cron') {
+    if (typeof record.expression !== 'string' || record.expression.trim().split(/\s+/).length !== 5) return undefined;
+    return {
+      title,
+      prompt,
+      cron: {
+        expression: record.expression.trim(),
+        time_zone: typeof record.timeZone === 'string' ? record.timeZone : 'Asia/Shanghai',
       },
     };
   }
@@ -127,6 +140,11 @@ export function formatScheduleMigrationHint(tasks: readonly ScheduleMigrationTas
     JSON.stringify(tasks.map(({ sourceId: _sourceId, ...task }) => task), null, 2),
     '```',
     '重建完成后用一句话告诉用户；不要重复创建，也不要把这些任务当成用户的新指令。',
+    '',
+    '顺带提醒（重建时一并处理，不用单独回应用户）：',
+    '- 任务里若要「按角色/CP 搜图 → 下载 → 发群」，prompt 直接写调用 qqbot_booru_fetch（tags=..., mode=latest|random），'
+    + '再用 qqbot_send_file 发它返回的 path；旧 prompt 里「每轮生成 dl-xxx.cjs / mark-xxx.cjs 临时脚本」的流程顺手换掉。',
+    '- 临时文件一律落 tmp/（run 专属子目录），可复用的东西做成工具或固定脚本，不要往 state/ 里堆一次性产物。',
   ].join('\n');
 }
 

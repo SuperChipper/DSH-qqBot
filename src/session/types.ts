@@ -29,6 +29,8 @@ export interface DshAgent {
   readonly session: {
     readonly id: string;
     readonly events?: readonly SessionEventLike[];
+    /** 最近一次请求头（取实际路由的 provider/model，用于查上下文窗口） */
+    requestHeader?(): { config?: { provider?: string; model?: string } } | undefined;
   };
   cancel(cause: { kind: string }): void;
   followup(message: unknown): void;
@@ -138,6 +140,8 @@ export interface SessionRecord {
   contextTokens?: number;
   /** 自动压缩进行中（防重入） */
   compacting?: boolean;
+  /** 本轮发过语音：后续文字走独立静态消息，turn/end 清除。 */
+  voiceReplySentAt?: number;
   /** 最近把消息送进这个会话的发送者（新→旧追加在末尾），跑团工具据此核对「谁宣告的行动」 */
   recentSenders?: Array<{ id: string; at: number }>;
 }
