@@ -3,6 +3,8 @@
  *
  *   - 按标题（#/##/###）把每个 .md 切成小段，一段就是一个检索单元；
  *   - 中文按二字切词（bigram）、英文/数字按词，BM25 打分，不依赖向量服务；
+ *   - BM25 之外再走一路字面精确匹配（专有名词、引号原文、别名、编号），可选再加一路向量语义相似度，
+ *     多路 RRF 融合后取 top-k；
  *   - 目录有改动（文件增删、mtime/大小变化）时自动重建索引，人手改笔记也能立即生效；
  *   - save 只写到笔记根目录下，按标题建文件或追加小节；
  *   - `chats/<会话键>/` 下是只属于某个群/私聊的笔记（如某个群的跑团进度），只有那个会话检索得到，
@@ -11,6 +13,9 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { basename, extname, join, relative } from 'node:path';
 import type { Logger } from '../types.ts';
+import { EXACT_STRONG_SCORE, scoreExact, type ExactScore } from '../features/exact-match.ts';
+import { fuseRankings, gateSimilarities, type SemanticGate } from '../features/rank-fusion.ts';
+import type { EmbeddingCache } from './embedding.ts';
 
 /** 单个笔记文件大小上限：更大的文件跳过，避免把日志之类的东西误当笔记 */
 const MAX_FILE_BYTES = 512 * 1024;
@@ -31,6 +36,8 @@ const CHAT_NOTES_DIR = 'chats';
 const BM25_K1 = 1.2;
 /** 长度归一化放轻（常见取 0.75）：笔记段都很短，否则「待办」这类短段会压过真正讲这件事的段 */
 const BM25_B = 0.3;
+/** 参与融合的粗检索名次上限：再往后的段只有被精确一路捞到才有机会进结果 */
+const COARSE_POOL = 50;
 
 export interface NoteChunk {
   /** 相对笔记根目录的路径（posix 分隔符） */
@@ -49,6 +56,10 @@ export interface NoteHit extends NoteChunk {
    * 分母只算笔记库里出现过的查询词：「你还记得…吗」这类口语虚词组合不拉低覆盖率。
    */
   coverage: number;
+  /** 字面精确命中（引号原文/别名/编号/专有名词）；没有精确命中时缺省 */
+  exact?: ExactScore;
+  /** 与查询的余弦相似度；只有过了语义门槛才有，语义检索没开或没过门槛时缺省 */
+  similarity?: number;
 }
 
 export interface SaveNoteInput {
@@ -93,6 +104,11 @@ export function tokenize(text: string): string[] {
     for (let i = 0; i < run.length - 1; i++) tokens.push(run.slice(i, i + 2));
   }
   return tokens;
+}
+
+/** 参与检索/算向量的全文：标题路径 + 正文 */
+function embeddingText(chunk: NoteChunk): string {
+  return `${chunk.heading}\n${chunk.text}`;
 }
 
 function countTerms(tokens: string[]): Map<string, number> {
@@ -207,6 +223,7 @@ export class NotesStore {
   private avgLength = 0;
   private signature = '';
   private lastScan = 0;
+  private semantic: { cache: EmbeddingCache; gate: SemanticGate } | undefined;
 
   public constructor(root: string, logger?: Logger) {
     this.root = root;
@@ -219,20 +236,70 @@ export class NotesStore {
     return this.chunks.length;
   }
 
+  /** 挂上语义检索（向量缓存 + 相似度门槛）；传 undefined 关闭 */
+  public setSemantic(cache: EmbeddingCache | undefined, gate: SemanticGate = { minSimilarity: 0.5, minMargin: 0.16 }): void {
+    this.semantic = cache === undefined ? undefined : { cache, gate };
+    if (cache === undefined) return;
+    this.refresh();
+    void cache.warm(this.chunks.map(embeddingText));
+  }
+
   /**
-   * 检索最相关的 limit 段。查询为空或没有任何命中时返回空数组。
+   * 检索最相关的 limit 段（BM25 + 字面精确匹配）。查询为空或没有任何命中时返回空数组。
    * 给了 chatKey 时，别的会话的私有笔记（chats/<别的会话>/）不参与检索。
    */
   public search(query: string, limit = 5, chatKey?: string): NoteHit[] {
     this.refresh();
+    return this.rank(query, limit, (file) => visibleTo(file, chatKey));
+  }
+
+  /**
+   * 同 search，再加向量语义一路。没挂语义检索、接口失败或超时时等同于 search。
+   * 笔记向量在后台补算，还没算好的段这一轮只是不参与语义一路。
+   * sharedOnly：只检索共享笔记，跳过所有会话私有笔记（开团时本群的跑团笔记交给团况注入，不走自动召回）。
+   */
+  public async searchHybrid(query: string, limit = 5, chatKey?: string, options: { sharedOnly?: boolean } = {}): Promise<NoteHit[]> {
+    this.refresh();
+    const visible = options.sharedOnly === true
+      ? (file: string): boolean => chatOwnerOf(file) === undefined
+      : (file: string): boolean => visibleTo(file, chatKey);
+    const semantic = this.semantic;
+    if (semantic === undefined || this.chunks.length === 0) return this.rank(query, limit, visible);
+    void semantic.cache.warm(this.chunks.map(embeddingText));
+    const queryVector = await semantic.cache.embedQuery(query);
+    if (queryVector === undefined) return this.rank(query, limit, visible);
+
+    const vectors: Array<{ id: string; vector: Float32Array }> = [];
+    this.chunks.forEach((chunk, index) => {
+      if (!visible(chunk.file)) return;
+      const vector = semantic.cache.vectorFor(embeddingText(chunk));
+      if (vector !== undefined) vectors.push({ id: String(index), vector });
+    });
+    return this.rank(query, limit, visible, gateSimilarities(queryVector, vectors, semantic.gate));
+  }
+
+  /** 会话私有笔记的标题（每个文件的一级标题，没有就用文件名），给团况注入列个目录 */
+  public chatNoteTitles(chatKey: string): string[] {
+    this.refresh();
+    const dir = chatNotesDir(chatKey);
+    const titles = new Map<string, string>();
+    for (const chunk of this.chunks) {
+      if (chatOwnerOf(chunk.file) !== dir || titles.has(chunk.file)) continue;
+      titles.set(chunk.file, chunk.heading.split(' › ')[0]!);
+    }
+    return [...titles.values()];
+  }
+
+  /** BM25 粗检索 + 字面精确 + （可选）语义相似度，三路 RRF 融合 */
+  private rank(query: string, limit: number, visible: (file: string) => boolean, similarity?: ReadonlyMap<string, number>): NoteHit[] {
     const queryTerms = [...new Set(tokenize(query))];
-    if (queryTerms.length === 0 || this.chunks.length === 0) return [];
+    if ((queryTerms.length === 0 && (similarity?.size ?? 0) === 0) || this.chunks.length === 0) return [];
 
     const total = this.chunks.length;
     const knownTerms = queryTerms.filter((term) => this.docFreq.has(term)).length;
-    const hits: NoteHit[] = [];
-    for (const chunk of this.chunks) {
-      if (!visibleTo(chunk.file, chatKey)) continue;
+    const candidates: Array<NoteHit & { id: string; terms: Map<string, number> }> = [];
+    this.chunks.forEach((chunk, index) => {
+      if (!visible(chunk.file)) return;
       let score = 0;
       let matched = 0;
       for (const term of queryTerms) {
@@ -244,8 +311,9 @@ export class NotesStore {
         const norm = BM25_K1 * (1 - BM25_B + BM25_B * (chunk.length / (this.avgLength || 1)));
         score += idf * ((tf * (BM25_K1 + 1)) / (tf + norm));
       }
-      if (matched === 0) continue;
-      hits.push({
+      candidates.push({
+        id: String(index),
+        terms: chunk.terms,
         file: chunk.file,
         heading: chunk.heading,
         text: chunk.text,
@@ -253,8 +321,35 @@ export class NotesStore {
         matched,
         coverage: matched / (knownTerms || 1),
       });
+    });
+    const hits = candidates.filter((c) => c.matched > 0).sort((a, b) => b.score - a.score);
+
+    // 精确一路扫全部 BM25 命中段而不是只扫粗检索前几名：字面量的切词必然也是 BM25 词，
+    // 含有它的段一定在 hits 里，这样被粗检索截断的段也能被捞回来
+    const exact = scoreExact(
+      query,
+      hits.map((hit) => ({ id: hit.id, text: embeddingText(hit), terms: hit.terms })),
+      candidates.length,
+    );
+    // 语义一路从全部可见段里召回：同义/换说法的段可能一个词都没和查询撞上
+    const fused = fuseRankings(hits.slice(0, COARSE_POOL), (hit) => hit.id, { exact, semantic: similarity, extra: candidates });
+
+    // 同一段内容被复制到多个文件时只留排名最高的一份
+    const seenText = new Set<string>();
+    const result: NoteHit[] = [];
+    for (const { item, exact: exactScore, similarity: sim } of fused) {
+      if (result.length >= Math.max(0, limit)) break;
+      const key = item.text.replace(/\s+/g, ' ').trim();
+      if (seenText.has(key)) continue;
+      seenText.add(key);
+      const { id: _id, terms: _terms, ...hit } = item;
+      result.push({
+        ...hit,
+        ...(exactScore === undefined ? {} : { exact: exactScore }),
+        ...(sim === undefined ? {} : { similarity: sim }),
+      });
     }
-    return hits.sort((a, b) => b.score - a.score).slice(0, Math.max(0, limit));
+    return result;
   }
 
   /** 写入一条笔记：新标题建文件，指定已有文件则追加为一个小节 */
@@ -372,7 +467,12 @@ export function formatNotesHint(
   options: { topK: number; maxChars: number; minCoverage: number },
 ): string {
   const relevant = hits
-    .filter((hit) => hit.coverage >= options.minCoverage && hit.matched >= INJECT_MIN_MATCHED_TERMS)
+    .filter((hit) =>
+      (hit.coverage >= options.minCoverage && hit.matched >= INJECT_MIN_MATCHED_TERMS)
+      // 引号原文/别名/编号这类强字面命中，即便查询里闲聊词多、覆盖率被拉低也值得注入
+      || (hit.exact?.score ?? 0) >= EXACT_STRONG_SCORE
+      // 带 similarity 说明已过语义门槛：同义/换说法的段一个词都没撞上，覆盖率为 0，只能靠这一条进来
+      || hit.similarity !== undefined)
     .slice(0, options.topK);
   if (relevant.length === 0) return '';
 

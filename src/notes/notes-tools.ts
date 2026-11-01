@@ -10,6 +10,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm';
 import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger } from '../types.ts';
 import { chatKeyOf, type NoteHit, type NotesStore, type SaveNoteResult } from './notes-store.ts';
+import { findDmSecret } from '../features/campaign-secrets.ts';
 
 export const NOTES_SEARCH_TOOL_NAME = 'qqbot_notes_search';
 export const NOTES_SAVE_TOOL_NAME = 'qqbot_notes_save';
@@ -31,6 +32,9 @@ const SAVE_DESCRIPTION =
   + 'chat; scope="chat" is visible only to the current group/private chat — use it for anything tied to this '
   + 'chat alone: a D&D/TRPG campaign (party, characters, levels, progress, house rules, DM conventions), plans or '
   + 'facts about this group\'s members. Notes that look like TRPG campaign records default to "chat". '
+  + 'For a running campaign, notes are only for things that outlive it (player preferences, DM conventions, running '
+  + 'jokes): progress, loot, open threads and to-dos go into the campaign via dnd_progress, and DM secrets (DCs, '
+  + 'monster stats, DM-only room notes, unrevealed things) never go into notes. '
   + 'A new title creates a new note file; pass `file` of an existing note to append a section to it.';
 
 /** 看起来像跑团存档/约定的内容：没指定 scope 时默认只记到本会话，免得串到别的群 */
@@ -102,6 +106,8 @@ export function registerNotesTools(
                 heading: { type: 'string' },
                 text: { type: 'string' },
                 score: { type: 'number' },
+                exact: { type: 'array', items: { type: 'string' } },
+                similarity: { type: 'number' },
               },
               required: ['file', 'heading', 'text', 'score'],
               additionalProperties: false,
@@ -124,11 +130,13 @@ export function registerNotesTools(
       const n = typeof limit === 'number' && Number.isFinite(limit) ? Math.min(8, Math.max(1, Math.floor(limit))) : 4;
       const record = exec.agent !== undefined ? manager.findByAgent(exec.agent as DshAgent) : undefined;
       const chatKey = record === undefined ? undefined : chatKeyOf(record.scope, record.peerId);
-      const hits = store.search(query, n, chatKey).map((hit) => ({
+      const hits = (await store.searchHybrid(query, n, chatKey)).map((hit) => ({
         file: hit.file,
         heading: hit.heading,
         text: hit.text,
         score: Math.round(hit.score * 100) / 100,
+        ...(hit.exact === undefined ? {} : { exact: hit.exact.matched }),
+        ...(hit.similarity === undefined ? {} : { similarity: Math.round(hit.similarity * 100) / 100 }),
       }));
       return { query, hits };
     },
@@ -175,6 +183,17 @@ export function registerNotesTools(
       }
       const record = exec.agent !== undefined ? manager.findByAgent(exec.agent as DshAgent) : undefined;
       const source = record === undefined ? '本机会话' : (record.scope === 'group' ? '群聊' : '私聊');
+      // 本会话开着团时，笔记会在之后的消息里被自动检索出来，DM 机密一旦写进去就可能被念给玩家
+      const campaign = record === undefined ? undefined : manager.dndService?.active(record.sessionKey)?.campaign;
+      if (campaign !== undefined) {
+        const monsters = campaign.characters.filter((ch) => ch.kind === 'monster').map((ch) => ch.name);
+        // 「刻德温 Kodwin」在笔记里常只写中文名或英文名，拆开分别匹配
+        const pcs = campaign.characters.filter((ch) => ch.kind === 'pc').flatMap((ch) => ch.name.split(/\s+/));
+        const secret = findDmSecret(`${title}\n${content}`, monsters, pcs);
+        if (secret !== undefined) {
+          throw new Error(`qqbot_notes_save: 跑团进行中，笔记${secret}。DM 机密（DC、怪物数值、DM 笔记）不写进笔记，去掉后再记；跑团进度用 dnd_progress 写进团档。`);
+        }
+      }
       // 本机会话没有「本会话」可言，一律记到共享区
       const chatOnly = record !== undefined
         && (scope === 'chat' || (scope === undefined && looksLikeCampaignNote(title, content)));

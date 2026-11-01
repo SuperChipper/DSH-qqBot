@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { NotesStore, chatKeyOf, chunkMarkdown, formatNotesHint, tokenize } from './notes-store.ts';
 import { looksLikeCampaignNote } from './notes-tools.ts';
+import { EmbeddingCache, type Embedder } from './embedding.ts';
 
 const SAMPLE = [
   '# 大肥鱼小课堂 · 课堂笔记',
@@ -72,6 +73,23 @@ describe('NotesStore.search', () => {
     expect(hits.map((h) => h.file)).toEqual(['sub/群.md']);
   });
 
+  it('整段专名字面命中压过二字组分散命中的段', () => {
+    const root = tempNotes({
+      '修道.md': '# 修道心得\n沉钟声里修道，道院外沉钟又响，钟修好了；修道之人进度慢，进度靠修道。',
+      '跑团.md': '# 沉钟修道院\n## 进度\n- 第 300 回合进入地下室',
+    });
+    const hits = new NotesStore(root).search('沉钟修道院现在什么进度');
+    expect(hits[0]!.file).toBe('跑团.md');
+    expect(hits[0]!.exact?.matched).toContain('沉钟修道院');
+    // BM25 原本把分散命中的「修道心得」排第一
+    expect(hits.find((h) => h.file === '修道.md')!.score).toBeGreaterThan(hits[0]!.score);
+  });
+
+  it('同样内容复制到两个文件只返回一份', () => {
+    const hits = new NotesStore(tempNotes({ 'a.md': '# 开黑\n周五开黑', 'b.md': '# 开黑\n周五开黑' })).search('周五开黑');
+    expect(hits.map((h) => h.file)).toEqual(['a.md']);
+  });
+
   it('目录不存在时返回空', () => {
     expect(new NotesStore(join(tmpdir(), 'no-such-notes-dir-xyz')).search('任何')).toEqual([]);
   });
@@ -88,6 +106,51 @@ describe('NotesStore.search', () => {
     expect(files('group_A')).toEqual(['chats/group_A/沉钟.md', '共享.md']);
     expect(files('group_C')).toEqual(['共享.md']);
     expect(files(undefined)).toHaveLength(3);
+  });
+});
+
+describe('NotesStore.searchHybrid', () => {
+  /** 假向量：按「概念词组」命中与否给分量，模拟同义/换说法 */
+  const concepts = [['鱼八股', '套路', '模板'], ['家长会', '开会'], ['哈哈', '笑']];
+  const conceptEmbedder = (fail = false): Embedder => ({
+    model: 'fake',
+    async embed(texts) {
+      if (fail) throw new Error('offline');
+      return texts.map((t) => concepts.map((words) => (words.some((w) => t.includes(w)) ? 1 : 0)));
+    },
+  });
+  const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+  const gate = { minSimilarity: 0.5, minMargin: 0.16 };
+
+  it('关键词一个都没撞上的同义说法，靠语义一路召回并注入', async () => {
+    const store = new NotesStore(tempNotes());
+    const query = '说话很套路的那个梗';
+    expect(store.search(query).some((h) => h.heading.includes('04'))).toBe(false);
+
+    // 语义检索关闭时，覆盖率为 0 的段不注入
+    expect(formatNotesHint(store.search(query, 4), hintOptions)).toBe('');
+
+    store.setSemantic(new EmbeddingCache(conceptEmbedder(), 1000), gate);
+    await flush();
+    const hits = await store.searchHybrid(query, 4);
+    expect(hits[0]!.heading).toContain('04 这三句话已被人类拉黑');
+    expect(hits[0]!.similarity).toBeCloseTo(1);
+    expect(formatNotesHint(hits, hintOptions)).toContain('04 这三句话已被人类拉黑');
+    // 没过语义门槛的段不带 similarity
+    expect(hits.slice(1).every((h) => h.similarity === undefined)).toBe(true);
+  });
+
+  it('接口失败时退回 BM25 + 精确匹配，结果与 search 一致', async () => {
+    const store = new NotesStore(tempNotes());
+    store.setSemantic(new EmbeddingCache(conceptEmbedder(true), 1000), gate);
+    await flush();
+    const query = '被人类拉黑的三句话是哪三句';
+    expect(await store.searchHybrid(query, 4)).toEqual(store.search(query, 4));
+  });
+
+  it('没挂语义检索时等同于 search', async () => {
+    const store = new NotesStore(tempNotes());
+    expect(await store.searchHybrid('鱼八股', 4)).toEqual(store.search('鱼八股', 4));
   });
 });
 
@@ -165,6 +228,14 @@ describe('formatNotesHint', () => {
   it('只撞上一个词的短消息不注入', () => {
     expect(formatNotesHint(store.search('哈哈哈哈', 4), hintOptions)).toBe('');
     expect(formatNotesHint(store.search('今天吃什么', 4), hintOptions)).toBe('');
+  });
+
+  it('引号原文强命中时，闲聊词拉低覆盖率也照样注入', () => {
+    // 「明天」「家长会」在别的段里出现过，算进覆盖率分母
+    const query = '明天开家长会的时候想起来那个「鱼八股」是什么';
+    const hits = store.search(query, 4);
+    expect(hits[0]!.coverage).toBeLessThan(hintOptions.minCoverage);
+    expect(formatNotesHint(hits, hintOptions)).toContain('04 这三句话已被人类拉黑');
   });
 
   it('本会话私有笔记标成 [本会话]，不暴露目录名', () => {
