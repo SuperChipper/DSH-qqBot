@@ -1,0 +1,86 @@
+# 异步唱歌服务
+
+部署到 `voice-lab/scripts` 后，服务在 `127.0.0.1:8766` 接收任务，后台单 worker 执行整条翻唱管线。
+私有 RVC 后端在 `127.0.0.1:8767`，由主服务启动和回收，模型、HuBERT、RMVPE 在任务间复用。
+Demucs / HP5 仍按任务运行。现有 `cover.py` 的独立 CLI 保留，仍共享 GPU 锁。
+
+## Agent 调用
+
+在 `C:\Users\16257\Desktop\Dsh-bot\voice-lab` 执行：
+
+```powershell
+# 按需幂等启动，提交后立即返回任务 ID；不要把整首推理绑在一次工具等待里。
+.\env\python.exe scripts\sing_client.py --ensure submit --song "C:\path\song.wav" --options-json '{"lead_back":"hp5"}'
+.\env\python.exe scripts\sing_client.py status <id>
+.\env\python.exe scripts\sing_client.py logs <id>
+.\env\python.exe scripts\sing_client.py cancel <id>
+.\env\python.exe scripts\sing_client.py result <id> --out "C:\path\song_feiyu.mp3"
+
+# 可复用已有分离轨 / 局部修复，分别生成独立任务目录。
+.\env\python.exe scripts\sing_client.py --ensure submit --stems-from "C:\path\old-job" --options-json '{"lead_back":"hp5"}'
+.\env\python.exe scripts\sing_client.py --ensure submit --repair-from "C:\path\old-job" --options-json '{"repair_start":88,"repair_dur":12}'
+```
+
+`wait <id> --timeout 1800` 可用于终端。Agent 需要自动回传时，使用 pwsh 工具的
+`run_in_background: true` 启动这条等待命令，拿到后台 job ID 后结束提交回合；收到完成通知后再取输出和成品。
+不要在提交回合前台 `wait`，或用 `job_output(wait=true)` 重新等待后台任务，否则会占着同一聊天的消息队列。
+客户端等待超时不会取消服务器任务。
+状态中的 `work_dir` 可用于下一单的 `repair_from` / `stems_from`；成功时另返回可供本机文件工具读取的 `result_path`。
+重试提交时可指定 `--idempotency-key <稳定键>`，同一请求返回同一任务，避免重复点歌。
+`succeeded_with_warnings` 仍可取成品，但应查看自检日志，不能告诉用户“音质已经通过”。
+
+## API
+
+| 方法与路径 | 行为 |
+|---|---|
+| `GET /health` | 服务就绪、当前任务、模型加载次数和推理次数 |
+| `POST /jobs` | 接受 JSON，返回 **202** 和 `id`，独立目录隔离 |
+| `GET /jobs` | 最近100个任务 |
+| `GET /jobs/{id}` | 状态、当前步骤、排队位置、结果链接 |
+| `GET /jobs/{id}/log` | 最近32 KiB日志 |
+| `POST /jobs/{id}/cancel` | 取消排队或运行中的任务 |
+| `GET /jobs/{id}/result` | 成功任务的 MP3；未完成返回409 |
+| `POST /shutdown` | 清理执行中的进程树和 RVC worker，再退出 |
+
+请求示例：
+
+```json
+{"song":"C:\\path\\song.wav","options":{"pitch":0,"lead_back":"hp5"},"idempotency_key":"chat-song-001"}
+```
+
+也可把 `song` 换成 `stems_from` 或 `repair_from`，三者只能给一个。可选项只接受白名单，不能传任意 CLI
+参数、输出路径或工作目录。默认本地文件只允许位于 `Dsh-bot` / 服务数据目录内；URL 支持 HTTP/HTTPS。
+
+## 启停与生命周期
+
+```powershell
+pwsh -NoProfile -File scripts\start-singing.ps1
+pwsh -NoProfile -File scripts\start-singing.ps1 -Status
+pwsh -NoProfile -File scripts\start-singing.ps1 -Stop
+```
+
+启动器用 Windows 命名互斥量避免并发重复启动，通过健康检查识别服务，通过 WMI 隐藏窗口启动并脱离聊天
+进程树。统一 `start-services.ps1` 会同时管理唱歌；`-SingOnly` 可以只管理唱歌，避免碰 TTS / ASR。
+它不会自动注册开机启动。agent 的 `--ensure` 就是按需启动入口。
+
+任务和日志在 `Dsh-bot/tmp/singing-service`，SQLite 保存排队、状态与错误。重启保留尚未执行的任务，
+执行中的任务标记 `interrupted`，不擅自重跑。主服务对数据目录持单实例锁；多实例必须使用同一个 GPU
+锁目录。每个任务的 Windows Job Object 负责清理完整子进程树，取消或超时还会回收 RVC worker，以便释放
+显存；下一任务重新启动模型进程。因此“取消后的第一单”仍有冷启动成本。
+
+默认等待队列32单、运行超时1800秒（含本单 worker 冷启动，不含排队），主服务可用 `--max-queue`、`--job-timeout` 调整。RVC worker 为懒启动，
+`/health.ready` 表示可接单；`rvc.warmed` 才表示模型已加载。排队位置和步骤不是剩余时间预测。
+接口只监听回环地址，拒绝浏览器 Origin。设置 `SING_SERVICE_TOKEN` 可要求主 API Bearer 鉴权，启动器和客户端
+会读取同一环境变量；私有 RVC worker 始终使用随机内部令牌。外部 WebUI、旧脚本和 TTS/ASR 不自动加入这个
+任务队列，显存仍需留余量。
+
+## 安装与验证
+
+源码保存在 `dsh-qqbot/scripts/singing-service`。`install_singing.py --prepare` 生成目标原文件哈希；
+`install_singing.py --install` 检查并备份后安装，会给 `cover.py` 加可选 RPC 接入和进程启动门，不替换其他逻辑。
+对现有统一启动器只插入唱歌管理分支，保留 TTS/ASR 行为。
+
+测试：`python -B -m unittest discover -s scripts/singing-service -p test_sing_service.py -v`。
+测试覆盖HTTP立即返回、队列串行、运行/排队取消、完整子进程清理、超时、警告成品、幂等提交、重启恢复和输入校验。
+
+SVS（按歌词、乐谱生成歌声）是另一路后端，目前这个服务实现的是 RVC 翻唱，没有把原唱音频自动转成乐谱。
