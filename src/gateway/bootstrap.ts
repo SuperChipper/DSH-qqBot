@@ -14,12 +14,14 @@ import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
 import { handleInbound, createOutboundHandler } from '../transport/index.ts';
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
+import { PeerSendQueue } from '../transport/peer-send-queue.ts';
 import { cacheMsgId, cacheEventId } from '../transport/msgid-cache.ts';
 import { resolveReplyTarget, sendResolvedMarkdown } from '../transport/reply-target.ts';
 import type { ToolsRegistryLike } from '../transport/tool-presenter.ts';
 import type { QQBotSender } from '../transport/outbound-buffer.ts';
 import { QuestionChannel } from '../features/question-channel.ts';
 import { ApprovalChannel, type ApprovalChannelContext } from '../features/approval-channel.ts';
+import { singingWaitGuard } from '../features/singing-wait-guard.ts';
 import { BiliClient } from '../bili/client.ts';
 import { registerBiliTools } from '../bili/tools.ts';
 import { decodeButtonData } from '../features/button-utils.ts';
@@ -32,14 +34,17 @@ import { startCleanup } from '../media/cleanup.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { locateFfmpeg, registerDescribeVideoTool } from '../media/video-tool.ts';
 import { registerSendFileTool, withFreshReplyTarget, type MediaSenderLike } from '../media/send-file-tool.ts';
+import { registerSpeakTool } from '../media/speak-tool.ts';
 import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
 import { registerPetNativeBalance } from '../pet/native-balance.ts';
 import { NotesStore } from '../notes/notes-store.ts';
+import { EmbeddingCache, createOpenAIEmbedder, resolveEmbeddingApiKey } from '../notes/embedding.ts';
 import { ensureTmpDir, resolveTmpDir } from '../media/tmp-dir.ts';
 import { registerNotesTools } from '../notes/notes-tools.ts';
 import { registerFanartPickTool } from '../fanart/fanart-tool.ts';
+import { registerBooruFetchTool } from '../fanart/booru-tool.ts';
 import { createHttpGet } from '../fanart/http.ts';
 import { FanartSeenStore, markSentCandidate } from '../fanart/seen.ts';
 import { CampaignStore } from '../dnd/campaign.ts';
@@ -48,7 +53,12 @@ import { DndService } from '../dnd/dnd-service.ts';
 import { registerDndTools } from '../dnd/dnd-tools.ts';
 import { ACK, DndTurnButtons } from '../dnd/turn-buttons.ts';
 import { ToolAccess, ToolAccessStore } from '../features/tool-access.ts';
+import { getSenderAliases, memberIdsFor } from '../features/sender-alias.ts';
 import { createToolGuard } from '../shared/tool-guard.ts';
+import { registerBrowserTool } from '../browser/browser-tool.ts';
+import { BrowserAccess } from '../browser/browser-access.ts';
+import { resolveProfileDir } from '../shared/utils.ts';
+import { updateProfileConfig } from '../setup/persist.ts';
 import type { JudgeLlm } from '../features/reply-judge.ts';
 
 /**
@@ -61,6 +71,7 @@ function dispatchInteraction(
   manager: SessionManager,
   dndButtons?: DndTurnButtons,
   toolAccess?: ToolAccess,
+  browserAccess?: BrowserAccess,
 ): number {
   const raw = event.data?.resolved?.button_data;
   if (!raw) return ACK.duplicate;
@@ -70,6 +81,7 @@ function dispatchInteraction(
   if (button.t === 'dnd') return dndButtons?.handleInteraction(event) ?? ACK.duplicate;
   // 终端白名单确认：只认主人点击，别人点回 denied
   if (button.t === 'access') return toolAccess?.handleInteraction(event) ?? ACK.duplicate;
+  if (button.t === 'browser-access') return browserAccess?.handleInteraction(event) ?? ACK.duplicate;
   const matched = button.t === 'question'
     ? manager.questionChannel?.handleInteraction(event) ?? false
     : manager.approvalChannel?.handleInteraction(event) ?? false;
@@ -123,7 +135,15 @@ function createNotesStore(config: ImQQBotConfig, logger: Logger): NotesStore | u
     ? resolve(cwd, 'notes')
     : (isAbsolute(configuredRoot) ? configuredRoot : resolve(cwd, configuredRoot));
   logger.info(`im-qqbot: 共享笔记库已启用 root=${root}`);
-  return new NotesStore(root, logger);
+  const store = new NotesStore(root, logger);
+  const semantic = notes.semantic;
+  if (semantic?.enabled) {
+    // 没密钥也照样挂上：baseUrl 可能指向不需要鉴权的本地服务（Ollama 等）；鉴权失败会进冷却、退回 BM25
+    if (resolveEmbeddingApiKey(semantic) === '') logger.warn('im-qqbot: 笔记语义检索已启用但没有密钥（QQBOT_EMBEDDING_API_KEY），远程接口会拒绝请求');
+    store.setSemantic(new EmbeddingCache(createOpenAIEmbedder(semantic), semantic.timeoutMs, logger), semantic);
+    logger.info(`im-qqbot: 笔记语义检索已启用 model=${semantic.model} minSimilarity=${semantic.minSimilarity} minMargin=${semantic.minMargin}`);
+  }
+  return store;
 }
 
 /** 解析跑团目录，构建 DndService（关闭时返回 undefined）；数据放在 agent 工作目录下，不进插件仓库 */
@@ -213,15 +233,17 @@ export async function bootstrapGateway(
   // 发送适配器：将 QQBot 实例适配为 QQBotSender（openStream 参数形态不同）。
   // sendMarkdown 统一做被动回复限额管控：同一 msgId 超限/过期时降级主动推送。
   const replyLimiter = new ReplyLimiter({ limit: 4 });
+  const sendQueue = new PeerSendQueue();
   const sender: QQBotSender = {
-    sendMarkdown: (target, content, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts),
-    openStream: (target) => bot.openStream({
+    sendMarkdown: (target, content, opts) => sendQueue.run(target,
+      () => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts)),
+    openStream: (target) => sendQueue.stream(target, () => bot.openStream({
       target: {
         scope: target.scope,
         targetId: target.targetId,
         msgId: target.msgId as string,
       },
-    }),
+    })),
   };
 
   const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, stickerStore);
@@ -268,6 +290,8 @@ export async function bootstrapGateway(
     if (guardTools?.guard === undefined) {
       logger.warn('im-qqbot: tools.guard 不可用，工具权限拦截未启用');
     } else {
+      guardTools.guard(singingWaitGuard((agent) => manager.findByAgent(agent as never) !== undefined));
+      logger.info('im-qqbot: 唱歌等待保护已启用（后台等待不占聊天队列）');
       guardTools.guard(createToolGuard({
         config,
         isFullAccess: (session) => toolAccess.isFullAccess(session),
@@ -282,6 +306,12 @@ export async function bootstrapGateway(
     logger.warn(`im-qqbot: 工具权限拦截注册失败: ${err instanceof Error ? err.message : String(err)}`);
   }
   toolAccess.register(ctx);
+  const browserAccess = config.browser?.enabled && config.ownerOpenid?.trim()
+    ? new BrowserAccess(config, manager, sender, logger, (allowedGroups) => updateProfileConfig(
+      { browser: { ...config.browser, allowedGroups } }, resolveProfileDir(ctx.baseUrl) ?? undefined, logger,
+    ))
+    : undefined;
+  browserAccess?.register(ctx);
 
   bot.on('interaction', async (_iCtx: unknown, event: InteractionEvent) => {
     // scope/targetId 推导对齐消息事件（inbound.ts）：按 scene 判定类型，群用 group_openid，私聊用 user_openid
@@ -290,7 +320,7 @@ export async function bootstrapGateway(
     // 记录互动事件 id，作为后续被动回复候选（event_id）
     cacheEventId(scope, targetId, event.id);
 
-    const code = dispatchInteraction(event, manager, dndButtons, toolAccess);
+    const code = dispatchInteraction(event, manager, dndButtons, toolAccess, browserAccess);
     await bot.acknowledgeInteraction(event.id, code).catch(() => {});
   });
 
@@ -327,6 +357,7 @@ export async function bootstrapGateway(
   // ── 视觉工具注册（qqbot_describe_image，复用 dsh llm + attachments） ──
   ensureVisionInputModal(config.vision, logger);
   registerDescribeImageTool(ctx, config.vision, logger);
+  registerBrowserTool(ctx, config, manager, logger, browserAccess);
 
   // ── 视频理解工具（qqbot_describe_video：抽帧宫格 + 音轨 ASR；ffmpeg 不可用时跳过） ──
   // 先找 ffmpeg：winget 装的不在 PATH 里时，把它的目录补进本进程 PATH（终端工具会继承），并在 prompt 里点名路径
@@ -353,20 +384,28 @@ export async function bootstrapGateway(
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
   // 注意：SDK 文件发送暂不支持 event_id，故 allowEvent=false，跳过 event 候选。
   const mediaSender: MediaSenderLike = {
-    sendImage: (target, source, opts) => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source, opts),
-    sendVideo: (target, source, opts) => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source, opts),
-    sendVoice: (target, source) => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source),
-    sendFile: (target, source, opts) => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts),
+    sendImage: (target, source, opts) => sendQueue.run(target, () => bot.sendImage(resolveReplyTarget(target, replyLimiter, false), source, opts)),
+    sendVideo: (target, source, opts) => sendQueue.run(target, () => bot.sendVideo(resolveReplyTarget(target, replyLimiter, false), source, opts)),
+    sendVoice: (target, source) => sendQueue.run(target, () => bot.sendVoice(resolveReplyTarget(target, replyLimiter, false), source), true),
+    sendFile: (target, source, opts) => sendQueue.run(target, () => bot.sendFile(resolveReplyTarget(target, replyLimiter, false), source, opts)),
   };
   // ── 搜图工具（qqbot_fanart_pick）：候选落在 tmp/fanart，发出去的那张才记进 media/fanart 的 seen ──
   const fanartCandidatesDir = join(resolveTmpDir(config), 'fanart');
   const fanartSeen = new FanartSeenStore(join(MEDIA_ROOT, 'fanart'));
   if (config.fanart.enabled) {
     const poolDir = config.fanart.poolDir.trim();
+    // 两个工具共用一个 HttpGet：代理探测只做一次，免得每轮都读注册表
+    const fanartGet = createHttpGet(config.fanart.proxy);
     registerFanartPickTool(ctx, config, {
-      get: createHttpGet(config.fanart.proxy),
+      get: fanartGet,
       seen: fanartSeen,
       poolDir: poolDir === '' ? resolve(PLUGIN_ROOT, 'scripts') : (isAbsolute(poolDir) ? poolDir : resolve(PLUGIN_ROOT, poolDir)),
+      candidatesDir: fanartCandidatesDir,
+    }, logger);
+    // 单角色定时推送用：按 tag 直接取一张落地，候选图命名与上面一致，发送后自动记为已发
+    registerBooruFetchTool(ctx, config, {
+      get: fanartGet,
+      seen: fanartSeen,
       candidatesDir: fanartCandidatesDir,
     }, logger);
   }
@@ -376,6 +415,12 @@ export async function bootstrapGateway(
     }
   });
 
+  // ── 语音合成工具注册（qqbot_speak） ──
+  // 放在插件里而不是让模型自己跑命令：沙箱里联网要人审批，开一次口弹一次确认太出戏。
+  if (config.speak.enabled) {
+    registerSpeakTool(ctx, mediaSender, manager, config, logger);
+  }
+
   // ── Bilibili 只读工具（搜索/视频/评论/字幕/扫码登录） ──
   const biliTools = ctx.get('tools') as { register(definition: unknown): unknown } | undefined;
   if (biliTools !== undefined) {
@@ -383,17 +428,24 @@ export async function bootstrapGateway(
     registerBiliTools(biliTools, {
       client: biliClient,
       logger,
-      permission: (agent) => {
+      permission: (agent, kind = 'login') => {
         const record = manager.findByAgent(agent as never);
         // 本地 Web/Desktop 会话没有 QQ 记录：视为本机可信，只返回二维码路径
         if (record === undefined) return { allowed: true };
+        const hasOwners = privilegedOpenids(config).length > 0;
+        // 群里 peerId 是群 openid，判断是不是主人得看这条消息的发送者
+        const senderPrivileged = hasOwners && isPrivilegedSender(record.senderId, config);
         if (record.scope !== 'c2c') {
+          // 群里只把字幕放开给主人/管理员；扫码登录留在私聊，二维码不进群
+          if (kind === 'subtitle' && senderPrivileged) return { allowed: true };
           return {
             allowed: false,
-            reason: 'B 站登录/字幕只能在私聊里由主人或管理员操作；群聊可以用 bili_search / bili_video / bili_comments',
+            reason: kind === 'login'
+              ? '扫码登录只能在私聊里做：二维码发进群等于让所有人都有机会绑账号。群聊可以用 bili_search / bili_video / bili_comments'
+              : 'B 站字幕在群里只对 bot 主人或管理员开放；其他人可以用 bili_search / bili_video / bili_comments',
           };
         }
-        if (privilegedOpenids(config).length === 0) {
+        if (!hasOwners) {
           return { allowed: false, reason: '请先在插件配置里设置 ownerOpenid 或 adminOpenids，再登录 B 站' };
         }
         if (!isPrivilegedSender(record.peerId, config)) {
@@ -435,6 +487,7 @@ export async function bootstrapGateway(
         );
       },
       onTurnChange: (record) => dndButtons?.schedule(record),
+      members: memberIdsFor(getSenderAliases(), config.appId),
     });
   }
 
@@ -451,6 +504,9 @@ export async function bootstrapGateway(
 
       return async () => {
         logger.info('Shutting down');
+        sendQueue.dispose();
+        // 待答问题挂在旧实例上，重载后没人能答：先让它们以 ASK_ABORTED 结束
+        questionChannel.uninstall();
         await manager.disposeAll();
         bot.stop();
       };

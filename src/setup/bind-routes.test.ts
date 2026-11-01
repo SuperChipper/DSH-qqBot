@@ -416,6 +416,64 @@ describe('bind-routes', () => {
     });
   });
 
+  it('POST config：speak 通过校验并写入', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"speak":{"enabled":true,"voice":"zh-CN-XiaoxiaoNeural","rate":"+5%","maxChars":80,"command":""}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(updates[0]).toMatchObject({ speak: { voice: 'zh-CN-XiaoxiaoNeural', maxChars: 80 } });
+  });
+
+  it('POST config：speak.voice 类型错误被拒', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"speak":{"enabled":true,"voice":42,"rate":"+5%","maxChars":80,"command":""}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(updates).toHaveLength(0);
+  });
+
+  it('POST config：speak.gsvUrl / gsvSpeed 通过校验并写入', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"speak":{"enabled":true,"voice":"zh-CN-XiaoyiNeural","rate":"+8%","maxChars":120,"command":"",'
+        + '"gsvUrl":"http://127.0.0.1:8765","gsvSpeed":1.1}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(updates[0]).toMatchObject({ speak: { gsvUrl: 'http://127.0.0.1:8765', gsvSpeed: 1.1 } });
+  });
+
+  it('POST config：speak.gsvSpeed 类型错误被拒', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"speak":{"enabled":true,"voice":"zh-CN-XiaoyiNeural","rate":"+8%","maxChars":120,"command":"",'
+        + '"gsvUrl":"http://127.0.0.1:8765","gsvSpeed":"fast"}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(400);
+    expect(updates).toHaveLength(0);
+  });
+
   it('POST config：replyDesire 通过校验并写入', async () => {
     const updates: Array<Record<string, unknown>> = [];
     const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
@@ -460,6 +518,53 @@ describe('bind-routes', () => {
     }
   });
 
+  it('POST config：browser 保存合法值，最小写入顶层键', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (value) => { updates.push(value); return true; } });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' },
+      JSON.stringify({ browser: { enabled: true, mode: 'local', channel: 'chrome', allowedGroups: ['g1'] } })), res);
+    expect(res.statusCode).toBe(200);
+    expect(Object.keys(updates[0]!)).toEqual(['browser']);
+    expect(updates[0]?.browser).toMatchObject({ enabled: true, mode: 'local', channel: 'chrome', headless: false, timeoutMs: 30000, allowedGroups: ['g1'] });
+  });
+
+  it.each([
+    { enabled: 'yes' }, { mode: 'stealth' }, { channel: 'unknown' }, { userDataDir: 12 },
+    { timeoutMs: 999 }, { timeoutMs: 120001 }, { timeoutMs: 'fast' },
+    { maxTextChars: 0 }, { maxTextChars: 50001 }, { headless: 'false' },
+    { allowedGroups: 'g1' }, { allowedGroups: [123] },
+  ])('POST config：browser 拒绝非法配置 %j', async (browser) => {
+    const update = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig: update });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify({ browser })), res);
+    expect(res.statusCode).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('POST config：私聊压缩比例与工具链推迟开关通过校验并写入', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (value) => { updates.push(value); return true; } });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' },
+      '{"autoCompactPrivateRatio":0.6,"autoCompactDeferOnTools":false}'), res);
+    expect(res.statusCode).toBe(200);
+    expect(updates[0]).toEqual({ autoCompactPrivateRatio: 0.6, autoCompactDeferOnTools: false });
+  });
+
+  it.each([
+    { autoCompactPrivateRatio: -0.1 }, { autoCompactPrivateRatio: 0.95 }, { autoCompactPrivateRatio: '0.5' },
+    { autoCompactDeferOnTools: 'yes' },
+  ])('POST config：压缩配置非法值被拒 %j', async (body) => {
+    const update = vi.fn(() => true);
+    const { routes } = createHarness({ onUpdateConfig: update });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, JSON.stringify(body)), res);
+    expect(res.statusCode).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
   it('POST config：数值越界被拒绝', async () => {
     const { routes } = createHarness({ onUpdateConfig: () => true });
     const res = fakeRes();
@@ -498,6 +603,88 @@ describe('bind-routes', () => {
     );
     expect(res.statusCode).toBe(200);
     expect((updates[0]?.asr as { apiKey?: string }).apiKey).toBe('sk-secret');
+  });
+
+  it('GET config：不回传 asr.fallback.apiKey', async () => {
+    const { routes } = createHarness({
+      currentConfig: () => ({ asr: { enabled: true, apiKey: 'sk-a', fallback: { enabled: true, apiKey: 'sk-online', baseUrl: 'https://x/v1' } } }),
+    });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
+    const body = json(res) as { config: { asr: { apiKey: string; fallback: { apiKey: string; baseUrl: string } } } };
+    expect(body.config.asr.apiKey).toBe('');
+    expect(body.config.asr.fallback).toEqual({ enabled: true, apiKey: '', baseUrl: 'https://x/v1' });
+  });
+
+  it('POST config：asr.fallback 合法值通过并保留已存的备用密钥；越界被拒', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({
+      currentConfig: () => ({ asr: { apiKey: 'sk-a', fallback: { enabled: false, apiKey: 'sk-online' } } }),
+      onUpdateConfig: (config) => { updates.push(config); return true; },
+    });
+    const post = async (fallback: Record<string, unknown>): Promise<number> => {
+      const res = fakeRes();
+      await invoke(
+        routes.get(BIND_CONFIG_PATH),
+        fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' }, JSON.stringify({
+          asr: { enabled: true, baseUrl: 'http://127.0.0.1:8080/v1', model: 'large-v3-turbo', preferQQ: true, timeoutMs: 30000, fallback },
+        })),
+        res,
+      );
+      return res.statusCode;
+    };
+    expect(await post({ enabled: true, baseUrl: 'https://api.siliconflow.cn/v1', model: 'FunAudioLLM/SenseVoiceSmall', timeoutMs: 20000 })).toBe(200);
+    const asr = updates[0]?.asr as { apiKey: string; fallback: Record<string, unknown> };
+    expect(asr.apiKey).toBe('sk-a');
+    expect(asr.fallback).toEqual({ enabled: true, baseUrl: 'https://api.siliconflow.cn/v1', model: 'FunAudioLLM/SenseVoiceSmall', timeoutMs: 20000, apiKey: 'sk-online' });
+    expect(await post({ timeoutMs: 10 })).toBe(400);
+    expect(await post({ enabled: 'yes' })).toBe(400);
+  });
+
+  it('GET config：不回传 notes.semantic.apiKey', async () => {
+    const { routes } = createHarness({
+      currentConfig: () => ({ notes: { enabled: true, semantic: { enabled: true, apiKey: 'sk-embed', model: 'BAAI/bge-m3' } } }),
+    });
+    const res = fakeRes();
+    await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('GET', { host: '127.0.0.1:3080' }), res);
+    const body = json(res) as { config: { notes: { semantic: { apiKey: string; enabled: boolean; model: string } } } };
+    expect(body.config.notes.semantic).toEqual({ enabled: true, apiKey: '', model: 'BAAI/bge-m3' });
+  });
+
+  it('POST config：notes.semantic 合法值通过并保留已存 apiKey', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({
+      currentConfig: () => ({ notes: { semantic: { enabled: false, apiKey: 'sk-embed' } } }),
+      onUpdateConfig: (config) => { updates.push(config); return true; },
+    });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' }, JSON.stringify({
+        notes: {
+          enabled: true, root: '', autoInject: true, injectTopK: 2, injectMaxChars: 600, injectMinCoverage: 0.4,
+          semantic: { enabled: true, baseUrl: 'http://127.0.0.1:11434/v1', model: 'bge-m3', minSimilarity: 0.55, minMargin: 0.12, timeoutMs: 2000 },
+        },
+      })),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect((updates[0]?.notes as { semantic: unknown }).semantic).toEqual({
+      enabled: true, baseUrl: 'http://127.0.0.1:11434/v1', model: 'bge-m3', minSimilarity: 0.55, minMargin: 0.12, timeoutMs: 2000, apiKey: 'sk-embed',
+    });
+  });
+
+  it('POST config：notes.semantic 越界或类型错误被拒绝', async () => {
+    for (const semantic of [{ minSimilarity: 1.5 }, { minMargin: -0.1 }, { timeoutMs: 100 }, { enabled: 'yes' }]) {
+      const { routes } = createHarness({ onUpdateConfig: () => true });
+      const res = fakeRes();
+      await invoke(
+        routes.get(BIND_CONFIG_PATH),
+        fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' }, JSON.stringify({ notes: { semantic } })),
+        res,
+      );
+      expect(res.statusCode, JSON.stringify(semantic)).toBe(400);
+    }
   });
 
   it('POST config：cleanup 只改 dryRun 时保留自定义规则', async () => {

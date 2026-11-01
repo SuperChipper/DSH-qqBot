@@ -25,11 +25,13 @@ import {
   CleanupSchema,
   DndSchema,
   FanartSchema,
+  BrowserSchema,
   FileAccessSchema,
   MediaSchema,
   NotesSchema,
   ReplyDesireSchema,
   SendFileSchema,
+  SpeakSchema,
   StickersSchema,
   ToolAccessSchema,
   VideoSchema,
@@ -114,11 +116,11 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
   'groupReplyProbability', 'replyDesire', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
-  'adminOpenids', 'autoCompactTokens', 'textChunkLimit', 'maxQueue',
+  'adminOpenids', 'autoCompactTokens', 'autoCompactPrivateRatio', 'autoCompactDeferOnTools', 'textChunkLimit', 'maxQueue',
   'processingTimeoutMs', 'askTimeoutMs',
   'tmpDir', 'tmpTtlHours', 'tmpMaxTotalMB',
   'access', 'fileAccess', 'stickers', 'notes', 'toolAccess',
-  'media', 'vision', 'asr', 'video', 'sendFile', 'cleanup', 'fanart', 'dnd',
+  'media', 'vision', 'asr', 'video', 'sendFile', 'speak', 'cleanup', 'fanart', 'dnd', 'browser',
 ]);
 
 /** 白名单键的子 Schema（服务端校验：客户端校验仅为体验，安全边界在宿主） */
@@ -135,6 +137,8 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   groupReplyProbability: (v) => numberSchema(v, 'groupReplyProbability', 0, 1),
   historyLimit: (v) => integerSchema(v, 'historyLimit', 0, 200),
   autoCompactTokens: (v) => integerSchema(v, 'autoCompactTokens', 0, 1_000_000),
+  autoCompactPrivateRatio: (v) => numberSchema(v, 'autoCompactPrivateRatio', 0, 0.9),
+  autoCompactDeferOnTools: (v) => booleanSchema(v, 'autoCompactDeferOnTools'),
   textChunkLimit: (v) => integerSchema(v, 'textChunkLimit', 200, 5000),
   maxQueue: (v) => integerSchema(v, 'maxQueue', 1, 100),
   processingTimeoutMs: (v) => integerSchema(v, 'processingTimeoutMs', 10_000, 6 * 60 * 60 * 1000),
@@ -155,8 +159,11 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   asr: (v) => AsrSchema(v as never),
   video: (v) => VideoSchema(v as never),
   sendFile: (v) => SendFileSchema(v as never),
+  speak: (v) => SpeakSchema(v as never),
   cleanup: (v) => CleanupSchema(v as never),
   fanart: (v) => FanartSchema(v as never),
+  // allowedGroups 与其余浏览参数共用唯一真源校验，群权限不继承终端白名单。
+  browser: (v) => BrowserSchema(v as never),
   dnd: (v) => DndSchema(v as never),
   replyDesire: (v) => ReplyDesireSchema(v as never),
 };
@@ -427,11 +434,19 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
 
   if (req.method === 'GET') {
     const current = options.currentConfig?.() ?? {};
-    // appSecret / asr.apiKey 永不回传；其余（含只读 cwd）原样回显
-    const { appSecret: _s, asr: asrValue, ...safe } = current;
-    const config = asrValue === undefined
-      ? safe
-      : { ...safe, asr: { ...(asrValue as Record<string, unknown>), apiKey: '' } };
+    // appSecret / asr.apiKey / asr.fallback.apiKey / notes.semantic.apiKey 永不回传；其余（含只读 cwd）原样回显
+    const { appSecret: _s, asr: asrValue, notes: notesValue, ...safe } = current;
+    const config: Record<string, unknown> = { ...safe };
+    if (asrValue !== undefined) {
+      const asr = asrValue as Record<string, unknown>;
+      const fallback = asr.fallback as Record<string, unknown> | undefined;
+      config.asr = { ...asr, apiKey: '', ...(fallback === undefined ? {} : { fallback: { ...fallback, apiKey: '' } }) };
+    }
+    if (notesValue !== undefined) {
+      const notes = notesValue as Record<string, unknown>;
+      const semantic = notes.semantic as Record<string, unknown> | undefined;
+      config.notes = semantic === undefined ? notes : { ...notes, semantic: { ...semantic, apiKey: '' } };
+    }
     sendJson(res, 200, { config });
     return;
   }
@@ -480,7 +495,18 @@ async function handleConfig(req: IncomingMessage, res: ServerResponse, options: 
   const current = options.currentConfig?.() ?? {};
   if (validated.asr !== undefined) {
     const currentAsr = (current.asr ?? {}) as Record<string, unknown>;
-    validated.asr = { ...(validated.asr as Record<string, unknown>), apiKey: currentAsr.apiKey ?? '' };
+    const currentFallback = currentAsr.fallback as Record<string, unknown> | undefined;
+    const asr = validated.asr as Record<string, unknown>;
+    validated.asr = {
+      ...asr,
+      apiKey: currentAsr.apiKey ?? '',
+      fallback: { ...(asr.fallback as Record<string, unknown>), apiKey: currentFallback?.apiKey ?? '' },
+    };
+  }
+  if (validated.notes !== undefined) {
+    const notes = validated.notes as Record<string, unknown>;
+    const currentSemantic = ((current.notes ?? {}) as Record<string, unknown>).semantic as Record<string, unknown> | undefined;
+    notes.semantic = { ...(notes.semantic as Record<string, unknown>), apiKey: currentSemantic?.apiKey ?? '' };
   }
   if (validated.cleanup !== undefined) {
     const currentCleanup = (current.cleanup ?? {}) as Record<string, unknown>;

@@ -81,7 +81,7 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
     const answer = async (result: DesireResult): Promise<void> => {
       queue?.cancel(groupId);
       if (!dnd) tracker.take(groupId, msg.senderId, Date.now(), rd.engagedMs, rd.engagedMaxTurns);
-      tracker.markSticker(groupId, msg.senderId, result);
+      tracker.markSticker(groupId, msg.senderId, result, Date.now());
       ctx.state.mention = { wasMentioned: mention?.wasMentioned ?? false, implicit: true, shouldAnswer: true, reason: 'passthrough' };
       ctx.state.replyDesire = result;
       logger.info(`reply-desire: answer group=${groupId} score=${result.score.toFixed(2)} [${result.reasons.join(',')}]`);
@@ -117,7 +117,9 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
       sinceBotSpoke: tracker.sinceBotSpoke(groupId, now),
       stickerAnswered: tracker.stickerAnswered(groupId, msg.senderId),
       chainAnswered: tracker.chainAnswered(groupId),
+      sinceStickerReply: tracker.sinceStickerReply(groupId, now),
       dnd,
+      collection: stickerId !== undefined ? manager.stickerStore?.collectionKind(stickerId) : undefined,
     });
     tracker.record(groupId, { senderId: msg.senderId, stickerId });
     if (result.score >= rd.threshold) {

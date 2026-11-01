@@ -115,12 +115,30 @@ describe('replyDecider', () => {
     });
   });
 
-  it('bot 刚说完话有人甩表情包：放行并标成表情包回应，同一个人再甩就不接', async () => {
+  it('群友发 bot 自带的表情包：没刚说过话也接，按收藏比对文件名（内容 MD5）', async () => {
+    const collectionKind = vi.fn((md5: string) => (md5 === 'AD030B48' ? 'pack' : undefined));
+    const withStickers = { stickerStore: { collectionKind } } as unknown as SessionManager;
+    const pack = makeCtx('g4', 'u7', STICKER, false, [{ content_type: 'image/png', filename: 'ad030b48.png' }]);
+    expect(await run(pack.ctx, withStickers)).toBe(true);
+    expect(pack.ctx.state.replyDesire).toMatchObject({ mode: 'sticker', reasons: ['sticker-mine'] });
+    expect(collectionKind).toHaveBeenCalledWith('AD030B48');
+    const other = makeCtx('g4', 'u8', STICKER, false, [{ content_type: 'image/png', filename: 'FFFF.png' }]);
+    expect(await run(other.ctx, withStickers)).toBe(false);
+  });
+
+  it('刚和 bot 聊过的人在 bot 说完话后甩表情包：接一张，之后 5 分钟别人再甩也不接', async () => {
+    expect(await run(makeCtx('g3', 'u9', '在吗', true).ctx)).toBe(true);
     getEngagementTracker().touch('g3', Date.now(), 60_000);
     const pic = [{ content_type: 'image/png', filename: 'ABC.png' }];
     const first = makeCtx('g3', 'u9', STICKER, false, pic);
     expect(await run(first.ctx)).toBe(true);
-    expect(first.ctx.state.replyDesire).toMatchObject({ mode: 'sticker' });
-    expect(await run(makeCtx('g3', 'u9', STICKER, false, pic).ctx)).toBe(false);
+    expect(first.ctx.state.replyDesire).toMatchObject({ mode: 'sticker', reasons: ['sticker-react', 'engaged-peer'] });
+    const other = makeCtx('g3', 'u10', STICKER, false, [{ content_type: 'image/png', filename: 'DEF.png' }]);
+    expect(await run(other.ctx)).toBe(false);
+  });
+
+  it('bot 刚说完话，没和它聊过的人甩表情包：不接', async () => {
+    getEngagementTracker().touch('g6', Date.now(), 60_000);
+    expect(await run(makeCtx('g6', 'u1', STICKER, false, [{ content_type: 'image/png', filename: 'ABC.png' }]).ctx)).toBe(false);
   });
 });
