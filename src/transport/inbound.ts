@@ -9,6 +9,7 @@
  * - Layer 5: agentBody（history + base 拼合）
  */
 import type { ContentBlock } from '@deepseek-ai/dsh-llm';
+import { readFile } from 'node:fs/promises';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { SessionManager } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
@@ -34,7 +35,11 @@ import {
 } from '../media/history-images.ts';
 import { createForwardTagger, type ForwardImage, type TaggedForwardImage } from '../media/forward-images.ts';
 import { ASR_OFFLINE_HINT } from '../media/asr.ts';
+import { buildGifSheetNote, isGifBytes, makeGifSheet, type GifSheet } from '../media/gif-sheet.ts';
+import { formatMessageTime, makeSenderLabeler, MENTION_MARK, quoteHeader, type SenderLabeler } from '../features/message-format.ts';
+import { getSenderAliases } from '../features/sender-alias.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
+import { runInboundTurn } from './agent-turn.ts';
 
 // ── 类型定义 ──
 
@@ -54,7 +59,7 @@ interface ProcessedMessage {
 
 interface ResolvedQuote {
   text?: string;
-  entry?: { senderId?: string; content?: string };
+  entry?: { senderId?: string; senderName?: string; content?: string };
   attachments?: QuotedAttachment[];
 }
 
@@ -85,6 +90,8 @@ interface MiddlewareState {
   forwardImages?: ForwardImage[];
   /** concurrencyGuard 合并多条消息时的全部发送者（见 mergeWithSenders） */
   mergedSenders?: string[];
+  /** mergeWithSenders 已经给每行加了发送者标签和 (@you)，组装时不再整体加 */
+  senderTagged?: boolean;
   [key: string]: unknown;
 }
 
@@ -99,6 +106,7 @@ export async function handleInbound(
   config: ImQQBotConfig,
   logger: Logger,
 ): Promise<void> {
+  if (ctx.signal.aborted) return;
   const msg = ctx.message as unknown as ProcessedMessage;
   const mwState = ctx.state as MiddlewareState;
   const { bot } = ctx;
@@ -144,7 +152,11 @@ export async function handleInbound(
   const forwardImages = forward.tagged;
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
-  const agentBody = assembleAgentBody(bodyMsg, bodyState, scope, manager, history, historyImages, forwardImages);
+  // 群里给模型看的发送者标签用群内短别名（#U3）；私聊只有一个对话者，引用块里称「对方」
+  const label: SenderLabeler = scope === 'group'
+    ? makeSenderLabeler((id) => getSenderAliases().aliasFor(config.appId, peerId, id))
+    : () => '对方';
+  const agentBody = await assembleAgentBody(bodyMsg, bodyState, scope, manager, history, historyImages, forwardImages, label);
 
   if (!agentBody) return;
 
@@ -203,7 +215,7 @@ export async function handleInbound(
     if (hasNativeImage) {
       content.push({
         type: 'text' as const,
-        text: '[图片已原生注入：直接看图，不要先调用 qqbot_describe_image；只有逐字 OCR、图表/表格、长截图或你看不清时才用它补充。]',
+        text: '[图片已原生注入：直接看图，不要调用 qqbot_describe_image。]',
       });
     }
 
@@ -226,7 +238,14 @@ export async function handleInbound(
     for (const file of images) {
       if (file.contentType !== 'image' || seen.has(file.localPath)) continue;
       seen.add(file.localPath);
-      const block = await manager.createImageBlock(file.localPath);
+      // 动图先抽帧拼宫格：宿主的图片归一化只留单帧，动画会整个丢掉
+      let attachPath = file.localPath;
+      const sheet = await gifSheetFor(file.localPath, manager.ffmpegPath);
+      if (sheet !== undefined) {
+        content.push({ type: 'text', text: buildGifSheetNote(sheet) });
+        attachPath = sheet.path;
+      }
+      const block = await manager.createImageBlock(attachPath);
       if (block === undefined) continue;
       if (historyAttached > 0 && !currentLabeled) {
         content.push({ type: 'text', text: '[当前消息的图片]' });
@@ -250,27 +269,23 @@ export async function handleInbound(
     source: { kind: 'user' as const },
   });
 
-  record.agent.followup(message);
-  logger.info(`→ followup sent: key=${scope}:${peerId}`);
-
-  // 群消息回复后清空历史缓存（避免下次 @ 时重复组包）
-  if (scope === 'group') {
-    clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
-  }
-  // 推进群历史游标：到当前这条为止的群消息都已经进了会话
-  if (isGroupTrigger) {
-    writeHistoryCursor(config.appId, peerId, { sessionId: record.sessionId, messageId: msg.messageId });
-  }
-
   // 阻塞等待本轮 turn 收敛，避免后续消息在 turn 运行期间被 followup 打断
   try {
-    await record.agent.whenIdle();
+    await runInboundTurn(record.agent, message, ctx.signal, () => {
+      logger.info(`→ followup sent: key=${scope}:${peerId}`);
+      if (scope === 'group') {
+        clearGroupHistory(config.appId, msg.groupOpenid ?? msg.senderId);
+      }
+      if (isGroupTrigger) {
+        writeHistoryCursor(config.appId, peerId, { sessionId: record.sessionId, messageId: msg.messageId });
+      }
+    });
   } catch (err) {
     logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);
   }
 
   // 上下文超阈值时后台压缩（只针对 QQ 会话）
-  manager.maybeAutoCompact(record);
+  if (!ctx.signal.aborted) manager.maybeAutoCompact(record);
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -280,7 +295,7 @@ export async function handleInbound(
 /**
  * 组装 agentBody — AI 实际看到的完整上下文
  */
-function assembleAgentBody(
+async function assembleAgentBody(
   msg: ProcessedMessage,
   state: MiddlewareState,
   scope: ChatScope,
@@ -288,7 +303,8 @@ function assembleAgentBody(
   history: HistoryEntry[] | undefined,
   historyImages: HistoryImage[],
   forwardImages: readonly TaggedForwardImage[],
-): string | null {
+  label: SenderLabeler,
+): Promise<string | null> {
   const isGroup = scope === 'group';
   const wasMentioned = state.mention?.wasMentioned ?? false;
   const implicit = state.mention?.implicit ?? false;
@@ -297,8 +313,14 @@ function assembleAgentBody(
 
   if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned)) return null;
 
-  const quotePart = buildQuotePart(state.quote);
-  const userMessage = buildUserMessage(userContent, quotePart, msg.senderId, msg.senderName, isGroup, wasMentioned);
+  const quotePart = buildQuotePart(state.quote, label);
+  const userMessage = buildUserMessage(userContent, quotePart, {
+    tag: isGroup ? label(msg.senderId, msg.senderName) : '',
+    isGroup,
+    wasMentioned,
+    senderTagged: state.senderTagged === true,
+    time: formatMessageTime(msg.timestamp),
+  });
 
   const dynamicCtx = buildDynamicCtx(msg, state);
   const stickerHints = buildStickerHints(state.downloadedFiles, manager);
@@ -309,13 +331,13 @@ function assembleAgentBody(
     : `[上次未送达]\n上一次发给本会话的消息因平台限制失败，内容如下。现在用户重新说话了，可以把它作为回复补发（太长就发摘要）：\n${unsent}`;
   const migrationHint = manager.takeScheduleMigration(scope, peerId);
   // 共享笔记自动召回：用当前消息（含引用原文）检索，命中才注入
-  const notesHint = manager.notesHint([userContent, state.quote?.text ?? state.quote?.entry?.content ?? ''].join('\n'), scope, peerId);
+  const notesHint = await manager.notesHint([userContent, state.quote?.text ?? state.quote?.entry?.content ?? ''].join('\n'), scope, peerId);
 
   const forwardHint = buildForwardHint(forwardImages);
   const replyStyleHint = buildReplyStyleHint(state.replyDesire as { mode?: string } | undefined);
 
   const base = [dynamicCtx, stickerHints, forwardHint, notesHint, unsentHint, migrationHint, replyStyleHint, userMessage].filter(Boolean).join('\n');
-  const agentBody = buildAgentBody(base, history, isGroup, wasMentioned || implicit, historyImages);
+  const agentBody = buildAgentBody(base, history, isGroup, wasMentioned || implicit, label, historyImages);
 
   return agentBody;
 }
@@ -408,35 +430,44 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState): string
 }
 
 /**
- * Layer 2: 引用消息块
+ * Layer 2: 引用消息块（带被引用那条的发送者）
  */
-function buildQuotePart(quote?: ResolvedQuote): string {
+export function buildQuotePart(quote: ResolvedQuote | undefined, label: SenderLabeler): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
   const quoteText = quote.text || quote.entry?.content || 'Original content unavailable';
 
-  return `[Quoted message begins]\n${quoteText}\n[Quoted message ends]\n[Current message]\n`;
+  const from = quote.entry?.senderId ? label(quote.entry.senderId, quote.entry.senderName) : undefined;
+  return `${quoteHeader(from)}\n${quoteText}\n[Quoted message ends]\n`;
+}
+
+interface CurrentSender {
+  /** 当前发送者的标签（[昵称 #U3]）；私聊不用 */
+  tag: string;
+  isGroup: boolean;
+  wasMentioned: boolean;
+  /** 内容已按行带了发送者标签（多人排队合并） */
+  senderTagged: boolean;
+  /** 已格式化的发送时间，空串时省略 */
+  time: string;
 }
 
 /**
- * Layer 3: 带发送者标签的用户消息
+ * Layer 3: 带发送者标签的用户消息。
+ * 群聊固定以 [Current message] 起头、标签紧跟其后，模型一眼看到「要回的是这条、是这个人说的」。
+ * 私聊只有一个对话者，不加标签；有引用时才用 [Current message] 把引用和正文分开。
  */
-function buildUserMessage(
-  userContent: string,
-  quotePart: string,
-  senderId: string,
-  senderName: string | undefined,
-  isGroup: boolean,
-  wasMentioned: boolean,
-): string {
-  if (!isGroup) {
-    return `${quotePart}${userContent}`;
+export function buildUserMessage(userContent: string, quotePart: string, sender: CurrentSender): string {
+  if (!sender.isGroup) {
+    return quotePart ? `${quotePart}[Current message]\n${userContent}` : userContent;
   }
 
-  const mentionTag = wasMentioned ? ' (@you)' : '';
-  const displayName = senderName ?? shortSenderId(senderId);
-  const senderTag = `[${displayName} (${senderId})]`;
-  return `${quotePart}${senderTag} ${userContent}${mentionTag}`;
+  const header = sender.time ? `[Current message] ${sender.time}` : '[Current message]';
+  if (sender.senderTagged) {
+    return `${quotePart}${header}\n${userContent}`;
+  }
+  const mentionTag = sender.wasMentioned ? ` ${MENTION_MARK}` : '';
+  return `${quotePart}${header}\n${sender.tag} ${userContent}${mentionTag}`;
 }
 
 /**
@@ -543,7 +574,9 @@ export function buildAgentBody(
   history: HistoryEntry[] | undefined,
   isGroup: boolean,
   wasMentioned: boolean,
+  label: SenderLabeler,
   historyImages: readonly HistoryImage[] = [],
+  now: number = Date.now(),
 ): string {
   if (!isGroup || !wasMentioned || !history || history.length === 0) {
     return base;
@@ -557,14 +590,14 @@ export function buildAgentBody(
   }
 
   const historyLines = history.map(h => {
-    const name = h.senderName ?? shortSenderId(h.senderId);
     const tags = (imagesByMessage.get(h.messageId) ?? []).map(historyImageTag);
-    return `[${name} (${h.senderId})] ${[h.content, ...tags].filter(Boolean).join(' ')}`;
+    const time = formatMessageTime(h.timestamp, now);
+    const line = `${label(h.senderId, h.senderName)} ${[h.content, ...tags].filter(Boolean).join(' ')}`;
+    return time ? `${time} ${line}` : line;
   });
 
   const notes = [
-    '（以上是群聊背景，不是要你逐条回应的内容。回复只针对下面 [Current message] 那一句；'
-      + '它没提到的历史消息和图片，别主动去点评。）',
+    '（以上是群聊背景，可以顺着接话；别逐条回一遍，也别把答过的再答一次。）',
   ];
   if (historyImages.length > 0) {
     notes.push('[图片#n] 是历史消息里的图片。当前消息问到它们时：消息末尾附了「[历史图片#n]」的直接看，'
@@ -577,7 +610,6 @@ export function buildAgentBody(
     '',
     '[Chat history ends]',
     ...notes,
-    '[Current message]',
     base,
   ].join('\n');
 }
@@ -652,16 +684,18 @@ function buildAttachmentTags(attachments?: RawAttachment[]): string {
   return tags.join(' ');
 }
 
+/**
+ * 动图 GIF → 关键帧宫格。静态图、读不到的图、ffmpeg 抽帧失败都返回 undefined，
+ * 调用方照常附原图，不让这一层挡住整条消息。
+ */
+async function gifSheetFor(path: string, ffmpegPath?: string): Promise<GifSheet | undefined> {
+  const head = await readFile(path).catch(() => undefined);
+  if (head === undefined || !isGifBytes(head)) return undefined;
+  return makeGifSheet(path, ffmpegPath ?? '').catch(() => undefined);
+}
+
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes}B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-/** 发送者短标识长度（openid 前 N 位，无昵称时兜底） */
-const SENDER_SHORT_ID_LEN = 8;
-
-/** 无昵称时用 openid 前 N 位作为匿名标识 */
-function shortSenderId(senderId: string): string {
-  return senderId.slice(0, SENDER_SHORT_ID_LEN);
 }

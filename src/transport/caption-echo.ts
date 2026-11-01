@@ -8,6 +8,8 @@
  *   - 剩下的只是一句「图已经发出去了，还附了一句…」式的发送汇报 → 整段不发。
  */
 
+import { isVoiceFile } from '../media/voice-reply.ts';
+
 /** 发送汇报的最大长度（归一化后字数）：更长的文本可能有真内容，不按汇报吞掉 */
 const NARRATION_MAX_CHARS = 80;
 
@@ -49,7 +51,10 @@ export function stripCaptionEcho(text: string, captions: readonly string[]): str
 /** 从 qqbot_send_file 的原始 arguments JSON 中取出非空 caption */
 export function captionFromArgs(args: string): string | undefined {
   try {
-    const caption = (JSON.parse(args) as { caption?: unknown }).caption;
+    const parsed = JSON.parse(args) as { caption?: unknown; file_path?: unknown };
+    // 语音的 caption 实际未送达，不能把它登记为已发文字而误删后续回复。
+    if (typeof parsed.file_path === 'string' && isVoiceFile(parsed.file_path)) return undefined;
+    const caption = parsed.caption;
     return typeof caption === 'string' && caption.trim().length > 0 ? caption.trim() : undefined;
   } catch {
     return undefined;

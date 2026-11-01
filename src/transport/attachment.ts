@@ -13,6 +13,7 @@ import * as dns from 'node:dns';
 import type { Logger, RawAttachment } from '../types.ts';
 import type { MediaConfig } from '../config.ts';
 import { MEDIA_ROOT } from '../media/media-cleaner.ts';
+import { sniffImageMediaType } from '../media/native-image.ts';
 
 /** 默认富媒体下载大小上限（MB），可被 media.maxMB 覆盖 */
 const DEFAULT_MAX_MB = 200;
@@ -75,6 +76,23 @@ function sanitizeFilename(name: string): string {
 /** 统一路径分隔符为 `/`（POSIX），Node fs 在 Windows 也接受正斜杠，保证注入路径跨平台一致 */
 function toPosixPath(p: string): string {
   return p.split(sep).join('/');
+}
+
+/**
+ * 按内容魔法字节修正扩展名：QQ 转发/发送 GIF 时文件名常常还是 `.jpg`，
+ * 扩展名错了后面 ffmpeg、原生读图、人工排障都会先入为主。
+ */
+export function withSniffedExtension(name: string, bytes: Uint8Array): string {
+  const sniffed = sniffImageMediaType(bytes);
+  const want = sniffed === 'image/gif' ? '.gif'
+    : sniffed === 'image/png' ? '.png'
+      : sniffed === 'image/jpeg' ? '.jpg'
+        : sniffed === 'image/webp' ? '.webp'
+          : undefined;
+  if (want === undefined) return name;
+  const ext = extname(name).toLowerCase();
+  if (ext === want || (want === '.jpg' && ext === '.jpeg')) return name;
+  return `${basename(name, extname(name)) || 'attachment'}${want}`;
 }
 
 /** 防重名：文件名 + 时间戳 + 随机数 */
@@ -142,13 +160,6 @@ export async function fetchSafe(url: string, maxBytes: number): Promise<Buffer> 
   return buf;
 }
 
-/** 安全下载到本地文件，返回下载字节数 */
-async function download(url: string, destPath: string, maxBytes: number): Promise<number> {
-  const buf = await fetchSafe(url, maxBytes);
-  writeFileSync(destPath, buf);
-  return buf.length;
-}
-
 /**
  * 下载消息中的富媒体附件（image/video/file）到本地
  *
@@ -174,21 +185,24 @@ export async function downloadMediaAttachments(
   const results: DownloadedFile[] = [];
   for (const att of targets) {
     const contentType = classifyContentType(att.content_type) as 'image' | 'video' | 'file';
-    const localPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(att.filename)));
 
     if (att.size > maxBytes) {
       logger.debug(`im-qqbot: skip download (${att.size}B too large): ${att.filename}`);
       continue; // 超限不下载，由 buildDynamicCtx 回退为描述
     }
 
-    let bytes: number;
+    let buf: Buffer;
     try {
-      bytes = await download(att.url, localPath, maxBytes);
+      buf = await fetchSafe(att.url, maxBytes);
     } catch (err) {
       logger.warn(`im-qqbot: download failed: ${att.filename} — ${err instanceof Error ? err.message : String(err)}`);
       continue; // 下载失败不加入结果，由 buildDynamicCtx 回退为描述
     }
-    logger.debug(`im-qqbot: attachment downloaded: ${att.filename} (${formatSize(bytes)}) → ${localPath}`);
+
+    // 扩展名按内容定，不用 QQ 给的（它常把 GIF 也叫 .jpg）
+    const localPath = toPosixPath(join(MEDIA_ROOT, uniqueFilename(withSniffedExtension(att.filename, buf))));
+    writeFileSync(localPath, buf);
+    logger.debug(`im-qqbot: attachment downloaded: ${att.filename} (${formatSize(buf.length)}) → ${localPath}`);
 
     results.push({ filename: att.filename, contentType, localPath });
   }

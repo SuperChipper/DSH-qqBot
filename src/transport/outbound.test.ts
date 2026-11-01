@@ -4,6 +4,7 @@ import type { QQBotSender, StreamSessionLike } from './outbound-buffer.ts';
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { ImQQBotConfig } from '../config.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
+import { PeerSendQueue } from './peer-send-queue.ts';
 
 function createLogger(): Logger {
   return { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -166,6 +167,38 @@ describe('OutboundRouter.routeStreamFrame', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(manager.addUnsent).toHaveBeenCalledWith('k', 'late reply');
+  });
+
+  it('语音后的模型文字完整另发一条，间隔内不抢发；下一轮恢复流式', async () => {
+    const record = createRecord(c2cTarget), session = createSession(), bot = createBot(session);
+    const queue = new PeerSendQueue();
+    const manager = { findBySessionId: () => record, addUnsent: vi.fn() } as unknown as SessionManager;
+    const sender: QQBotSender = {
+      sendMarkdown: (target, text) => queue.run(target, () => bot.sendMarkdown(target, text)),
+      openStream: (target) => queue.stream(target, () => bot.openStream(target)),
+    };
+    const outbound = createOutboundHandler(manager, sender, createConfig(), createLogger());
+    const sess = { header: { id: 'sess-qq' } };
+    await queue.run(c2cTarget, async () => {}, true);
+    record.voiceReplySentAt = Date.now();
+    outbound.routeStreamFrame('sess-qq', start('after-voice'));
+    outbound.routeStreamFrame('sess-qq', delta('after-voice', '语音读完了。还有一点补充给你。'));
+    outbound.routeSessionEvent(sess, { type: 'assistant/message', data: {
+      message: { content: [{ type: 'text', text: '语音读完了。还有一点补充给你。' }] },
+    } });
+    outbound.routeSessionEvent(sess, { type: 'turn/end', data: { reason: { kind: 'completed' } } });
+    await vi.advanceTimersByTimeAsync(1199);
+    expect(bot.openStream).not.toHaveBeenCalled();
+    expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(bot.sendMarkdown).toHaveBeenCalledTimes(1);
+    expect(bot.sendMarkdown).toHaveBeenCalledWith(c2cTarget, '语音读完了。还有一点补充给你。');
+    expect(record.voiceReplySentAt).toBeUndefined();
+    outbound.routeStreamFrame('sess-qq', start('next-turn'));
+    outbound.routeStreamFrame('sess-qq', delta('next-turn', '下一条回复'));
+    await vi.advanceTimersByTimeAsync(200);
+    expect(session.update).toHaveBeenCalledWith('下一条回复');
+    queue.dispose();
   });
 
   it('assistant/message 到达时收尾流式：complete 且不重复静态发送', async () => {

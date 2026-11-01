@@ -179,6 +179,7 @@ class OutboundRouter {
   /** 是否启用流式：配置开启 + c2c + 有 msgId（群聊不支持流式） */
   private shouldStream(record: SessionRecord): boolean {
     return this.config.streaming
+      && record.voiceReplySentAt === undefined
       && record.replyTarget.scope === 'c2c'
       && !!record.replyTarget.msgId;
   }
@@ -278,6 +279,7 @@ class OutboundRouter {
     }
     this.streamAttempts.delete(sessionId);
     this.captions.delete(sessionId);
+    if (record.sessionId === sessionId) delete record.voiceReplySentAt;
 
     // 对话窗口从回复结束时起算（回复慢时不至于还没说完窗口就过期）
     const rd = this.config.replyDesire;
