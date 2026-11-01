@@ -63,6 +63,7 @@
     "@tencent-connect/qqbot-connector": "1.2.0",
     "@tencent-connect/qqbot-nodejs": "^1.0.5",
     "js-yaml": "^4.1.0",
+    "playwright-core": "^1.64.1",
     "qrcode": "^1.5.4",
     "silk-wasm": "^3.7.1"
   },

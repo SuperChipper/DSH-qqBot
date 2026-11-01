@@ -25,6 +25,7 @@ cordis.dev.yml
 # 跑团数据（团的状态、快照、自定义地城）与 agent 临时目录，同样默认在 cwd 下
 /dnd/
 /tmp/
+/.qqbot-browser/
 
 # ── 日志 / 系统 / 编辑器 ──
 *.log
