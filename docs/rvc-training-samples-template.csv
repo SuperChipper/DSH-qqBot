@@ -1,0 +1,9 @@
+sample_id,status,speaker_id,identity_role,style,phoneme_or_text,target_note,target_hz,take,expected_seconds,source_group,source_method,split,path,voiced_seconds_600_800,f0_review,timbre_review,notes
+feiyu_head_C5_a_t1,planned,0,target,light_head,a,C5,523.251,1,4,new_session_A,pending,train,,,,,example_task_not_existing_audio
+feiyu_head_G5_u_t2,planned,0,target,clear_head,u,G5,783.991,2,4,new_session_A,pending,train,,,,,only_accept_if_same_target_identity_is_preserved
+feiyu_transition_001,planned,0,target,register_transition,ma-mi-mu,,,1,4,new_session_B,pending,train,,,,,keep_complete_transition
+feiyu_clean_power_001,planned,0,target,clean_power,home,Eb5,622.254,1,4,new_session_C,pending,train,,,,,no_scream_or_digital_distortion
+feiyu_mid_001,planned,0,target,clean_mid,la-li-lu,,,1,4,new_session_D,pending,train,,,,,stable_target_timbre_in_available_range
+feiyu_breath_001,planned,0,target,breath_reentry,ha-he-ho,,,1,4,new_session_E,pending,train,,,,,retain_natural_unvoiced_breath
+feiyu_validation_001,planned,0,target,unseen_head_phrase,,,,1,6,heldout_session_F,pending,validation,,,,,never_add_derivatives_to_train_or_index
+guest_high_001,planned,1,auxiliary,head_sustain,a,F5,698.456,1,4,guest_session_G,pending,train,,,,,different_singer_must_not_be_sid0
