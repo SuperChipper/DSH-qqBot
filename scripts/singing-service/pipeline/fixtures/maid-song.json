@@ -1,0 +1,87 @@
+{
+  "url": "https://b23.tv/QhBsxpt",
+  "original_seconds": [
+    28.0,
+    50.0
+  ],
+  "baseline_relative_to_parent": "dsh-qqbot/tmp/rvc-maid/maid-baseline",
+  "folders": {
+    "A": "maid-baseline",
+    "B": "maid-mix-ref",
+    "C": "maid-lead",
+    "D": "maid-lead-mix-ref"
+  },
+  "inputs": {
+    "decoded": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-maid/maid-baseline/00_src.wav",
+      "sha256": "088d8032bced4237433c952be8d80adf4fd0322c2d3490a8ca3bc405151c6a3d"
+    },
+    "lead": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-maid/maid-baseline/01_sep/htdemucs_ft/00_src/vocals.wav",
+      "sha256": "949b4dc9aeed1225f6633ba84fcb9f806f3523eb7a814167537b5774e32614b7"
+    },
+    "instrumental": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-maid/maid-baseline/01_sep/htdemucs_ft/00_src/no_vocals.wav",
+      "sha256": "34da1e53c2c45cb7807ccc5ae33412afc6a8625f53cd8c9588ae03273bdb745a"
+    },
+    "weights": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/weights/feiyu40k_hi_e150_s2333333.pth",
+      "sha256": "faa1068c787258edb10d67ebb2b586213ec5504aab742bb446c35ecae1fffc52"
+    },
+    "index": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/indices/feiyu40k_hi_IVF1480_Flat_nprobe_1_feiyu40k_hi.index",
+      "sha256": "8c90f7a9ad3904e7d4d73857b85398e16847dc8d5ed39831ec245b43c1d49c90"
+    },
+    "hp5_weights": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/uvr5_weights/HP5_only_main_vocal.pth",
+      "sha256": "5908891829634926119720241e8573d97cbeb8277110a7512bdb0bd7563258ee"
+    }
+  },
+  "common_options": {
+    "pitch": 0,
+    "protect": 0.35,
+    "rms_mix": 0.15,
+    "presence_db": 4,
+    "air": 0,
+    "debuzz": 0.85,
+    "breath_mode": "safe",
+    "noise_reduce": 0.5,
+    "lowcut": 0,
+    "low_shelf": 0,
+    "vocal_gain": 1,
+    "inst_gain": 0.9,
+    "inst_transpose": 0,
+    "lead_back": "off",
+    "backing_gain": 0
+  },
+  "cases": {
+    "A": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "index_rate": 0.6,
+      "mix_reference": "off",
+      "lead_back": "off"
+    },
+    "B": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "index_rate": 0.6,
+      "mix_reference": "auto",
+      "lead_back": "off"
+    },
+    "C": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "index_rate": 0.6,
+      "mix_reference": "off",
+      "lead_back": "hp5"
+    },
+    "D": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "index_rate": 0.6,
+      "mix_reference": "auto",
+      "lead_back": "hp5"
+    }
+  }
+}

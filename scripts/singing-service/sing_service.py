@@ -179,7 +179,9 @@ class Manager:
         row.pop('cancel', None)
         row['input'] = request
         row['work_dir'] = str(self.data/'jobs'/row['id']/'work')
-        row['result_path'] = str(self.data/'jobs'/row['id']/'result.mp3') if row['state'] in SUCCESS else None
+        result=self.result_file(row['id'],request)
+        row['result_path'] = str(result) if row['state'] in SUCCESS else None
+        row['result_format']=result.suffix[1:] if row['state'] in SUCCESS else None
         row['result_url'] = f"/jobs/{row['id']}/result" if row['state'] in SUCCESS else None
         row['log_url'] = f"/jobs/{row['id']}/log"
         if row['state'] == 'queued':
@@ -188,6 +190,14 @@ class Manager:
                     "SELECT count(*) FROM jobs WHERE state='queued' AND (created<? OR (created=? AND id<=?))",
                     (row['created'], row['created'], row['id'])).fetchone()[0]
         return row
+
+    def result_file(self,job,request):
+        folder=self.data/'jobs'/job
+        preferred=folder/('result.'+request.get('options',{}).get('output_format','mp4'))
+        if preferred.is_file():return preferred
+        # Old successful jobs keep their original downloadable MP3.
+        legacy=folder/'result.mp3'
+        return legacy if legacy.is_file() else preferred
 
     def get(self, job):
         if not ID.fullmatch(job):
@@ -277,7 +287,8 @@ class Manager:
         env.update(self.engine.environment())
         env.update(PYTHONUTF8='1', PYTHONIOENCODING='utf-8', PYTHONUNBUFFERED='1',
                    PYTHONDONTWRITEBYTECODE='1', SING_JOB_ID=job)
-        result, log_path = folder/'result.mp3', folder/'run.log'
+        result=folder/('result.'+request['options'].get('output_format','mp4'))
+        log_path=folder/'run.log'
         with log_path.open('ab', buffering=0) as log:
             tree = ProcessTree(command(request, self.python, self.pipeline, folder/'work', result),
                                cwd=self.root, env=env, log=log, control=self.data/'control')
@@ -393,12 +404,12 @@ class Handler(BaseHTTPRequestHandler):
                 if parts[2] == 'result':
                     if job['state'] not in SUCCESS:
                         return self.send_json(409, {'error': 'Result is not ready', 'state': job['state']})
-                    path = self.manager.data/'jobs'/job['id']/'result.mp3'
+                    path = Path(job['result_path'])
                     with path.open('rb') as f:
                         self.send_response(200)
-                        self.send_header('Content-Type', 'audio/mpeg')
+                        self.send_header('Content-Type', 'video/mp4' if path.suffix=='.mp4' else 'audio/mpeg')
                         self.send_header('Content-Length', str(path.stat().st_size))
-                        self.send_header('Content-Disposition', f'attachment; filename="{job["id"]}.mp3"')
+                        self.send_header('Content-Disposition', f'attachment; filename="{job["id"]}{path.suffix}"')
                         self.end_headers()
                         while True:
                             data = f.read(65536)

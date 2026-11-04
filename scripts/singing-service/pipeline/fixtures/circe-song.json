@@ -1,0 +1,73 @@
+{
+  "url": "https://www.bilibili.com/video/BV14Y496eEBx/",
+  "original_seconds": [
+    30.0,
+    60.0
+  ],
+  "baseline_relative_to_parent": "dsh-qqbot/tmp/rvc-circe/circe-baseline",
+  "folders": {
+    "A": "circe-baseline",
+    "B": "circe-crepe-index06",
+    "C": "circe-crepe-index0",
+    "D": "circe-sequence"
+  },
+  "inputs": {
+    "decoded": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-circe/circe-baseline/00_src.wav",
+      "sha256": "371a65ea05871afc33807139862e52354a20fffd1bbb866a994b372e6123df16"
+    },
+    "lead": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-circe/circe-baseline/01_sep/htdemucs_ft/00_src/vocals.wav",
+      "sha256": "ac75c0aa8bb81fae3d99cd4ad4bf83ba606f2a7d185b8fc06917bf3489a00c00"
+    },
+    "instrumental": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-circe/circe-baseline/01_sep/htdemucs_ft/00_src/no_vocals.wav",
+      "sha256": "05921de8815629a22d8632947a030c49f0f97297df730ebaf74d102df1ff37b4"
+    },
+    "weights": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/weights/feiyu40k_hi_e150_s2333333.pth",
+      "sha256": "faa1068c787258edb10d67ebb2b586213ec5504aab742bb446c35ecae1fffc52"
+    },
+    "index": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/indices/feiyu40k_hi_IVF1480_Flat_nprobe_1_feiyu40k_hi.index",
+      "sha256": "8c90f7a9ad3904e7d4d73857b85398e16847dc8d5ed39831ec245b43c1d49c90"
+    }
+  },
+  "common_options": {
+    "pitch": 0,
+    "protect": 0.35,
+    "rms_mix": 0.15,
+    "presence_db": 4,
+    "air": 0,
+    "debuzz": 0.85,
+    "breath_mode": "safe",
+    "noise_reduce": 0.5,
+    "lowcut": 0,
+    "low_shelf": 0,
+    "vocal_gain": 1,
+    "inst_gain": 0.9,
+    "mix_reference": "off"
+  },
+  "cases": {
+    "A": {
+      "f0_method": "rmvpe",
+      "f0_mode": "ref",
+      "index_rate": 0.6
+    },
+    "B": {
+      "f0_method": "crepe",
+      "f0_mode": "ref",
+      "index_rate": 0.6
+    },
+    "C": {
+      "f0_method": "crepe",
+      "f0_mode": "ref",
+      "index_rate": 0
+    },
+    "D": {
+      "f0_method": "rmvpe",
+      "f0_mode": "sequence",
+      "index_rate": 0.6
+    }
+  }
+}

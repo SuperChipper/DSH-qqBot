@@ -54,7 +54,7 @@ class Backend:
         from infer.lib.audio import load_audio
         if not isinstance(body, dict) or set(body) - {'input_path', 'opt_path', 'model_name', 'f0up_key',
                 'f0method', 'index_path', 'index_rate', 'filter_radius', 'rms_mix_rate', 'protect',
-                'f0_file', 'f0_dump', 'octave_fix'}:
+                'f0_file', 'f0_dump', 'octave_fix', 'f0_reference', 'f0_lead_reference'}:
             raise ValueError('Invalid inference request')
         sources = [self.root.parent, self.data]
         source = local_path(body['input_path'], sources)
@@ -72,13 +72,15 @@ class Backend:
         method = body.get('f0method', 'rmvpe')
         if method not in ('rmvpe', 'harvest', 'pm', 'crepe'):
             raise ValueError('Unknown f0 method')
-        mode = body.get('octave_fix', 'ref')
-        if mode not in ('', 'off', 'ref', '1', 'true', 'yes', 'acf'):
+        mode = body.get('octave_fix', 'breath')
+        if mode not in ('', 'off', 'ref', 'breath', 'sequence', '1', 'true', 'yes', 'acf'):
             raise ValueError('Unknown octave-fix mode')
         index = ''
         if body.get('index_path'):
             index = local_path(body['index_path'], [self.rvc/'assets'])
         manual = local_path(body['f0_file'], sources) if body.get('f0_file') else ''
+        reference = local_path(body['f0_reference'], sources) if body.get('f0_reference') else ''
+        lead_reference = local_path(body['f0_lead_reference'], sources) if body.get('f0_lead_reference') else ''
         for key, low, high in [('f0up_key', -24, 24), ('index_rate', 0, 1), ('filter_radius', 0, 15),
                                ('rms_mix_rate', 0, 1), ('protect', 0, .5)]:
             value = body[key]
@@ -109,6 +111,8 @@ class Backend:
                 self.loads += 1
             os.environ['RVC_F0_OCTAVE_FIX'] = mode
             os.environ['RVC_F0_DUMP'] = str(dump)
+            os.environ['RVC_F0_MIX_REFERENCE'] = reference
+            os.environ['RVC_F0_LEAD_REFERENCE'] = lead_reference
             handle = stack.enter_context(open(manual, 'r')) if manual else None
             try:
                 info, audio = self.vc.vc_single(0, source, int(body['f0up_key']), handle, method,
@@ -126,6 +130,8 @@ class Backend:
                 self.inferences += 1
             finally:
                 os.environ.pop('RVC_F0_DUMP', None)
+                os.environ.pop('RVC_F0_MIX_REFERENCE', None)
+                os.environ.pop('RVC_F0_LEAD_REFERENCE', None)
         return {'ok': True, 'seconds': time.monotonic()-start, **self.status()}
 
 

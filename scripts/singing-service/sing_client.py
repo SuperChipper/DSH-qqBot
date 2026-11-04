@@ -46,6 +46,9 @@ def download(url, token, job, output):
     temporary = output.with_name(output.name+'.'+uuid.uuid4().hex+'.part')
     try:
         with urlopen(Request(url+f'/jobs/{job}/result', headers=headers), timeout=60) as response, temporary.open('wb') as file:
+            expected='.mp4' if response.headers.get_content_type()=='video/mp4' else '.mp3'
+            if output.suffix.lower()!=expected:
+                raise ValueError(f'结果格式为 {expected}，请将 --out 改为 {output.with_suffix(expected)}；不能只改媒体扩展名')
             for block in iter(lambda: response.read(65536), b''):
                 file.write(block)
         temporary.replace(output)

@@ -84,9 +84,10 @@ def main():
             raise RuntimeError(record)
         req = Request(url+f'/jobs/{jobid}/result', headers={'Authorization':'Bearer '+token} if token else {})
         with urlopen(req, timeout=20) as response:
+            extension='.mp4' if response.headers.get_content_type()=='video/mp4' else '.mp3'
             audio = response.read()
         assert len(audio) > 1024
-        (out/(jobid+'.mp3')).write_bytes(audio)
+        (out/(jobid+extension)).write_bytes(audio)
     warm = rpc(url+'/health', token=token)
     assert warm['rvc']['model_loads'] == 1 and warm['rvc']['inferences'] == 2, warm
     assert records[ids[0]]['finished'] <= records[ids[1]]['started']
@@ -95,7 +96,7 @@ def main():
     if (out/'acceptance.json').exists():
         (out/('acceptance-before-'+time.strftime('%Y%m%d-%H%M%S')+'.json')).write_bytes((out/'acceptance.json').read_bytes())
     (out/'acceptance.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-    print('ACCEPTANCE PASS: immediate submission, serial jobs, queued cancellation, real MP3, one model load / two inferences', flush=True)
+    print('ACCEPTANCE PASS: immediate submission, serial jobs, queued cancellation, music media, one model load / two inferences', flush=True)
 
 
 if __name__ == '__main__':

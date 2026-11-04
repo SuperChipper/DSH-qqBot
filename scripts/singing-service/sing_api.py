@@ -19,13 +19,20 @@ NUMBERS = {
     'start': (0, 86400, float), 'dur': (0, 3600, float), 'inst_transpose': (-24, 24, float),
     'vocal_gain': (0, 4, float), 'inst_gain': (0, 4, float), 'backing_gain': (0, 4, float),
     'presence_db': (-12, 18, float), 'air': (0, 1, float), 'debuzz': (0, 1, float),
+    'noise_reduce': (0, 1, float),
+    'roformer_overlap': (2, 8, int),
     'gate_db': (-80, 0, float), 'lowcut': (0, 1000, float), 'low_shelf': (-18, 12, float),
     'repair_start': (0, 86400, float), 'repair_dur': (.01, 3600, float),
     'repair_context': (.25, 10, float), 'repair_fade': (0, 2, float), 'check_secs': (0, 3600, float),
 }
 CHOICES = {'f0_method': {'rmvpe', 'harvest', 'pm', 'crepe'}, 'lead_back': {'off', 'hp5'},
+           'separator': {'demucs', 'roformer'},
+           'mix_reference': {'auto', 'off'},
+           'output_format': {'mp4','mp3'},
+           'f0_mode': {'breath', 'sequence', 'ref', 'off', 'acf', '1', 'true', 'yes'},
+           'breath_mode': {'safe', 'off', 'legacy'},
            'preset': {'', 'auto', 'female', 'male-thin', 'low'}}
-PATHS = {'f0_file', 'lead_stem', 'backing_stem'}
+PATHS = {'f0_file', 'lead_stem', 'backing_stem','cover_image'}
 
 
 def local_path(value, allowed, *, directory=False):
@@ -73,6 +80,10 @@ def validate(payload, allowed, models):
             result[key] = item
         elif key in PATHS:
             result[key] = local_path(item, allowed)
+        elif key=='cover_emotion':
+            if not isinstance(item,str) or not item.strip() or len(item)>80:
+                raise ValueError('cover_emotion must be nonempty text up to 80 characters')
+            result[key]=item.strip()
         elif key == 'model':
             if not isinstance(item, str) or item not in models:
                 raise ValueError('Unknown installed RVC model')
@@ -82,12 +93,15 @@ def validate(payload, allowed, models):
     if mode == 'repair_from':
         if not result.get('repair_dur'):
             raise ValueError('repair_from requires repair_dur')
-        if any(k in result for k in ('start', 'dur', 'preset', 'lead_back', 'lead_stem', 'backing_stem')):
+        if any(k in result for k in ('start', 'dur', 'preset', 'lead_back', 'lead_stem', 'backing_stem',
+                                      'separator', 'roformer_overlap')):
             raise ValueError('Repair does not accept crop, preset or stem overrides')
     elif any(k.startswith('repair_') for k in result):
         raise ValueError('repair_* options require repair_from')
     if mode == 'stems_from' and any(result.get(k) for k in ('start', 'dur')):
         raise ValueError('stems_from uses the source job timeline')
+    if mode == 'stems_from' and any(k in result for k in ('separator', 'roformer_overlap')):
+        raise ValueError('stems_from reuses existing stems; changing separator requires the original song')
     if 'backing_stem' in result and 'lead_stem' not in result:
         raise ValueError('backing_stem requires lead_stem')
     if result.get('lead_back', 'off') != 'off' and any(k in result for k in ('lead_stem', 'backing_stem')):

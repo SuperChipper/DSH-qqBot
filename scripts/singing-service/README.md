@@ -1,8 +1,22 @@
 # 异步唱歌服务
 
+当前默认模型（2026-11-03）：用户已选择辅助唱法 B `feiyu40k_aux70_ab_20261102_e10.pth`。
+目标音色 SID 0，沿用原 hi 检索库。普通任务不传 `options.model` 即可；
+A `feiyu40k_hi_e150_s2333333.pth` 保留，可显式指定回退。
+
+默认分离前端已改为 Kimberley Jensen Mel-Band RoFormer（2026-11-03），不传 separator 即生效。
+`options.separator="demucs"` 可回退。`options.roformer_overlap` 范围 2–8，默认 2；旧分轨复用和局部
+repair 不重新分离，显式传这些分离选项会被拒绝，改分离器应从原歌曲新建任务。
+
 部署到 `voice-lab/scripts` 后，服务在 `127.0.0.1:8766` 接收任务，后台单 worker 执行整条翻唱管线。
 私有 RVC 后端在 `127.0.0.1:8767`，由主服务启动和回收，模型、HuBERT、RMVPE 在任务间复用。
 Demucs / HP5 仍按任务运行。现有 `cover.py` 的独立 CLI 保留，仍共享 GPU 锁。
+
+气音推理修复的源码与部署方法见 [pipeline/README.md](pipeline/README.md)。
+新增 options：`breath_mode`（safe/off/legacy，默认 safe）、`noise_reduce`（0–1，默认 0.5）。
+`f0_mode` 支持 breath/sequence/ref/off/acf；默认 breath，在 ref 后修复有双侧音区证据的短换气半频。
+sequence 保留为实验选项，已发现高八度轻声误降调，暂不默认启用。safe 换气回填也处理已确认无声区的持续低频有声残留。
+默认亮化降到 4 dB；保留原调，当前权重采用上述 B，训练脚本不变。
 
 ## Agent 调用
 
@@ -14,7 +28,7 @@ Demucs / HP5 仍按任务运行。现有 `cover.py` 的独立 CLI 保留，仍�
 .\env\python.exe scripts\sing_client.py status <id>
 .\env\python.exe scripts\sing_client.py logs <id>
 .\env\python.exe scripts\sing_client.py cancel <id>
-.\env\python.exe scripts\sing_client.py result <id> --out "..\tmp\song_feiyu.mp3"
+.\env\python.exe scripts\sing_client.py result <id> --out "..\tmp\song_feiyu.mp4"
 
 # 可复用已有分离轨 / 局部修复，分别生成独立任务目录。
 .\env\python.exe scripts\sing_client.py --ensure submit --stems-from "..\tmp\singing-service\jobs\<旧任务ID>\work" --options-json '{"lead_back":"hp5"}'
@@ -39,7 +53,7 @@ Demucs / HP5 仍按任务运行。现有 `cover.py` 的独立 CLI 保留，仍�
 | `GET /jobs/{id}` | 状态、当前步骤、排队位置、结果链接 |
 | `GET /jobs/{id}/log` | 最近32 KiB日志 |
 | `POST /jobs/{id}/cancel` | 取消排队或运行中的任务 |
-| `GET /jobs/{id}/result` | 成功任务的 MP3；未完成返回409 |
+| `GET /jobs/{id}/result` | 新任务为 MP4，历史 MP3 保持可取；未完成返回409 |
 | `POST /shutdown` | 清理执行中的进程树和 RVC worker，再退出 |
 
 请求示例：
@@ -85,3 +99,4 @@ pwsh -NoProfile -File scripts\start-singing.ps1 -Stop
 测试覆盖HTTP立即返回、队列串行、运行/排队取消、完整子进程清理、超时、警告成品、幂等提交、重启恢复和输入校验。
 
 SVS（按歌词、乐谱生成歌声）是另一路后端，目前这个服务实现的是 RVC 翻唱，没有把原唱音频自动转成乐谱。
+

@@ -10,6 +10,7 @@ from urllib.request import Request, urlopen
 import sys
 
 from sing_api import rpc, validate
+from sing_client import download
 from sing_service import Manager, Server, Handler, Full, Conflict
 
 
@@ -51,7 +52,7 @@ if 'child' in a.song:
 print('[   0.0s] 0/4 decode',flush=True)
 time.sleep(a.dur)
 if 'fail' in a.song:sys.exit(7)
-Path(a.out).write_bytes(b'ID3fake-result')
+Path(a.out).write_bytes(b'ftyp-fake-video' if Path(a.out).suffix=='.mp4' else b'ID3fake-result')
 print('[   0.1s] DONE '+a.out,flush=True)
 sys.exit(2 if 'warn' in a.song else 0)
 '''
@@ -86,6 +87,24 @@ class ServiceTests(unittest.TestCase):
     def request(self, delay=.1, source=None, **options):
         return {'song': str(source or self.source), 'options': {'dur': delay, **options}}
 
+    def test_separator_options_validate_and_forward(self):
+        for separator in ('demucs','roformer'):
+            result=validate(self.request(separator=separator,roformer_overlap=4),[self.root],set())
+            self.assertEqual(result['options']['separator'],separator)
+            self.assertEqual(result['options']['roformer_overlap'],4)
+        for options in ({'separator':'uvr'},{'separator':True},{'roformer_overlap':1},
+                        {'roformer_overlap':9},{'roformer_overlap':2.5},{'roformer_overlap':True}):
+            with self.subTest(options=options),self.assertRaises(ValueError):
+                validate(self.request(**options),[self.root],set())
+
+    def test_reused_stems_cannot_silently_ignore_separator_selection(self):
+        (self.root/'manifest.json').write_text('{}')
+        for mode in ('stems_from','repair_from'):
+            for options in ({'separator':'roformer'},{'roformer_overlap':4}):
+                if mode=='repair_from':options={**options,'repair_dur':1}
+                with self.subTest(mode=mode,options=options),self.assertRaises(ValueError):
+                    validate({mode:str(self.root),'options':options},[self.root],set())
+
     def wait(self, job, states=None):
         states = states or {'succeeded', 'succeeded_with_warnings', 'failed', 'cancelled', 'timed_out'}
         deadline = time.monotonic()+10
@@ -110,7 +129,33 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.wait(job['id'])['state'], 'succeeded')
         req = Request(url+f'/jobs/{job["id"]}/result', headers={'Authorization':'Bearer unit-token'})
         with urlopen(req) as response:
-            self.assertEqual(response.read(), b'ID3fake-result')
+            self.assertEqual(response.headers.get_content_type(),'video/mp4')
+            self.assertEqual(response.read(), b'ftyp-fake-video')
+        wrong=self.root/'song.mp3';wrong.write_bytes(b'existing-file')
+        with self.assertRaises(ValueError):download(url,'unit-token',job['id'],wrong)
+        self.assertEqual(wrong.read_bytes(),b'existing-file')
+        self.assertFalse(list(self.root.glob('*.part')))
+        correct=self.root/'song.mp4'
+        download(url,'unit-token',job['id'],correct)
+        self.assertEqual(correct.read_bytes(),b'ftyp-fake-video')
+
+    def test_old_mp3_jobs_and_explicit_mp3_remain_downloadable(self):
+        url=self.start_http()
+        row,_=self.manager.submit(self.request(output_format='mp3'))
+        job=self.wait(row['id'])
+        self.assertEqual(job['result_format'],'mp3')
+        request=Request(url+f'/jobs/{job["id"]}/result',headers={'Authorization':'Bearer unit-token'})
+        with urlopen(request) as response:
+            self.assertEqual(response.headers.get_content_type(),'audio/mpeg')
+            self.assertEqual(response.read(),b'ID3fake-result')
+        new,_=self.manager.submit(self.request())
+        done=self.wait(new['id'])
+        path=Path(done['result_path'])
+        path.unlink()
+        path.with_suffix('.mp3').write_bytes(b'ID3legacy')
+        self.assertEqual(self.manager.get(new['id'])['result_format'],'mp3')
+        request=Request(url+f'/jobs/{new["id"]}/result',headers={'Authorization':'Bearer unit-token'})
+        with urlopen(request) as response:self.assertEqual(response.read(),b'ID3legacy')
 
     def test_queue_is_single_consumer(self):
         one, _ = self.manager.submit(self.request(.7))
@@ -198,11 +243,22 @@ class ServiceTests(unittest.TestCase):
 
     def test_rejects_arbitrary_cli_and_path_escape(self):
         for options in ({'out': 'elsewhere.mp3'}, {'protect': True}, {'air': float('nan')},
-                        {'model': '../other.pth'}, {'pitch': 1.2}):
+                        {'model': '../other.pth'}, {'pitch': 1.2}, {'noise_reduce': 1.1},
+                        {'noise_reduce': True}, {'breath_mode': 'anything'}, {'f0_mode': 'anything'},
+                        {'mix_reference': 'anything'}, {'output_format':'anything'},
+                        {'cover_emotion':False}, {'cover_emotion':''}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.manager.submit(self.request(**options))
         with self.assertRaises(ValueError):
             self.manager.submit({'song': str(Path(__file__).resolve())})
+
+    def test_breath_options_are_forwarded(self):
+        row, _ = self.manager.submit(self.request(noise_reduce=.25, breath_mode='off', f0_mode='breath', mix_reference='off'))
+        request = json.loads(self.manager.claim()['request'])
+        self.assertEqual(request['options']['noise_reduce'], .25)
+        self.assertEqual(request['options']['breath_mode'], 'off')
+        self.assertEqual(request['options']['f0_mode'], 'breath')
+        self.assertEqual(request['options']['mix_reference'], 'off')
 
     def test_http_auth_origin_and_result_not_ready(self):
         url = self.start_http()

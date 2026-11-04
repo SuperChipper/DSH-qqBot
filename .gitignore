@@ -35,3 +35,11 @@ npm-debug.log*
 Thumbs.db
 .vscode/
 .idea/
+
+# ── 本地生成物 ──
+# 出图与实验产物，体积大且可重新生成
+/output/
+# 流水线测试残留的临时目录
+scripts/singing-service/pipeline/tmp*/
+# 部署脚本按本机路径生成的记录，--prepare / --install 会重写
+scripts/singing-service/pipeline-deployment-*.json

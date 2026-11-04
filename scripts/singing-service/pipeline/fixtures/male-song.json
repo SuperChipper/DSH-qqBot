@@ -1,0 +1,82 @@
+{
+  "url": "https://www.bilibili.com/video/BV1V8Hf6VEAK/",
+  "original_seconds": [
+    0.0,
+    25.0
+  ],
+  "baseline_relative_to_parent": "dsh-qqbot/tmp/rvc-male/male-baseline",
+  "folders": {
+    "A": "male-baseline",
+    "B": "male-octave",
+    "C": "male-octave-index85",
+    "D": "male-octave-auto"
+  },
+  "inputs": {
+    "decoded": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-male/male-baseline/00_src.wav",
+      "sha256": "76299485ff997982b53a6c92f411801ce1734a4cdad9742b8d301c7041505bc6"
+    },
+    "lead": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-male/male-baseline/01_sep/htdemucs_ft/00_src/vocals.wav",
+      "sha256": "a4bcebd620458c1661b9526e3add096deded1153b031e1a00b2654ae3d6409eb"
+    },
+    "instrumental": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-male/male-baseline/01_sep/htdemucs_ft/00_src/no_vocals.wav",
+      "sha256": "e0ee9e62ba55618211c0b1258a9d4f71423e687aa0423d9ec0f448de82d9c6a8"
+    },
+    "weights": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/weights/feiyu40k_hi_e150_s2333333.pth",
+      "sha256": "faa1068c787258edb10d67ebb2b586213ec5504aab742bb446c35ecae1fffc52"
+    },
+    "index": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/indices/feiyu40k_hi_IVF1480_Flat_nprobe_1_feiyu40k_hi.index",
+      "sha256": "8c90f7a9ad3904e7d4d73857b85398e16847dc8d5ed39831ec245b43c1d49c90"
+    }
+  },
+  "common_options": {
+    "pitch": 0,
+    "protect": 0.35,
+    "rms_mix": 0.15,
+    "presence_db": 4,
+    "air": 0,
+    "debuzz": 0.85,
+    "breath_mode": "safe",
+    "noise_reduce": 0.5,
+    "lowcut": 0,
+    "low_shelf": 0,
+    "vocal_gain": 1,
+    "inst_gain": 0.9,
+    "inst_transpose": 0,
+    "mix_reference": "off"
+  },
+  "cases": {
+    "A": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "pitch": 0,
+      "index_rate": 0.6,
+      "mix_reference": "off"
+    },
+    "B": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "pitch": 12,
+      "index_rate": 0.6,
+      "mix_reference": "off"
+    },
+    "C": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "pitch": 12,
+      "index_rate": 0.85,
+      "mix_reference": "off"
+    },
+    "D": {
+      "f0_method": "rmvpe",
+      "f0_mode": "breath",
+      "pitch": 12,
+      "index_rate": 0.6,
+      "mix_reference": "auto"
+    }
+  }
+}

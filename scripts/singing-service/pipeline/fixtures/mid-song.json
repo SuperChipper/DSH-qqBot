@@ -1,0 +1,66 @@
+{
+  "url": "https://b23.tv/QhBsxpt",
+  "original_seconds": [
+    40,
+    90
+  ],
+  "inputs": {
+    "decoded": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-breathy/mid-baseline/00_src.wav",
+      "sha256": "26f0d5cd0a9b630d03bb30c10bc681aec5b56f9ba008605c69551b0b894b2299"
+    },
+    "lead": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-breathy/mid-baseline/01_sep/htdemucs_ft/00_src/vocals.wav",
+      "sha256": "4341420ab0db01441b5c97fd16a71c0043180d5e2dbd7067d21e6a40ccd051f4"
+    },
+    "instrumental": {
+      "relative_to_parent": "dsh-qqbot/tmp/rvc-breathy/mid-baseline/01_sep/htdemucs_ft/00_src/no_vocals.wav",
+      "sha256": "d8e1a753ad97c80a258ec2c08a044503e42c28edf9e2d347c86c0e65f5090187"
+    },
+    "weights": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/weights/feiyu40k_hi_e150_s2333333.pth",
+      "sha256": "faa1068c787258edb10d67ebb2b586213ec5504aab742bb446c35ecae1fffc52"
+    },
+    "index": {
+      "relative_to_parent": "voice-lab/rvc/pkg/RVC20240604Nvidia50x0/assets/indices/feiyu40k_hi_IVF1480_Flat_nprobe_1_feiyu40k_hi.index",
+      "sha256": "8c90f7a9ad3904e7d4d73857b85398e16847dc8d5ed39831ec245b43c1d49c90"
+    }
+  },
+  "common_options": {
+    "pitch": 0,
+    "protect": 0.35,
+    "rms_mix": 0.15,
+    "presence_db": 4,
+    "air": 0,
+    "debuzz": 0.85,
+    "breath_mode": "safe",
+    "noise_reduce": 0.5,
+    "lowcut": 0,
+    "low_shelf": 0,
+    "vocal_gain": 1,
+    "inst_gain": 0.9,
+    "mix_reference": "off"
+  },
+  "cases": {
+    "A": {
+      "f0_method": "rmvpe",
+      "f0_mode": "ref",
+      "index_rate": 0.6
+    },
+    "B": {
+      "f0_method": "crepe",
+      "f0_mode": "ref",
+      "index_rate": 0.6
+    },
+    "C": {
+      "f0_method": "crepe",
+      "f0_mode": "ref",
+      "index_rate": 0
+    },
+    "D": {
+      "f0_method": "rmvpe",
+      "f0_mode": "sequence",
+      "index_rate": 0.6
+    }
+  }
+}

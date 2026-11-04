@@ -12,17 +12,18 @@ def infer_remote(job, source, target):
     parts = urlsplit(url)
     if parts.scheme != 'http' or parts.hostname != '127.0.0.1' or parts.path or parts.query or parts.fragment:
         raise ValueError('COVER_RVC_URL must be a private loopback HTTP endpoint')
-    import cover
     p = job.p
     result = rpc(url+'/infer', {
         'input_path': str(Path(source).resolve()), 'opt_path': str(Path(target).resolve()),
         'model_name': p['model'], 'f0up_key': p['pitch'], 'f0method': p['f0method'],
-        'index_path': str(cover.INDEX) if cover.INDEX.exists() and p['index_rate'] > 0 else '',
+        'index_path': str(Path(p['index'])) if Path(p['index']).is_file() and p['index_rate'] > 0 else '',
         'index_rate': p['index_rate'], 'filter_radius': p['filter_radius'],
         'rms_mix_rate': p['rms_mix'], 'protect': p['protect'],
         'f0_file': str(Path(job.a.f0_file).resolve()) if job.a.f0_file else '',
         'f0_dump': str(job.work/'02_f0.csv'),
-        'octave_fix': os.environ.get('RVC_F0_OCTAVE_FIX', 'ref'),
+        'octave_fix': p['f0_mode'],
+        'f0_reference': str(getattr(job, 'pitch_reference', '')),
+        'f0_lead_reference': str(getattr(job, 'pitch_lead_reference', '')),
     }, token=os.environ.get('SING_WORKER_TOKEN', ''), timeout=900)
     print(f"RVC service: model_loads={result['model_loads']} inferences={result['inferences']} "
           f"seconds={result['seconds']:.2f}", flush=True)

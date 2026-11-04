@@ -1,0 +1,10 @@
+{
+  "source": "user listening feedback",
+  "example": "mid-sequence.mp3",
+  "sample_seconds": [1, 10],
+  "original_seconds": [41, 50],
+  "expected_register": "upper octave soft singing",
+  "observed_sequence_lowered_primary_frames": 121,
+  "sequence_acceptance": "rejected as default due to register regression",
+  "note": "Agreement of pYIN and CREPE at the lower octave is not independent ground truth. Exact note-level pitch remains unannotated."
+}
