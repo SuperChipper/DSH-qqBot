@@ -357,7 +357,7 @@ describe('开团签到', () => {
     expect(press('in', 'NEW')).toBe(ACK.ok);
     expect(followup).not.toHaveBeenCalled();
     // DM 的 prompt 里能看到出勤
-    const state = service.promptSections(key).find((s) => s.name === 'qqbot:dnd-state')!.text;
+    const state = service.stateSnapshot(key);
     expect(state).toContain('本次签到：已到 卡厄斯');
     expect(state).toContain('未签到 恩佐');
 

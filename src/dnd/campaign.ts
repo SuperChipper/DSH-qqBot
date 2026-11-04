@@ -9,6 +9,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { rollD20, type Roller, cryptoRoller } from './dice.ts';
+import type { ChronicleEntry } from './chronicle.ts';
 import { type Adventure, type QuestStatus, type Site, findSite, isHub, roomGraph, siteOfRoom } from './adventure.ts';
 import {
   type DungeonExit,
@@ -155,6 +156,8 @@ export interface Campaign {
   begun?: boolean;
   /** 这一次开团（/dnd start）的时间：停团时据此判断这次有没有写过进度 */
   sessionStartedAt?: number;
+  /** 剧情账本（chronicle.ts）；老团第一次改动时补记，新团从空开始 */
+  chronicle?: ChronicleEntry[];
 }
 
 const MAX_LOG = 30;
@@ -195,6 +198,7 @@ export function createCampaign(key: string, adv: Adventure, now = Date.now()): C
     knownSites: adv.sites.filter((s) => s.knownWhen === undefined || s.id === startSite?.id).map((s) => s.id),
     announced: [],
     begun: false,
+    chronicle: [],
   };
 }
 
@@ -994,6 +998,11 @@ export interface ActOptions {
   /** DM 要求的对抗/反应/借机攻击：不受回合和玩家绑定限制 */
   reaction?: boolean;
   /**
+   * 玩家明确把这个角色的行动委托给了别人（「让 Kriv 去谈」），或者这是被推/被拖一类的强制位移：
+   * 跳过「只能由本人宣告」，但仍然受回合顺序限制。用之前必须在回复里写明是谁委托的。
+   */
+  dmOverride?: boolean;
+  /**
    * 最近真正给 bot 发过消息的人。传入时 declaredBy 必须在里面：
    * 模型照抄角色卡上的 openid 也冒充不了没说话的玩家。
    */
@@ -1022,7 +1031,8 @@ function assertDeclaredByOwner(ch: Character, options: ActOptions, what: string)
  */
 export function assertCanAct(c: Campaign, ch: Character, options: ActOptions = {}): void {
   if (options.reaction === true) return;
-  assertDeclaredByOwner(ch, options, '行动');
+  // 委托来的行动（玩家自己说「让 Kriv 去谈」）和强制位移不查本人，但仍然只能在轮到他的回合里主动行动
+  if (options.dmOverride !== true) assertDeclaredByOwner(ch, options, '行动');
   const state = c.initiative;
   if (state === undefined) return;
   const current = state.order[state.turn];

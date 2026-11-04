@@ -37,7 +37,7 @@ describe('pet native balance', () => {
     expect(() => parseDeepseekBalance({})).toThrow(/balance_infos/);
   });
 
-  it('注册 deepseek-native 并用凭证查询余额', async () => {
+  it('给每个自建 DeepSeek 路由都注册余额查询，切模型也能查到', async () => {
     const registrations: Array<{ id: string; fetch: (ctx: { provider: string }) => Promise<unknown> }> = [];
     const pet = {
       balance: {
@@ -60,11 +60,30 @@ describe('pet native balance', () => {
     })));
 
     registerPetNativeBalance(ctx, logger);
-    expect(registrations).toHaveLength(1);
-    expect(registrations[0]?.id).toBe('deepseek-native');
+    expect(registrations.map((r) => r.id)).toEqual(['deepseek-native', 'deepseek-max']);
 
-    const result = await registrations[0]!.fetch({ provider: 'deepseek-native' });
-    expect(result).toMatchObject({ ok: true, provider: 'deepseek-native', shape: 'money' });
+    const result = await registrations[1]!.fetch({ provider: 'deepseek-max' });
+    expect(result).toMatchObject({ ok: true, provider: 'deepseek-max', shape: 'money' });
     expect(credentials.resolve).toHaveBeenCalledWith('DEEPSEEK_API_KEY');
+  });
+
+  it('某个 id 已被占用时不影响其余路由注册', async () => {
+    const registrations: string[] = [];
+    const pet = {
+      balance: {
+        register: (def: { id: string }) => {
+          if (def.id === 'deepseek-native') throw new Error('该服务商 id 已被注册: deepseek-native');
+          registrations.push(def.id);
+          return () => {};
+        },
+      },
+    };
+    const ctx = {
+      get: (name: string) => (name === 'petApi7340' ? pet : name === 'credentials' ? { resolve: vi.fn() } : undefined),
+      effect: vi.fn(),
+    } as unknown as Context;
+
+    registerPetNativeBalance(ctx, logger);
+    expect(registrations).toEqual(['deepseek-max']);
   });
 });

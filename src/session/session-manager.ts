@@ -27,6 +27,7 @@ import type { StickerStore, StickerMatchResult } from '../media/sticker-store.ts
 import { chatKeyOf, formatNotesHint, type NotesStore } from '../notes/notes-store.ts';
 import type { ToolAccess } from '../features/tool-access.ts';
 import type { DndService } from '../dnd/dnd-service.ts';
+import { PromptLatch } from '../features/prompt-latch.ts';
 import type { DndTurnButtons } from '../dnd/turn-buttons.ts';
 import { resolveTmpDir } from '../media/tmp-dir.ts';
 import { isVoiceFile, VOICE_REPLY_REMINDER } from '../media/voice-reply.ts';
@@ -42,6 +43,7 @@ import {
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import { GROUP_MESSAGE_FORMAT_PROMPT } from '../features/message-format.ts';
+import { BANTER_PROMPT, isBanterGroup } from '../features/banter.ts';
 import { compactThreshold, decideAutoCompact, deferCeiling, lastTurnUsedTools } from '../features/compact-policy.ts';
 import type {
   SessionEventLike,
@@ -86,6 +88,23 @@ interface AssembleContext {
   agent?: DshAgent;
 }
 
+/** systemPrompt 服务的最小接口：注册动态 runtime context */
+interface SystemPromptLike {
+  context(entry: {
+    name: string;
+    order: number;
+    required?: boolean;
+    interpolate?: boolean;
+    text: (context: AssembleContext) => string;
+  }): unknown;
+}
+
+/** 排在宿主自己的 runtime context（最大 210）后面 */
+const DND_STATE_CONTEXT_ORDER = 1000;
+const STICKER_ADDITIONS_CONTEXT_ORDER = 1010;
+
+const STICKER_CATALOG_SECTION = 'qqbot:sticker-catalog';
+
 /** system-prompt/assemble 的组装产物最小结构 */
 interface AssembledPrompt {
   sections?: PromptSection[];
@@ -102,6 +121,39 @@ function noteSender(record: SessionRecord, senderId: string): void {
 }
 
 /** windowMs 内给这个会话发过消息的人 */
+/** 宿主生成的 runtime-context 快照也是 user/message 事件，统计和导出时要和真正的用户消息分开 */
+export function isRuntimeContextEvent(event: SessionEventLike): boolean {
+  const body = (event.data ?? event.message ?? event) as { source?: { kind?: unknown } };
+  return body.source?.kind === 'runtime-context';
+}
+
+/**
+ * system prompt 里的锁什么时候换新：换会话或历史被替换（压缩）时前缀本来就要重算，顺带换成最新的。
+ * 普通追加消息不改变它。
+ */
+export function promptEpoch(record: Pick<SessionRecord, 'agent'>): string {
+  const session = record.agent.session;
+  return `${session.id}:${session.surface?.contentGeneration ?? 0}`;
+}
+
+/** 这个 agent 所在会话的团况快照文字；不是 QQ 会话、没开团或读取失败都返回空串 */
+export function dndStateText(
+  agent: DshAgent | undefined,
+  findRecord: (agent: DshAgent) => SessionRecord | undefined,
+  dnd: Pick<DndService, 'stateSnapshot'> | undefined,
+  logger: Logger,
+): string {
+  if (agent === undefined || dnd === undefined) return '';
+  const record = findRecord(agent);
+  if (record === undefined) return '';
+  try {
+    return dnd.stateSnapshot(record.sessionKey);
+  } catch (err) {
+    logger.warn(`im-qqbot: 注入团况失败: ${err instanceof Error ? err.message : String(err)}`);
+    return '';
+  }
+}
+
 export function recentSenderIds(record: SessionRecord, windowMs: number, now = Date.now()): string[] {
   return [...new Set((record.recentSenders ?? []).filter((s) => now - s.at <= windowMs).map((s) => s.id))];
 }
@@ -134,6 +186,8 @@ export class SessionManager {
   public toolAccess?: ToolAccess;
   /** 由 bootstrap 注入的跑团服务（/dnd 命令 + DM prompt 注入） */
   public dndService?: DndService;
+  /** 一段对话内锁住的 system prompt 文字（表情清单、本群笔记目录），见 PromptLatch */
+  private readonly promptLatch = new PromptLatch();
   /** 由 bootstrap 注入的跑团按钮（/dnd start 发签到）；按钮关闭时为空 */
   public dndButtons?: DndTurnButtons;
   /** 由 bootstrap 探测到的 ffmpeg 绝对路径（配置的或 winget 目录里找到的；走 PATH 时为空），提示模型直接用 */
@@ -166,6 +220,7 @@ export class SessionManager {
     );
 
     this.registerScopePromptInjection();
+    this.registerRuntimeContexts();
     this.registerVoiceReplyDelivery();
   }
 
@@ -240,12 +295,19 @@ export class SessionManager {
             '一句话能回完就一句话；不知道对方指什么就直接问，别自己脑补一大段。',
           ].join('\n'),
         });
+        if (isBanterGroup(this.config, record.peerId) && this.dndService?.active(record.sessionKey) === undefined) {
+          sections.push({ name: 'qqbot:banter', order: 91, text: BANTER_PROMPT });
+        }
       }
 
-      // 动态表情清单：新收藏的表情在当前会话的下一回合即可见，不需要改人设配置。
+      const epoch = promptEpoch(record);
+
+      // 动态表情清单：表情库各群共用，清单在一段对话内锁住，新收藏的走 registerRuntimeContexts 的快照。
       if (this.stickerStore !== undefined) {
         try {
-          sections.push(...this.stickerStore.promptSections());
+          sections.push(...this.stickerStore.promptSections().map((section) => (section.name === STICKER_CATALOG_SECTION
+            ? { ...section, text: this.promptLatch.hold(`${record.sessionKey}|${section.name}`, epoch, section.text) }
+            : section)));
         } catch (err) {
           this.logger.warn(`im-qqbot: 注入表情清单失败: ${err instanceof Error ? err.message : String(err)}`);
         }
@@ -279,10 +341,10 @@ export class SessionManager {
         });
       }
 
-      // 跑团：开团的会话每回合注入 DM 守则 + 精简团况（不注入整份 campaign JSON）
+      // 跑团：开团的会话每回合注入 DM 守则和不常变的背景；会变的团况走 registerDndStateContext
       if (this.dndService !== undefined) {
         try {
-          const dndSections = this.dndService.promptSections(record.sessionKey);
+          const dndSections = this.dndService.promptSections(record.sessionKey, epoch);
           sections.push(...dndSections);
           // 开团时本群笔记不走自动注入（见 notesHint），这里只列个目录，玩的时候要用的约定让模型自己去查
           const titles = dndSections.length > 0 ? this.notesStore?.chatNoteTitles(chatKeyOf(record.scope, record.peerId)) ?? [] : [];
@@ -290,11 +352,11 @@ export class SessionManager {
             sections.push({
               name: 'qqbot:dnd-chat-notes',
               order: 98,
-              text: `本群笔记（开团期间不自动注入，需要时用 qqbot_notes_search 查，进度以【团况】为准）：${titles.join('；')}`,
+              text: this.promptLatch.hold(`${record.sessionKey}|qqbot:dnd-chat-notes`, epoch, `本群笔记（开团期间不自动注入，需要时用 qqbot_notes_search 查，进度以【团况】为准）：${titles.join('；')}`),
             });
           }
         } catch (err) {
-          this.logger.warn(`im-qqbot: 注入团况失败: ${err instanceof Error ? err.message : String(err)}`);
+          this.logger.warn(`im-qqbot: 注入跑团守则失败: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
 
@@ -367,6 +429,36 @@ export class SessionManager {
     (this.ctx as unknown as {
       on(event: 'system-prompt/assemble', handler: typeof assemble): void;
     }).on('system-prompt/assemble', assemble);
+  }
+
+  /**
+   * 会变的内容注册成 runtime-context 快照，而不是 system prompt 的 section：放在 system prompt 里时，
+   * 每次扣血、推进回合、别的群收藏表情都让后面整段历史失去缓存。
+   * required：宿主关掉可选 runtime context 时也要留着，否则模型既看不到团况，也看不到新表情。
+   */
+  private registerRuntimeContexts(): void {
+    (this.ctx as unknown as {
+      inject?(deps: string[], callback: (scope: { systemPrompt: SystemPromptLike }) => void): void;
+    }).inject?.(['systemPrompt'], (scope) => {
+      scope.systemPrompt.context({
+        name: 'qqbot:dnd-state',
+        order: DND_STATE_CONTEXT_ORDER,
+        required: true,
+        interpolate: false,
+        text: (context) => dndStateText(context.agent, (agent) => this.findByAgent(agent), this.dndService, this.logger),
+      });
+      scope.systemPrompt.context({
+        name: 'qqbot:sticker-additions',
+        order: STICKER_ADDITIONS_CONTEXT_ORDER,
+        required: true,
+        interpolate: false,
+        text: (context) => {
+          const record = context.agent === undefined ? undefined : this.findByAgent(context.agent);
+          const catalog = record === undefined ? undefined : this.promptLatch.peek(`${record.sessionKey}|${STICKER_CATALOG_SECTION}`);
+          return catalog === undefined ? '' : this.stickerStore?.catalogAdditions(catalog) ?? '';
+        },
+      });
+    });
   }
 
   /**
@@ -752,6 +844,8 @@ export class SessionManager {
 
     for (const event of events) {
       if (event.type === 'user/message') {
+        // 团况快照带 DM 机密（DC、怪物 HP、DM 笔记），不能跟着导出发到群里
+        if (isRuntimeContextEvent(event)) continue;
         const text = extractMessageText(event.message);
         if (text) lines.push(`## 用户\n\n${text}\n`);
       } else if (event.type === 'assistant/message') {
@@ -769,7 +863,7 @@ export class SessionManager {
 
     let count = 0;
     for (const event of events) {
-      if (event.type === 'user/message' || event.type === 'assistant/message') {
+      if ((event.type === 'user/message' && !isRuntimeContextEvent(event)) || event.type === 'assistant/message') {
         count += 1;
       }
     }

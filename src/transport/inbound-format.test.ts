@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { QUOTE_MISSING_NOTE } from '../features/chat-record.ts';
 import type { ResolvedQuote } from '@tencent-connect/qqbot-nodejs';
 import { buildAgentBody, buildQuotePart, buildUserMessage } from './inbound.ts';
 import { quoteSenderFill } from '../gateway/middleware-setup.ts';
@@ -27,6 +28,14 @@ describe('buildUserMessage', () => {
     const body = buildUserMessage('说得对', quote, group);
     expect(body).toBe('[Quoted message from [乙 #U2]]\n原话\n[Quoted message ends]\n[Current message] 21:05\n[甲 #U1] 说得对 (@you)');
     expect(body.match(/\[Current message\]/g)).toHaveLength(1);
+  });
+
+  it('仅 @ + 上下文：上下文放在引用块外面；没原文时说看不到，ref 索引里有就用索引的', () => {
+    const text = '=== 消息 1 ===\n[消息类型] 引用消息\n\n=== 消息 2 ===\n[消息内容] 我写的是十条\n';
+    const missing = buildQuotePart({ refKey: 'r', source: 'msg_elements', text }, label);
+    expect(missing).toBe(`[Platform context begins]\n1. 我写的是十条\n[Platform context ends]\n[Quoted message from 未知发送者]\n${QUOTE_MISSING_NOTE}\n[Quoted message ends]\n`);
+    const known = buildQuotePart({ refKey: 'r', source: 'msg_elements', text, entry: { messageId: 'm', senderId: 'u2', senderName: '乙', content: '原话', timestamp: '' } }, label);
+    expect(known).toContain('[Quoted message from [乙 #U2]]\n原话\n[Quoted message ends]');
   });
 
   it('私聊不加发送者标签，只在有引用时分隔', () => {

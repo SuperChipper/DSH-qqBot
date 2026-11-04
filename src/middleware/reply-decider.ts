@@ -26,6 +26,7 @@ import {
 } from '../features/reply-desire.ts';
 import type { JudgeLine, JudgeQueue, ReplyJudge } from '../features/reply-judge.ts';
 import { readRecentGroupMessages } from '../features/group-memory.ts';
+import { isBanterGroup } from '../features/banter.ts';
 
 interface MentionState {
   wasMentioned: boolean;
@@ -77,6 +78,8 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
     const dnd = manager.dndService?.active(manager.sessionKey('group', groupId)) !== undefined;
     const mention = ctx.state.mention as MentionState | undefined;
     const queue = judgeDeps?.queue;
+    // 没有模型打分时不改门控：窗口一关又没有 judge，这个群就只剩 @ 才回了
+    const banter = !dnd && judgeDeps !== undefined && isBanterGroup(config, groupId);
 
     const answer = async (result: DesireResult): Promise<void> => {
       queue?.cancel(groupId);
@@ -112,7 +115,8 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
       senderId: msg.senderId,
       mentionsOthers: Array.isArray(mentions) && mentions.some((m) => m?.is_you !== true),
       names: rd.names,
-      engagement: dnd ? undefined : tracker.get(groupId, now),
+      // 串模式的文字不吃窗口加分：窗口内规则直接放行，既跳过防抖变成秒回，也会追着一个人连着接
+      engagement: dnd || (banter && stickerId === undefined) ? undefined : tracker.get(groupId, now),
       recent: tracker.recent(groupId),
       sinceBotSpoke: tracker.sinceBotSpoke(groupId, now),
       stickerAnswered: tracker.stickerAnswered(groupId, msg.senderId),
@@ -127,7 +131,8 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
       return;
     }
 
-    if (judgeDeps === undefined || dnd || !isJudgeCandidate(text, result)) {
+    if (judgeDeps === undefined || dnd || !isJudgeCandidate(text, result)
+      || (banter && tracker.banterCapped(groupId, msg.senderId, now))) {
       queue?.activity(groupId, now);
       if (config.debug) {
         logger.debug(`reply-desire: skip score=${result.score.toFixed(2)} [${result.reasons.join(',')}]`);
@@ -155,12 +160,14 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
       names: rd.names,
       persona: config.groupPrompt,
       lines: judgeLines(config, groupId, msg.messageId),
+      banter,
     });
     if (desire === undefined || desire < rd.threshold) {
       logger.info(`reply-desire: judge skip group=${groupId} desire=${desire?.toFixed(2) ?? 'n/a'}`);
       ctx.stop('reply-desire:judge-low');
       return;
     }
+    if (banter) tracker.noteBanter(groupId, msg.senderId, Date.now());
     await answer({ score: desire, reasons: [...result.reasons, 'judge'] });
   };
 }

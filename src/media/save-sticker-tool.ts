@@ -30,6 +30,7 @@ interface ToolsRegistryLike {
 interface SaveStickerArgs {
   image: string;
   emotion: string;
+  look: string;
   note?: string;
   file?: string;
 }
@@ -59,6 +60,10 @@ export function registerSaveStickerTool(
           type: 'string',
           description: 'Your own mood/reaction at this moment as a short label (e.g. 破防, 被萌到, 无语, 骄傲). Describe what you feel, not the image content.',
         },
+        look: {
+          type: 'string',
+          description: 'What the image actually shows: who is in it and what they are doing, in a short Chinese phrase (at most 40 characters). You will not see the image again when choosing stickers, so this is how you recognize it later.',
+        },
         note: {
           type: 'string',
           description: 'Optional one-sentence reason why this sticker is worth keeping.',
@@ -68,7 +73,7 @@ export function registerSaveStickerTool(
           description: 'Optional preferred file name (e.g. fish_破防.png). Omit to derive it from emotion.',
         },
       },
-      required: ['image', 'emotion'],
+      required: ['image', 'emotion', 'look'],
       additionalProperties: false,
     },
     output: {
@@ -92,16 +97,20 @@ export function registerSaveStickerTool(
       },
     },
     async execute(args: unknown): Promise<SaveStickerResult> {
-      const { image, emotion, note, file } = args as SaveStickerArgs;
+      const { image, emotion, look, note, file } = args as SaveStickerArgs;
       if (typeof image !== 'string' || image.trim().length === 0) {
         throw new Error('qqbot_save_sticker: `image` 必须是图片绝对路径');
       }
       if (typeof emotion !== 'string' || emotion.trim().length === 0) {
         throw new Error('qqbot_save_sticker: `emotion` 必须是你此刻的情绪标签');
       }
+      if (typeof look !== 'string' || look.trim().length === 0) {
+        throw new Error('qqbot_save_sticker: `look` 必须写清图里实际画的是什么');
+      }
       return store.save({
         source: image,
         emotion,
+        look,
         ...(typeof note === 'string' ? { note } : {}),
         ...(typeof file === 'string' ? { file } : {}),
       });

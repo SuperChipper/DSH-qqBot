@@ -106,6 +106,47 @@ describe('replyDecider', () => {
       expect(score).not.toHaveBeenCalled();
     });
 
+    describe('串模式', () => {
+      const banterCfg = { ...judgeCfg, banter: { enabled: true, groups: ['b1', 'b2', 'b3', 'dnd1'] } } as unknown as ImQQBotConfig;
+      async function runBanter(ctx: MiddlewareContext, d: JudgeDeps, mgr: SessionManager = judgeManager): Promise<boolean> {
+        let passed = false;
+        await replyDecider(banterCfg, mgr, logger, d)(ctx, async () => { passed = true; });
+        return passed;
+      }
+
+      it('打分请求带上串模式标记，没开的群不带', async () => {
+        const { score, deps: d } = deps(0.9);
+        expect(await runBanter(makeCtx('b1', 'u1', '我从来不迟到').ctx, d)).toBe(true);
+        expect(score).toHaveBeenLastCalledWith(expect.objectContaining({ banter: true }));
+        expect(await runBanter(makeCtx('other', 'u1', '我从来不迟到').ctx, d)).toBe(true);
+        expect(score).toHaveBeenLastCalledWith(expect.objectContaining({ banter: false }));
+      });
+
+      it('对话窗口内的文字也要过打分，不靠窗口直接放行', async () => {
+        const { score, deps: d } = deps(0.1);
+        expect(await runBanter(makeCtx('b2', 'u1', '在吗', true).ctx, d)).toBe(true);
+        expect(await runBanter(makeCtx('b2', 'u1', '我觉得也是').ctx, d)).toBe(false);
+        expect(score).toHaveBeenCalledTimes(1);
+      });
+
+      it('连续接同一个人到上限后不再调模型，换人不受影响', async () => {
+        const { score, deps: d } = deps(0.9);
+        expect(await runBanter(makeCtx('b3', 'u1', '第一句').ctx, d)).toBe(true);
+        expect(await runBanter(makeCtx('b3', 'u1', '第二句').ctx, d)).toBe(true);
+        expect(await runBanter(makeCtx('b3', 'u1', '第三句').ctx, d)).toBe(false);
+        expect(score).toHaveBeenCalledTimes(2);
+        expect(await runBanter(makeCtx('b3', 'u2', '换个人').ctx, d)).toBe(true);
+        expect(await runBanter(makeCtx('b3', 'u1', '又是我').ctx, d)).toBe(true);
+      });
+
+      it('开团期间不生效', async () => {
+        const { score, deps: d } = deps(1);
+        const dndJudgeManager = { ...dndManager, getEffectiveModel: () => undefined } as unknown as SessionManager;
+        expect(await runBanter(makeCtx('dnd1', 'u1', '我们先商量一下').ctx, d, dndJudgeManager)).toBe(false);
+        expect(score).not.toHaveBeenCalled();
+      });
+    });
+
     it('等打分时有人 @ bot：候选作废', async () => {
       const { score, deps: d } = deps(1);
       const pending = runJudge(makeCtx('j5', 'u1', '今天好热').ctx, d);

@@ -9,6 +9,7 @@ import { captionFromArgs } from '../transport/caption-echo.ts';
 
 interface Definition {
   name: string;
+  parameters?: { properties?: Record<string, { enum?: string[] }> };
   output: { render(args: unknown, value: unknown): Array<{ type: string; text?: string }> };
 }
 
@@ -35,6 +36,12 @@ describe('voice reply delivery guidance', () => {
     expect(text).not.toContain('需要文字补充就另外打字');
   });
 
+  it('speak 暴露 lang 参数，外语句子能指定日文/英文音素', () => {
+    const definition = tools().get('qqbot_speak')!;
+    const lang = definition.parameters?.properties?.lang;
+    expect(lang?.enum).toEqual(['zh', 'ja', 'en']);
+  });
+
   it.each(['song.mp3', 'VOICE.WAV', 'clip.silk'])('send_file 发语音 %s 不把被忽略的 caption 报成已送达', (fileName) => {
     const definition = tools().get('qqbot_send_file')!;
     const args = { file_path: 'C:/tmp/' + fileName, caption: '歌曲说明' };
@@ -45,11 +52,13 @@ describe('voice reply delivery guidance', () => {
     expect(captionFromArgs(JSON.stringify(args))).toBeUndefined();
   });
 
-  it('图片 caption 仍正常提示和去重', () => {
+  it('图片 caption 只报发送事实，不拖复读提醒的小尾巴', () => {
     const definition = tools().get('qqbot_send_file')!;
     const args = { file_path: 'C:/tmp/image.png', caption: '这张给你' };
     const text = definition.output.render(args, { fileName: 'image.png', target: 'group:p' })[0]!.text!;
-    expect(text).toContain('caption 已随文件发出');
+    expect(text).toContain('已发送 image.png');
+    expect(text).not.toContain('caption 已随文件发出');
+    expect(text).not.toContain('不输出文字');
     expect(text).not.toContain('语音发送成功后');
     expect(captionFromArgs(JSON.stringify(args))).toBe('这张给你');
   });

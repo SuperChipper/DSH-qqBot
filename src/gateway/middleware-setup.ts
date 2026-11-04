@@ -24,6 +24,7 @@ import type { ImQQBotConfig } from '../config.ts';
 import type { SessionManager } from '../session/index.ts';
 import type { Logger, RawAttachment } from '../types.ts';
 import { isImageContentType } from '../transport/attachment.ts';
+import { SELF_SENDER_ID, type SelfSentIndex } from '../transport/self-sent.ts';
 import { buildCommandList } from '../commands/index.ts';
 import { attachmentProcessor } from '../middleware/attachment.ts';
 import { questionAnswer } from '../middleware/question-answer.ts';
@@ -63,12 +64,29 @@ export function mergeWithSenders(buffered: MiddlewareContext[], label: SenderLab
 }
 
 /** 引用解析走了 msg_elements 时，从 ref store 补回被引用消息的发送者（原文和附件仍用 msg_elements 的） */
-export function quoteSenderFill(store: RefIndexStore): Middleware {
+export function quoteSenderFill(store: RefIndexStore, selfSent?: SelfSentIndex): Middleware {
   return async (ctx, next) => {
     const quote = ctx.state.quote as ResolvedQuote | undefined;
     if (quote !== undefined && quote.entry === undefined && quote.refKey) {
       const entry = await store.get(quote.refKey);
-      if (entry !== undefined) ctx.state.quote = { ...quote, entry };
+      if (entry !== undefined) {
+        ctx.state.quote = { ...quote, entry };
+      } else {
+        // SDK 的 ref 索引只记入站消息；自己发出去的那条要单独认回来，
+        // 否则模型会把自己引用自己当成「未知发送者」
+        const mine = selfSent?.get(quote.refKey);
+        if (mine !== undefined) {
+          ctx.state.quote = {
+            ...quote,
+            entry: {
+              messageId: quote.refKey,
+              senderId: SELF_SENDER_ID,
+              content: mine.content,
+              timestamp: mine.timestamp,
+            },
+          };
+        }
+      }
     }
     await next();
   };
@@ -80,6 +98,7 @@ export function setupMiddlewares(
   manager: SessionManager,
   logger: Logger,
   llm?: JudgeLlm,
+  selfSent?: SelfSentIndex,
 ): void {
   // 1. 错误兜底（最外层洋葱皮）
   bot.use(errorHandler());
@@ -163,6 +182,10 @@ export function setupMiddlewares(
     }
     bot.use(replyDecider(config, manager, logger, judgeDeps));
   }
+  if (config.banter?.enabled === true && config.banter.groups.length > 0
+    && (!replyDesireOn || config.replyDesire.judge?.enabled !== true)) {
+    logger.warn('im-qqbot: 串模式需要同时开启回复欲望和模型打分才会主动接话，现在只改变被 @ 时的语气');
+  }
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
@@ -205,7 +228,7 @@ export function setupMiddlewares(
     store: refStore,
     preferMsgElements: true,
   }));
-  bot.use(quoteSenderFill(refStore));
+  bot.use(quoteSenderFill(refStore, selfSent));
 
   // 11.5. 附件下载（file 附件下载到本地，供 @提及 / 工具访问）
   bot.use(attachmentProcessor(config, logger));

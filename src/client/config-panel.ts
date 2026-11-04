@@ -177,6 +177,12 @@ interface ReplyDesireWire {
   judge: ReplyJudgeWire;
 }
 
+/** 串模式（与 src/config.ts 的 BanterConfig 对应） */
+interface BanterWire {
+  enabled: boolean;
+  groups: string[];
+}
+
 const REPLY_JUDGE_DEFAULTS: ReplyJudgeWire = {
   enabled: false, provider: '', model: '', reasoningEffort: '',
   debounceMs: 2500, maxWaitMs: 15000, contextMessages: 20, timeoutMs: 15000,
@@ -224,6 +230,7 @@ type ConfigWire = {
   browser?: BrowserConfig;
   dnd?: DndWire;
   replyDesire?: ReplyDesireWire;
+  banter?: BanterWire;
   cwd?: string;
 };
 
@@ -560,6 +567,10 @@ export function ConfigPanel(): ReactNode {
       const r = changed.replyDesire as ReplyDesireWire;
       changed.replyDesire = { ...r, names: r.names.map((v) => v.trim()).filter(Boolean) };
     }
+    if (changed.banter !== undefined) {
+      const b = changed.banter as BanterWire;
+      changed.banter = { ...b, groups: b.groups.map((v) => v.trim()).filter(Boolean) };
+    }
 
     setBusy(true);
     void fetch(BIND_CONFIG_PATH, {
@@ -640,6 +651,7 @@ export function ConfigPanel(): ReactNode {
   const patchJudge = (next: Partial<ReplyJudgeWire>): void => {
     patch('replyDesire', { ...replyDesire, judge: { ...judge, ...next } });
   };
+  const banter: BanterWire = form.banter ?? { enabled: false, groups: [] };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
@@ -840,6 +852,20 @@ export function ConfigPanel(): ReactNode {
         onChange: (v) => { patchJudge({ timeoutMs: v }); },
       }),
     ] : []),
+
+    createElement('div', { className: 'imqb2-group-title' }, '串模式'),
+    createElement(SwitchRow, {
+      label: '启用群聊串模式', checked: banter.enabled,
+      help: replyDesire.enabled && judge.enabled
+        ? '只在下面列出的群生效；私聊和开团期间不生效'
+        : '要主动接话，还需打开上面的「未 @ 时按打分决定是否接话」和「规则拿不准时让模型打分」；否则只改变被 @ 时的语气',
+      onChange: (v) => { patch('banter', { ...banter, enabled: v }); },
+    }),
+    createElement(ListRow, {
+      label: '开启串模式的群 openid', help: '每行一个',
+      value: banter.groups, rows: 2,
+      onChange: (v) => { patch('banter', { ...banter, groups: v }); },
+    }),
 
     createElement('div', { className: 'imqb2-group-title' }, '表情收藏'),
     createElement(SwitchRow, {

@@ -397,6 +397,16 @@ describe('回合结束、指针修正、武器', () => {
     expect(() => assertCanAct(c, brock, { declaredBy: 'P2', recentSenders: ['P1'] })).toThrow(/最近没有发消息/);
   });
 
+  it('委托来的行动传 dmOverride：不查本人，但仍然只能在轮到他的回合里动', () => {
+    const c = fight();
+    const brock = c.characters.find((ch) => ch.name === '布洛克')!;
+    // 布洛克是当前回合，别人委托他行动：放行
+    expect(() => assertCanAct(c, brock, { declaredBy: 'P1', recentSenders: ['P1'], dmOverride: true })).not.toThrow();
+    // 不是他的回合，被推/被拖之外也不能替他主动行动
+    const erin = c.characters.find((ch) => ch.name === '艾琳')!;
+    expect(() => assertCanAct(c, erin, { declaredBy: 'P1', recentSenders: ['P1'], dmOverride: true })).toThrow(/现在是/);
+  });
+
   it('goto 修正先攻指针', () => {
     const c = fight();
     gotoTurn(c, '艾琳', 2);
@@ -471,9 +481,11 @@ describe('CampaignStore / DndService', () => {
     expect(first.resumed).toBe(false);
     service.store.update('group:abc', (c) => upsertCharacter(c, { name: '艾琳' }));
 
-    expect(service.promptSections('group:abc').map((s) => s.name)).toEqual(['qqbot:dnd-dm', 'qqbot:dnd-state']);
+    expect(service.promptSections('group:abc')[0]!.name).toBe('qqbot:dnd-dm');
+    expect(service.stateSnapshot('group:abc')).toContain('【团况 · DM 视角】');
     service.stop('group:abc');
     expect(service.promptSections('group:abc')).toEqual([]);
+    expect(service.stateSnapshot('group:abc')).toBe('');
     expect(() => service.store.update('group:abc', () => 0)).toThrow(/\/dnd start/);
 
     const again = service.start('group:abc', 'sunken-bell', false);

@@ -56,6 +56,7 @@ export const GROUP_MESSAGE_FORMAT_PROMPT = [
   '一行一个标签；没有标签的续行属于它上面最近的那个标签。几个人排队的话被合并成一条时，每行按自己的标签算发送者。',
   '[Chat history begins] … [Chat history ends] 之间是之前的群聊记录，行首的「HH:mm」或「MM-DD HH:mm」是发送时间。',
   '[Current message] 下面那一条才是要你回复的消息；你的回复会自动发给它的发送者，不需要你写编号或 @ 谁。标签后带 (@you) 表示这个人 @ 了你，不带就是你随机冒泡或主动接话。',
-  '[Quoted message from …] … [Quoted message ends] 是当前消息引用的那条，from 后面是被引用那条的发送者标签；写「未知发送者」时是没查到（多半是引用你自己之前发的话，或很早的消息），别凭内容硬猜是谁说的。',
+  '[Quoted message from …] … [Quoted message ends] 是当前消息引用的那条，from 后面是被引用那条的发送者标签；写「未知发送者」时是没查到（多半是很早的消息），别凭内容硬猜是谁说的；写「你自己」时，被引用的就是你自己之前发出去的话。',
+  '[Platform context begins] … [Platform context ends] 是这个群只推送 @ 消息时平台附带的最近几条，用来理解前文，不是被引用的内容；大多没有发送者，别猜是谁说的。',
   '工具参数要指定某个群成员时（如跑团的 declared_by、player_id），填他标签里的编号，例如 U3。',
 ].join('\n');

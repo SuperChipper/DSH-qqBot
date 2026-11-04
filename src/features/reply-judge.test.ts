@@ -5,6 +5,7 @@ import type { Logger } from '../types.ts';
 import {
   JudgeQueue,
   ReplyJudge,
+  buildJudgeSystem,
   buildJudgeTranscript,
   parseDesire,
   pickLowestEffort,
@@ -18,6 +19,16 @@ describe('pickLowestEffort', () => {
     expect(pickLowestEffort([{ id: 'high', name: 'High' }, { id: 'low', name: 'Low' }, { id: 'none', name: 'Off' }])).toBe('none');
     expect(pickLowestEffort([{ id: 'max', name: 'Max' }, { id: 'e1', name: 'Minimal' }])).toBe('e1');
     expect(pickLowestEffort([{ id: 'high', name: 'High' }])).toBeUndefined();
+  });
+});
+
+describe('buildJudgeSystem', () => {
+  it('串模式不再给群友之间的聊天低分，改看有没有具体可接的点', () => {
+    expect(buildJudgeSystem(['小d'])).toContain('群友之间在聊自己的事');
+    const banter = buildJudgeSystem(['小d'], undefined, true);
+    expect(banter).not.toContain('群友之间在聊自己的事');
+    expect(banter).toContain('前后矛盾');
+    expect(banter).toContain('拿不准就给低分');
   });
 });
 

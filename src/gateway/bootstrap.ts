@@ -12,6 +12,7 @@ import { QQBot } from '@tencent-connect/qqbot-nodejs';
 import type { GatewayDisconnect, InteractionEvent, MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { SessionManager, type DshAgentRegistry } from '../session/index.ts';
 import { handleInbound, createOutboundHandler } from '../transport/index.ts';
+import { SelfSentIndex } from '../transport/self-sent.ts';
 import { parseStreamFrame } from '../transport/events.ts';
 import { ReplyLimiter } from '../transport/reply-limiter.ts';
 import { PeerSendQueue } from '../transport/peer-send-queue.ts';
@@ -208,7 +209,9 @@ export async function bootstrapGateway(
   } catch {
     llm = undefined;
   }
-  setupMiddlewares(bot, config, manager, logger, llm);
+  // 自己发出去的消息不进 SDK 的 ref 索引，这里单独记一份，引用解析时才能认出「你自己」
+  const selfSent = new SelfSentIndex();
+  setupMiddlewares(bot, config, manager, logger, llm, selfSent);
 
   // ── 入站：经过中间件链后的消息交给 dsh agent ──
   bot.on('message', async (mCtx: MiddlewareContext) => {
@@ -246,7 +249,7 @@ export async function bootstrapGateway(
     })),
   };
 
-  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, stickerStore);
+  const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, stickerStore, selfSent);
   (ctx as unknown as { on(event: string, handler: (...args: unknown[]) => void): void })
     .on('session/event', outbound.routeSessionEvent as (...args: unknown[]) => void);
 

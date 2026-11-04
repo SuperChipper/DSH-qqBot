@@ -59,6 +59,42 @@ describe('StickerStore', () => {
     expect(sections[1]?.text).toContain(root);
   });
 
+  it('锁住的清单之外，新收藏的表情列在 catalogAdditions 里', () => {
+    const { media, store } = setup();
+    expect(store.catalogAdditions('')).toBe('');
+    store.save({ source: writeImage(media, 'a.png', 'bytes-a'), emotion: '开心', note: '' });
+    const catalog = store.promptSections()[1]!.text;
+    expect(store.catalogAdditions(catalog)).toBe('');
+
+    store.save({ source: writeImage(media, 'b.png', 'bytes-b'), emotion: '无语', note: '' });
+    const added = store.catalogAdditions(catalog);
+    expect(added).toContain('无语=fish_无语.png');
+    expect(added).not.toContain('开心=');
+  });
+
+  it('清单带上 look，note 不进清单；超长描述被截断', () => {
+    const { media, root, store } = setup();
+    store.save({ source: writeImage(media, 'a.png', 'bytes-a'), emotion: '开心', look: '蓝鲸娘\n握拳笑', note: '收到好消息时用' });
+    const text = store.promptSections()[1]!.text;
+    expect(text).toContain('开心=fish_开心.png（蓝鲸娘 握拳笑）');
+    expect(text).not.toContain('收到好消息时用');
+
+    store.save({ source: writeImage(media, 'b.png', 'bytes-b'), emotion: '无语', look: '长'.repeat(100) });
+    const index = JSON.parse(readFileSync(join(root, 'index.json'), 'utf8')) as Array<{ look?: string }>;
+    expect(index[1]?.look).toHaveLength(40);
+  });
+
+  it('给旧条目补 look 后，不会被 catalogAdditions 当成新收藏', () => {
+    const { media, root, store } = setup();
+    store.save({ source: writeImage(media, 'a.png', 'bytes-a'), emotion: '开心' });
+    const catalog = store.promptSections()[1]!.text;
+    const indexPath = join(root, 'index.json');
+    const index = JSON.parse(readFileSync(indexPath, 'utf8')) as Array<Record<string, unknown>>;
+    index[0]!.look = '蓝鲸娘握拳笑';
+    writeFileSync(indexPath, JSON.stringify(index));
+    expect(store.catalogAdditions(catalog)).toBe('');
+  });
+
   it('扩展名撒谎时按文件头命名（.png 里装 GIF）', () => {
     const { media, root, store } = setup();
     const gifBytes = Buffer.concat([Buffer.from('GIF89a', 'ascii'), Buffer.alloc(16, 0x20)]);

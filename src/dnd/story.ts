@@ -37,8 +37,8 @@ export interface NpcState {
   alive?: boolean;
 }
 
-const ATTITUDE_NAMES: Record<Attitude, string> = { friendly: '友善', indifferent: '中立', hostile: '敌对' };
-const STATUS_NAMES: Record<QuestStatus, string> = {
+export const ATTITUDE_NAMES: Record<Attitude, string> = { friendly: '友善', indifferent: '中立', hostile: '敌对' };
+export const STATUS_NAMES: Record<QuestStatus, string> = {
   offered: '已提出', active: '进行中', completed: '目标达成，待领奖', rewarded: '已领奖', failed: '失败',
 };
 

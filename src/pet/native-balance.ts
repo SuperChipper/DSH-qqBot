@@ -1,12 +1,15 @@
 /**
- * 给桌宠（dsh-pet）补一个 deepseek-native 余额 provider。
+ * 给桌宠（dsh-pet）补上自建 DeepSeek 路由的余额 provider。
  *
- * 桌宠的余额查询按 agentDefaultModel.currentSelection().provider 寻址，
+ * 桌宠的余额查询按 agentDefaultModel.currentSelection().provider 精确匹配 id，
  * 内置表只有 deepseek-official / deepseek-account / opencode-go / commandcode。
- * 自定义 deepseek-native 不在表里 → unsupported。
+ * 我们在 llm-pi-ai 里自建的路由（deepseek-native、deepseek-max 等）都不在表里
+ * → unsupported，切一次模型余额就查不到了。
  *
- * 这里通过桌宠暴露的 petApi7340.balance.register 注册第三方 provider：
- * 同样的 /user/balance 接口、同样的 DEEPSEEK_API_KEY，只把 provider id 补上。
+ * 所以**按 id 全部注册一遍**，而不是只挂 deepseek-native：这些路由指向同一个
+ * DeepSeek 账号、同一套 /user/balance 和 DEEPSEEK_API_KEY，差别只在推理档位，
+ * 余额本来就该是同一个数。新增自建路由时记得往 DEEPSEEK_ROUTE_IDS 里补一个。
+ *
  * 桌宠未安装时静默跳过；桌宠晚于本插件加载时做有限重试。
  */
 import type { Context } from '@deepseek-ai/cordis';
@@ -55,6 +58,9 @@ export function deepseekPricingTier(now: Date = new Date()): 'peak' | 'idle' {
   return (hour >= 9 && hour < 12) || (hour >= 14 && hour < 18) ? 'peak' : 'idle';
 }
 
+/** 指向同一个 DeepSeek 账号的自建路由 id；余额查询要逐个登记，否则切模型就查不到。 */
+export const DEEPSEEK_ROUTE_IDS = ['deepseek-native', 'deepseek-max'] as const;
+
 /** 解析 DeepSeek /user/balance；失败一律 throw，让桌宠统一落成 fetch-error */
 export function parseDeepseekBalance(
   body: unknown,
@@ -81,9 +87,24 @@ export function parseDeepseekBalance(
 
 /** 注册桌宠余额 provider；petApi7340 尚未出现时最多重试 30 秒 */
 export function registerPetNativeBalance(ctx: Context, logger: Logger): void {
-  let dispose: (() => void) | undefined;
+  let disposers: Array<() => void> = [];
   let timer: ReturnType<typeof setTimeout> | undefined;
   let attempts = 0;
+
+  /** 同一个账号的余额，provider 只影响结果里回显的 id */
+  const fetcher = (provider: string) => async (): Promise<unknown> => {
+    const credentials = ctx.get('credentials') as CredentialsLike | undefined;
+    const resolved = await credentials?.resolve('DEEPSEEK_API_KEY');
+    if (resolved === undefined || resolved.value.length === 0) {
+      throw new Error('缺少 DEEPSEEK_API_KEY');
+    }
+    const response = await fetch('https://api.deepseek.com/user/balance', {
+      headers: { authorization: `Bearer ${resolved.value}` },
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) throw new Error('deepseek balance HTTP ' + response.status);
+    return parseDeepseekBalance(await response.json(), provider);
+  };
 
   const tryRegister = (): void => {
     const pet = ctx.get('petApi7340') as PetBalanceApi | undefined;
@@ -93,25 +114,18 @@ export function registerPetNativeBalance(ctx: Context, logger: Logger): void {
       if (attempts <= 30) timer = setTimeout(tryRegister, 1000);
       return;
     }
-    try {
-      dispose = pet.balance.register({
-        id: 'deepseek-native',
-        async fetch() {
-          const resolved = await credentials.resolve('DEEPSEEK_API_KEY');
-          if (resolved === undefined || resolved.value.length === 0) {
-            throw new Error('缺少 DEEPSEEK_API_KEY');
-          }
-          const response = await fetch('https://api.deepseek.com/user/balance', {
-            headers: { authorization: `Bearer ${resolved.value}` },
-            signal: AbortSignal.timeout(15000),
-          });
-          if (!response.ok) throw new Error('deepseek balance HTTP ' + response.status);
-          return parseDeepseekBalance(await response.json());
-        },
-      });
-      logger.info('im-qqbot: 已为桌宠注册 deepseek-native 余额查询');
-    } catch (err) {
-      logger.warn(`im-qqbot: 注册桌宠 deepseek-native 余额查询失败: ${err instanceof Error ? err.message : String(err)}`);
+    const registered: string[] = [];
+    for (const id of DEEPSEEK_ROUTE_IDS) {
+      try {
+        disposers.push(pet.balance.register({ id, fetch: fetcher(id) }));
+        registered.push(id);
+      } catch (err) {
+        // 桌宠重启后残留的旧登记会让这里抛「已被注册」，不该拖垮其他路由
+        logger.warn(`im-qqbot: 注册桌宠 ${id} 余额查询失败: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (registered.length > 0) {
+      logger.info(`im-qqbot: 已为桌宠注册余额查询 ${registered.join(', ')}`);
     }
   };
 
@@ -119,6 +133,7 @@ export function registerPetNativeBalance(ctx: Context, logger: Logger): void {
   (ctx as unknown as { effect(fn: () => () => void, name?: string): void })
     .effect(() => () => {
       if (timer !== undefined) clearTimeout(timer);
-      dispose?.();
+      for (const dispose of disposers) dispose();
+      disposers = [];
     }, 'im-qqbot: pet native balance');
 }

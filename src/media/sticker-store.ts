@@ -31,6 +31,8 @@ export interface StickerIndexEntry {
   auto?: boolean;
   createdAt?: number;
   note?: string;
+  /** 图里画的是什么。模型发表情前不看图，全靠这段认图；note 是收藏理由，不进清单 */
+  look?: string;
   [key: string]: unknown;
 }
 
@@ -64,6 +66,8 @@ export interface SaveStickerInput {
   emotion: string;
   /** 为什么想收藏（可选，写入索引） */
   note?: string;
+  /** 图里画的是什么（工具调用必填；模型把调用写成文本时补存的没有） */
+  look?: string;
   /** 首选文件名（可选，如 fish_破防.png） */
   file?: string;
 }
@@ -81,6 +85,8 @@ export interface SaveStickerResult {
 const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
 const DEFAULT_MAX_PROMPT_ENTRIES = 80;
 const MAX_EMOTION_LENGTH = 32;
+/** 清单每回合都带，每张的描述要短 */
+const MAX_LOOK_LENGTH = 40;
 const MAX_FILENAME_STEM = 48;
 
 /**
@@ -112,6 +118,12 @@ function normalizeEmotion(input: string): string {
   const value = input.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
   if (value.length === 0) throw new Error('emotion 不能为空');
   return value.slice(0, MAX_EMOTION_LENGTH);
+}
+
+/** 清单里的一项：情绪=文件（图里是什么） */
+function catalogItem(entry: StickerIndexEntry): string {
+  const look = typeof entry.look === 'string' ? entry.look.trim() : '';
+  return `${entry.emotion}=${entry.file}${look !== '' ? `（${look}）` : ''}`;
 }
 
 /** 文件名安全化：只保留中文、字母、数字、下划线、短横线 */
@@ -233,6 +245,9 @@ export class StickerStore {
       auto: true,
       createdAt: Date.now(),
       ...(input.note !== undefined && input.note.trim() !== '' ? { note: input.note.trim() } : {}),
+      ...(input.look !== undefined && input.look.trim() !== ''
+        ? { look: input.look.replace(/\s+/g, ' ').trim().slice(0, MAX_LOOK_LENGTH) }
+        : {}),
     };
     entries.push(entry);
     this.writeIndex(entries);
@@ -344,11 +359,11 @@ export class StickerStore {
       text: [
         '【表情收藏】',
         '你有一批自己的表情包。看到一张图、内心产生明确情绪，并且觉得以后会想用它表达这种情绪时，可以调用 qqbot_save_sticker 收藏：',
-        'image=图片本地路径（复制用户消息里的 - Image: 行），emotion=你此刻的情绪/场景（如「破防」「被萌到」「无语」「骄傲」），note=一句为什么想存。',
+        'image=图片本地路径（复制用户消息里的 - Image: 行），emotion=你此刻的情绪/场景（如「破防」「被萌到」「无语」「骄傲」），look=图里实际画的是什么（谁、在做什么，以后你靠这句认图），note=一句为什么想存。',
         '只在真正想用的时候存：普通截图、长文截图、与情绪无关的图不要存；重复图片会按内容哈希自动跳过，不要为了凑数反复存。',
         '必须通过真正的工具调用收藏：不要把 <qqbot_save_sticker>、<image>、<emotion> 这类标签写进回复正文——那不是调用，会被当普通文字发出去。',
         '如果要同时回复和收藏：先发起 qqbot_save_sticker 工具调用（正文留空），拿到工具结果后再写回复。',
-        '从下一回合起，新收藏的图会自动出现在下面的表情清单里；只在当前情绪明确、图也对得上时才用 qqbot_send_file 发出，收藏不代表必须回复一张图。',
+        '从下一回合起，新收藏的图会自动出现在表情清单或最新的「新收藏的表情」里；只在当前情绪明确、图也对得上时才用 qqbot_send_file 发出，收藏不代表必须回复一张图。',
       ].join('\n'),
     }];
 
@@ -360,13 +375,7 @@ export class StickerStore {
       return sections;
     }
 
-    const present = entries
-      .filter((entry) => typeof entry.file === 'string' && entry.file.length > 0)
-      .filter((entry) => existsSync(join(this.root, entry.file)));
-    const manual = present.filter((entry) => entry.auto !== true).slice(0, this.maxPromptEntries);
-    const auto = present.filter((entry) => entry.auto === true);
-    const visible = [...manual, ...auto.slice(Math.max(0, auto.length - (this.maxPromptEntries - manual.length)))];
-
+    const visible = this.visibleEntries(entries);
     if (visible.length === 0) return sections;
 
     sections.push({
@@ -375,12 +384,38 @@ export class StickerStore {
       text: [
         '【你的表情包】',
         `路径前缀：${this.root}`,
-        `情绪=文件：${visible.map((entry) => `${entry.emotion}=${entry.file}`).join(' ')}`,
+        `情绪=文件（图里是什么）：${visible.map(catalogItem).join(' ')}`,
         '只在有明确情绪、且库里有对得上的那张时才发（被夸、被怼、困了、破防、撒娇）；纯信息性回复不发，也别连着两轮各挂一张。一次最多发 1 张。',
         '配文放进 caption，不超过两句、不换行、不放列表；要讲道理另发一条纯文字，不重复配文。',
       ].join('\n'),
     });
     return sections;
+  }
+
+  /**
+   * 不在 catalog（锁住的表情清单文字）里的表情：表情库是所有群共用的，一个群收藏就重写清单的话，
+   * 所有群下一次请求都要整段重算，所以清单在一段对话内不变，新收藏的走对话末尾的快照。
+   */
+  catalogAdditions(catalog: string): string {
+    let entries: StickerIndexEntry[];
+    try {
+      entries = this.readIndex();
+    } catch {
+      return '';
+    }
+    // 按文件比对：给旧条目补 look 后整项文字变了，不按文件比的话会全被当成新收藏
+    const added = this.visibleEntries(entries).filter((entry) => !catalog.includes(`=${entry.file}`)).map(catalogItem);
+    return added.length === 0 ? '' : `【新收藏的表情】路径前缀同表情清单。情绪=文件（图里是什么）：${added.join(' ')}`;
+  }
+
+  /** 进表情清单的条目：手动维护的优先，剩下的名额给最新的自动收藏 */
+  private visibleEntries(entries: StickerIndexEntry[]): StickerIndexEntry[] {
+    const present = entries
+      .filter((entry) => typeof entry.file === 'string' && entry.file.length > 0)
+      .filter((entry) => existsSync(join(this.root, entry.file)));
+    const manual = present.filter((entry) => entry.auto !== true).slice(0, this.maxPromptEntries);
+    const auto = present.filter((entry) => entry.auto === true);
+    return [...manual, ...auto.slice(Math.max(0, auto.length - (this.maxPromptEntries - manual.length)))];
   }
 
   /** 读取并校验 index.json；缺失时返回空数组 */

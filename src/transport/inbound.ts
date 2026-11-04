@@ -37,6 +37,8 @@ import { createForwardTagger, type ForwardImage, type TaggedForwardImage } from 
 import { ASR_OFFLINE_HINT } from '../media/asr.ts';
 import { buildGifSheetNote, isGifBytes, makeGifSheet, type GifSheet } from '../media/gif-sheet.ts';
 import { formatMessageTime, makeSenderLabeler, MENTION_MARK, quoteHeader, type SenderLabeler } from '../features/message-format.ts';
+import { SELF_SENDER_ID } from './self-sent.ts';
+import { QUOTE_MISSING_NOTE, renderChatRecord, splitQuote } from '../features/chat-record.ts';
 import { getSenderAliases } from '../features/sender-alias.ts';
 import type { MiddlewareContext } from '@tencent-connect/qqbot-nodejs';
 import { runInboundTurn } from './agent-turn.ts';
@@ -144,12 +146,17 @@ export async function handleInbound(
 
   // ── 合并转发里的图片：附件行改写成 [图片#n: 路径]，编号接在历史图片后面 ──
   const forward = createForwardTagger(mwState.forwardImages, historyImages.length);
-  const bodyMsg: ProcessedMessage = { ...msg, content: forward.rewrite(msg.content ?? '') };
+  const bodyMsg: ProcessedMessage = { ...msg, content: renderChatRecord(forward.rewrite(msg.content ?? '')) };
   const quoteText = mwState.quote?.text || mwState.quote?.entry?.content;
   const bodyState: MiddlewareState = quoteText
     ? { ...mwState, quote: { ...mwState.quote, text: forward.rewrite(quoteText) } }
     : mwState;
   const forwardImages = forward.tagged;
+  // 「仅 @ + 上下文」模式目前只见过渲染后的文本，留一份原始事件用来核对拆分对不对
+  if (quoteText && splitQuote(quoteText).context !== undefined) {
+    const elements = JSON.stringify((msg as { msgElements?: unknown }).msgElements ?? null).replace(/https?:[^"\s]+/g, '<url>');
+    logger.info(`quote-context: group=${peerId} ref=${(msg as { refMsgIdx?: string }).refMsgIdx ?? ''} entry=${mwState.quote?.entry !== undefined} elements=${elements.slice(0, 1500)}`);
+  }
 
   // ── 组装 agentBody（下载结果经 mwState.downloadedFiles 提供） ──
   // 群里给模型看的发送者标签用群内短别名（#U3）；私聊只有一个对话者，引用块里称「对方」
@@ -435,10 +442,17 @@ function buildUserContent(msg: ProcessedMessage, state: MiddlewareState): string
 export function buildQuotePart(quote: ResolvedQuote | undefined, label: SenderLabeler): string {
   if (!quote?.text && !quote?.entry?.content) return '';
 
-  const quoteText = quote.text || quote.entry?.content || 'Original content unavailable';
+  const { quote: quoted, context } = splitQuote(quote.text || quote.entry?.content || 'Original content unavailable');
+  // 平台没给原文时，ref 索引里记过的那条（入站或 bot 自己发的）还能补回来
+  const quoteText = quoted ?? quote.entry?.content ?? QUOTE_MISSING_NOTE;
 
-  const from = quote.entry?.senderId ? label(quote.entry.senderId, quote.entry.senderName) : undefined;
-  return `${quoteHeader(from)}\n${quoteText}\n[Quoted message ends]\n`;
+  const from = quote.entry?.senderId === SELF_SENDER_ID
+    ? '你自己'
+    : quote.entry?.senderId ? label(quote.entry.senderId, quote.entry.senderName) : undefined;
+  const contextPart = context !== undefined
+    ? `[Platform context begins]\n${context}\n[Platform context ends]\n`
+    : '';
+  return `${contextPart}${quoteHeader(from)}\n${quoteText}\n[Quoted message ends]\n`;
 }
 
 interface CurrentSender {
@@ -592,7 +606,7 @@ export function buildAgentBody(
   const historyLines = history.map(h => {
     const tags = (imagesByMessage.get(h.messageId) ?? []).map(historyImageTag);
     const time = formatMessageTime(h.timestamp, now);
-    const line = `${label(h.senderId, h.senderName)} ${[h.content, ...tags].filter(Boolean).join(' ')}`;
+    const line = `${label(h.senderId, h.senderName)} ${[renderChatRecord(h.content), ...tags].filter(Boolean).join(' ')}`;
     return time ? `${time} ${line}` : line;
   });
 

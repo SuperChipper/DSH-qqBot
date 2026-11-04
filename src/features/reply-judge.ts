@@ -33,6 +33,8 @@ export interface JudgeRequest {
   persona?: string;
   /** 最近的群聊（旧→新），最后一条是待判断的消息 */
   lines: readonly JudgeLine[];
+  /** 这个群开了串模式 */
+  banter?: boolean;
 }
 
 /** 推理档位按这个顺序找最低档（id 或名字里含这些词） */
@@ -54,15 +56,21 @@ function clock(ts: number): string {
   return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, '0')).join(':');
 }
 
-export function buildJudgeSystem(names: readonly string[], persona?: string): string {
+/** banter：群开了串模式。默认规则会给「群友之间聊自己的事」低分，而那正是串的场合 */
+export function buildJudgeSystem(names: readonly string[], persona?: string, banter = false): string {
   const who = names.length > 0 ? `「${names.join('」「')}」` : '「bot」';
   const lines = [
     `你在帮 QQ 群里的机器人 ${who} 判断：看到最新这条消息，它现在要不要主动接话（没人 @ 它）。`,
     '群友叫它不一定用全名：名字的变体（叠字、只叫一半、换个字、加「小」「老」「子」）、照人设起的外号或调侃'
       + '（人设里的特点、爱好、梗），或者直接冲它说话（「起床」「在吗」「懒虫」），都算在叫它。',
     '像一个有分寸的群友那样判断：',
-    '- 高分：在叫 bot、逗 bot、问 bot 或明显想听 bot 的意见；聊到 bot 感兴趣、能接得上的话题；有人求助一直没人回；话说到一半在等人接。',
-    '- 低分：群友之间在聊自己的事；已经有人回答了；刷屏、发泄、只是附和；bot 刚说过话没人理它；插进去会显得突兀。',
+    ...(banter ? [
+      '- 高分：在叫 bot、逗 bot、问 bot；有人求助一直没人回；最近几条里有一句话就能接住的具体点（错字、双关、自夸、身份标签、前后矛盾、自己立的 flag），群友之间聊天也算。',
+      '- 低分：有人在求助、认真讨论、聊严肃的事或情绪不好；只有话题、没有具体的点；已经有人接过这个点；bot 刚串过同一个人。',
+    ] : [
+      '- 高分：在叫 bot、逗 bot、问 bot 或明显想听 bot 的意见；聊到 bot 感兴趣、能接得上的话题；有人求助一直没人回；话说到一半在等人接。',
+      '- 低分：群友之间在聊自己的事；已经有人回答了；刷屏、发泄、只是附和；bot 刚说过话没人理它；插进去会显得突兀。',
+    ]),
     '- 拿不准就给低分，宁可少说。',
     '只输出 JSON，不要解释：{"desire": 0到100的整数}',
   ];
@@ -110,7 +118,7 @@ export class ReplyJudge {
         provider: request.provider,
         model: request.model,
         ...(effort !== undefined ? { reasoningEffort: effort as GenerateOptions['reasoningEffort'] } : {}),
-        system: buildJudgeSystem(request.names, request.persona),
+        system: buildJudgeSystem(request.names, request.persona, request.banter),
         messages: [createUserMessage({
           content: [{ type: 'text', text: buildJudgeTranscript(request.lines) }],
           source: { kind: 'plugin', plugin: 'dsh-im-qqbot' },

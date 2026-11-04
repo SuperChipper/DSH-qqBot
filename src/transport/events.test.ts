@@ -1,10 +1,37 @@
 import { describe, it, expect } from 'vitest';
-import { parseStreamFrame } from './events.ts';
+import { parseEvent, parseStreamFrame, usageLogLine } from './events.ts';
 
 /** 构造 agent/assistant-stream 的 payload（帧字段按宿主 AssistantStreamFrame 形态） */
 function payload(frame: unknown, agentId = 'sess-qq'): unknown {
   return { agent: { id: agentId }, frame };
 }
+
+describe('usageLogLine', () => {
+  it('算缓存命中率，列出这次请求调用的工具', () => {
+    const line = usageLogLine('k', { inputTokens: 1000, cacheReadTokens: 9000, outputTokens: 200, reasoningTokens: 50 }, [
+      { type: 'text', text: '好' },
+      { type: 'tool-call', name: 'dnd_check' },
+      { type: 'tool-call', name: 'dnd_initiative' },
+    ]);
+    expect(line).toBe('im-qqbot: usage key=k input=1000 cache=9000 hit=90% output=200 reasoning=50 tools=dnd_check,dnd_initiative');
+  });
+
+  it('字段缺失按 0，没有工具写 -，空输入不除零', () => {
+    expect(usageLogLine('k', { inputTokens: 0 }, [{ type: 'text', text: 'hi' }]))
+      .toBe('im-qqbot: usage key=k input=0 cache=0 hit=0% output=0 reasoning=0 tools=-');
+  });
+
+  it('parseEvent 保留 reasoningTokens 和工具调用块的名字', () => {
+    const event = parseEvent({
+      type: 'assistant/message',
+      data: {
+        message: { content: [{ type: 'tool-call', id: 'c1', name: 'dnd_roll', arguments: '{}' }] },
+        usage: { inputTokens: 1, reasoningTokens: 7 },
+      },
+    });
+    expect(event).toMatchObject({ usage: { inputTokens: 1, reasoningTokens: 7 }, content: [{ name: 'dnd_roll' }] });
+  });
+});
 
 describe('parseStreamFrame', () => {
   it('start 帧归一化为 attempt-start', () => {

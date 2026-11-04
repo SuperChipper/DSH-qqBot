@@ -54,8 +54,9 @@ function setup(opts?: { record?: SessionRecord | undefined; config?: ImQQBotConf
     findBySessionId: vi.fn((id: string) => (id === 'sess-qq' ? record : undefined)),
     addUnsent: vi.fn(),
   } as unknown as SessionManager;
-  const outbound = createOutboundHandler(manager, bot, opts?.config ?? createConfig(), createLogger());
-  return { outbound, bot, session, manager };
+  const logger = createLogger();
+  const outbound = createOutboundHandler(manager, bot, opts?.config ?? createConfig(), logger);
+  return { outbound, bot, session, manager, logger };
 }
 
 const delta = (attemptId: string, text: string) => ({ kind: 'text-delta' as const, attemptId, text });
@@ -297,6 +298,42 @@ describe('OutboundRouter.routeStreamFrame', () => {
     });
   });
 
+  describe('只有标点的占位回复', () => {
+    const sess = { header: { id: 'sess-qq' } };
+    const stickerSent = (outbound: ReturnType<typeof setup>['outbound']) => {
+      outbound.routeSessionEvent(sess, {
+        type: 'tool/call',
+        data: { callId: 's1', name: 'qqbot_send_file', arguments: JSON.stringify({ file_path: 'C:/a.png' }) },
+      });
+      outbound.routeSessionEvent(sess, { type: 'tool/result', data: { message: { source: { callId: 's1' } } } });
+    };
+
+    it.each(['.', '。', '…', ' . ', '！'])('群聊：发完表情补的 %s 不发出去', async (tail) => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget) });
+
+      stickerSent(outbound);
+      outbound.routeSessionEvent(sess, {
+        type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: tail }] } },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(bot.sendMarkdown).not.toHaveBeenCalled();
+    });
+
+    it('带文字的回复照常发送', async () => {
+      const { outbound, bot } = setup({ record: createRecord(groupTarget) });
+
+      outbound.routeSessionEvent(sess, {
+        type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: '好耶 🐟' }] } },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(bot.sendMarkdown).toHaveBeenCalledWith(groupTarget, '好耶 🐟');
+    });
+  });
+
   it('assistant/message 的 usage 记为会话上下文大小（输入 + 缓存命中 + 输出）', async () => {
     const record = createRecord(groupTarget);
     const { outbound } = setup({ record });
@@ -309,6 +346,22 @@ describe('OutboundRouter.routeStreamFrame', () => {
     });
     await vi.advanceTimersByTimeAsync(0);
     expect(record.contextTokens).toBe(419 + 206 + 64896);
+  });
+
+  it('每条带 usage 的 assistant/message 记一行用量日志，没有 usage 不记', async () => {
+    const { outbound, logger } = setup({ record: createRecord(groupTarget) });
+    const sess = { header: { id: 'sess-qq' } };
+    outbound.routeSessionEvent(sess, {
+      type: 'assistant/message',
+      data: {
+        message: { content: [{ type: 'tool-call', id: 'c1', name: 'dnd_check', arguments: '{}' }] },
+        usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 300 },
+      },
+    });
+    outbound.routeSessionEvent(sess, { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'hi' }] } } });
+    await vi.advanceTimersByTimeAsync(0);
+    const lines = vi.mocked(logger.info).mock.calls.map(([m]) => m).filter((m) => m.includes('usage'));
+    expect(lines).toEqual(['im-qqbot: usage key=k input=100 cache=300 hit=75% output=20 reasoning=0 tools=dnd_check']);
   });
 
   describe('工具报错展示', () => {

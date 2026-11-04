@@ -32,18 +32,32 @@ export interface MessageUsage {
   inputTokens: number;
   outputTokens?: number;
   cacheReadTokens?: number;
+  reasoningTokens?: number;
 }
 
 /** assistant/message 事件 */
 export interface MessageEvent {
   type: 'assistant/message';
-  content: Array<{ type: string; text?: string }>;
+  content: Array<{ type: string; text?: string; name?: string }>;
   usage?: MessageUsage;
 }
 
 /** 本次请求之后的会话上下文大小：请求输入（含缓存命中）+ 本次输出 */
 export function contextTokensOf(usage: MessageUsage): number {
   return usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.outputTokens ?? 0);
+}
+
+/**
+ * 一次模型请求的用量日志：每次工具往返都会重发整段上下文，要按请求看缓存命中率和这次调了什么工具，
+ * 才分得清 token 是花在缓存失效、往返次数还是输出上。
+ */
+export function usageLogLine(sessionKey: string, usage: MessageUsage, content: MessageEvent['content']): string {
+  const cache = usage.cacheReadTokens ?? 0;
+  const total = usage.inputTokens + cache;
+  const hit = total === 0 ? 0 : Math.round((cache / total) * 100);
+  const tools = content.filter((b) => b.type === 'tool-call' && b.name).map((b) => b.name);
+  return `im-qqbot: usage key=${sessionKey} input=${usage.inputTokens} cache=${cache} hit=${hit}% `
+    + `output=${usage.outputTokens ?? 0} reasoning=${usage.reasoningTokens ?? 0} tools=${tools.join(',') || '-'}`;
 }
 
 /** tool/call 事件 */
@@ -92,7 +106,7 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
 
     case 'assistant/message': {
       const data = raw.data as {
-        message?: { content?: Array<{ type: string; text?: string }> };
+        message?: { content?: MessageEvent['content'] };
         usage?: Partial<MessageUsage>;
       };
       const message = data.message;
@@ -107,6 +121,7 @@ export function parseEvent(raw: RawSessionEvent): OutboundEvent | undefined {
               inputTokens: usage.inputTokens,
               ...(typeof usage.outputTokens === 'number' ? { outputTokens: usage.outputTokens } : {}),
               ...(typeof usage.cacheReadTokens === 'number' ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+              ...(typeof usage.reasoningTokens === 'number' ? { reasoningTokens: usage.reasoningTokens } : {}),
             },
           }
           : {}),

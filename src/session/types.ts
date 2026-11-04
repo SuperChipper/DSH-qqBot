@@ -29,6 +29,8 @@ export interface DshAgent {
   readonly session: {
     readonly id: string;
     readonly events?: readonly SessionEventLike[];
+    /** 压缩、替换历史时 contentGeneration 会变，普通追加不变 */
+    readonly surface?: { readonly contentGeneration?: number };
     /** 最近一次请求头（取实际路由的 provider/model，用于查上下文窗口） */
     requestHeader?(): { config?: { provider?: string; model?: string } } | undefined;
   };

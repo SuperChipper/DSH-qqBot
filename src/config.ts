@@ -237,6 +237,14 @@ export interface ReplyDesireConfig {
   judge: ReplyJudgeConfig;
 }
 
+/** 群聊串模式 */
+export interface BanterConfig {
+  /** 总开关；关掉时保留群列表 */
+  enabled: boolean;
+  /** 开启串模式的群 openid；不在列表里的群不受影响 */
+  groups: string[];
+}
+
 /** 笔记语义检索（向量相似度，作为 RRF 第三路） */
 export interface NotesSemanticConfig {
   /** 是否启用；关闭时只用 BM25 + 字面精确匹配 */
@@ -299,6 +307,8 @@ export interface ImQQBotConfig {
   groupReplyProbability?: number;
   /** 群聊回复欲望门控（规则打分 + 对话窗口） */
   replyDesire: ReplyDesireConfig;
+  /** 群聊串模式（按群开启） */
+  banter: BanterConfig;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
   /** 私聊额外 system prompt */
@@ -496,6 +506,12 @@ export const ReplyDesireSchema: Schema<ReplyDesireConfig> = Schema.object({
   judge: ReplyJudgeSchema.description('模型打分'),
 });
 
+/** 串模式子 Schema */
+export const BanterSchema: Schema<BanterConfig> = Schema.object({
+  enabled: Schema.boolean().default(false).description('是否启用群聊串模式'),
+  groups: Schema.array(Schema.string()).default([]).description('开启串模式的群 openid'),
+});
+
 /** 富媒体理解子 Schema（独立导出：config 面板的服务端校验复用） */
 export const MediaSchema: Schema<MediaConfig> = Schema.object({
   enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),
@@ -625,6 +641,7 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     engagedMaxTurns: 8,
     judge: REPLY_JUDGE_DEFAULTS,
   }).description('群聊回复欲望门控'),
+  banter: BanterSchema.default({ enabled: false, groups: [] }).description('群聊串模式'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),

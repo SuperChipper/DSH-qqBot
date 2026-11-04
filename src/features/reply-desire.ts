@@ -91,6 +91,10 @@ export const STICKER_REACT_MS = 30_000;
 export const STICKER_COOLDOWN_MS = 5 * 60_000;
 /** 复读判定：连续几条同一张表情包（含当前） */
 const CHAIN_LENGTH = 3;
+/** 串模式：连续主动接同一个人几次后停手 */
+export const BANTER_MAX_STREAK = 2;
+/** 串模式：隔多久不算连续 */
+export const BANTER_STREAK_RESET_MS = 10 * 60_000;
 const RECENT_LIMIT = 5;
 /** 给模型打分看的 bot 最近几句话（群记忆只记群友说的，不记 bot 自己的） */
 const BOT_LINES_LIMIT = 3;
@@ -112,7 +116,7 @@ const NOISE_RE = /^[哈嘿呵嗯哦噢啊草笑乐wW6\s!！。.,，~～…?？]*
 const QUESTION_RE = /[?？]|吗|呢$|怎么|为什么|为啥|什么|咋|谁|哪/;
 
 /** QQ 小黄脸的名字（ext 是 base64 的 {"text":"[笑哭]"}） */
-function faceText(ext: string): string {
+export function faceText(ext: string): string {
   try {
     const parsed = JSON.parse(Buffer.from(ext, 'base64').toString('utf8')) as { text?: unknown };
     if (typeof parsed.text === 'string' && parsed.text.trim() !== '') return parsed.text.trim();
@@ -240,6 +244,8 @@ interface GroupReplyState {
   stickerReplyAt?: number;
   /** bot 最近说的话 */
   botLines: Array<{ text: string; timestamp: number }>;
+  /** 串模式下 bot 连续主动接的那个人 */
+  banterStreak?: { senderId: string; count: number; at: number };
 }
 
 /** 按群维护对话窗口、最近消息、bot 上次说话时间等接话所需的状态 */
@@ -345,6 +351,21 @@ export class EngagementTracker {
     state.stickerReplyAt = now;
     if (result.mode === 'sticker-chain') state.chainAnswered = result.stickerId;
     else state.stickerAnswered.add(senderId);
+  }
+
+  /** 串模式放行了一条：接的还是同一个人就累加，换人或隔太久重新算 */
+  public noteBanter(groupId: string, senderId: string, now: number): void {
+    const state = this.group(groupId);
+    const streak = state.banterStreak;
+    const continued = streak !== undefined && streak.senderId === senderId && now - streak.at <= BANTER_STREAK_RESET_MS;
+    state.banterStreak = { senderId, count: continued ? streak.count + 1 : 1, at: now };
+  }
+
+  /** 这个人已经被连续接到上限（串模式不走对话窗口，轮数上限管不到这里） */
+  public banterCapped(groupId: string, senderId: string, now: number): boolean {
+    const streak = this.groups.get(groupId)?.banterStreak;
+    return streak !== undefined && streak.senderId === senderId
+      && streak.count >= BANTER_MAX_STREAK && now - streak.at <= BANTER_STREAK_RESET_MS;
   }
 
   public sinceStickerReply(groupId: string, now: number): number | undefined {

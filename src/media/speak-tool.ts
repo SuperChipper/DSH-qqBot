@@ -31,6 +31,7 @@ const DESCRIPTION =
   'Speak one short line out loud as a QQ voice message, using the configured TTS voice. '
   + 'Use it sparingly for a quick aside, a joke, or when the user would rather listen than read. '
   + 'Do NOT use it for code, commands, links, error messages, long explanations, or anything the user may need to copy. '
+  + 'For a non-Chinese line, set `lang` (ja/en) so the local voice reads it in that language instead of Chinese phonemes. '
   + VOICE_REPLY_TOOL_HINT;
 
 /** 常用音色（只是提示，允许传任意 edge-tts 音色名） */
@@ -55,6 +56,7 @@ interface SpeakArgs {
   voice?: string;
   rate?: string;
   target?: string;
+  lang?: string;
 }
 
 /** 解析显式 target（"c2c:openid" / "group:openid"），非法返回 undefined */
@@ -152,12 +154,14 @@ async function synthesizeLocal(
   config: SpeakConfig,
   text: string,
   outPath: string,
+  lang?: string,
 ): Promise<void> {
   const base = config.gsvUrl.trim().replace(/\/+$/, '');
   const res = await fetch(`${base}/tts`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text, speed: config.gsvSpeed }),
+    // lang 决定服务用哪套音素；不传时服务默认按中文处理
+    body: JSON.stringify(lang === undefined ? { text, speed: config.gsvSpeed } : { text, speed: config.gsvSpeed, lang }),
     signal: AbortSignal.timeout(180_000),
   });
   if (!res.ok) {
@@ -214,6 +218,12 @@ export function registerSpeakTool(
           type: 'string',
           description: 'Optional speech-rate delta such as "+10%" or "-5%". Defaults to config.speak.rate.',
         },
+        lang: {
+          type: 'string',
+          enum: ['zh', 'ja', 'en'],
+          description: 'Language tag for the local voice service (default zh). Pass ja for Japanese lines: '
+            + 'without it the model reads kana/kanji with Chinese phonemes. Ignored when falling back to edge-tts.',
+        },
         target: {
           type: 'string',
           description: 'Optional send target as "c2c:openid" or "group:openid". Omit to speak into the current conversation.',
@@ -248,7 +258,7 @@ export function registerSpeakTool(
       },
     },
     async execute(args: unknown, exec: { signal: AbortSignal; agent?: unknown }): Promise<Record<string, unknown>> {
-      const { text, voice, rate, target } = args as SpeakArgs;
+      const { text, voice, rate, target, lang } = args as SpeakArgs;
       if (typeof text !== 'string' || text.trim().length === 0) {
         throw new Error('qqbot_speak: `text` 不能为空');
       }
@@ -287,7 +297,7 @@ export function registerSpeakTool(
       let voiceLabel = useVoice;
       if (speak.gsvUrl.trim() !== '') {
         try {
-          await synthesizeLocal(speak, spoken, outPath);
+          await synthesizeLocal(speak, spoken, outPath, typeof lang === 'string' ? lang : undefined);
           backend = 'local';
           voiceLabel = '本地嗓子';
         } catch (err) {
@@ -300,7 +310,8 @@ export function registerSpeakTool(
       // 3. 发送
       const result = await bot.sendVoice(replyTarget, { localPath: outPath });
       logger.info(
-        `im-qqbot: qqbot_speak 合成并发送 ${spoken.length} 字（${voiceLabel}/${backend}，${info.size} bytes）`
+        `im-qqbot: qqbot_speak 合成并发送 ${spoken.length} 字（${voiceLabel}/${backend}`
+        + `${typeof lang === 'string' ? `/${lang}` : ''}，${info.size} bytes）`
         + ` → ${replyTarget.scope}:${replyTarget.targetId}`,
       );
 

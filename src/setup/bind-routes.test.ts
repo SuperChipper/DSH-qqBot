@@ -518,6 +518,29 @@ describe('bind-routes', () => {
     }
   });
 
+  it('POST config：banter 通过校验并写入', async () => {
+    const updates: Array<Record<string, unknown>> = [];
+    const { routes } = createHarness({ onUpdateConfig: (config) => { updates.push(config); return true; } });
+    const res = fakeRes();
+    await invoke(
+      routes.get(BIND_CONFIG_PATH),
+      fakeReq('POST', { host: '127.0.0.1:3080', 'content-type': 'application/json' },
+        '{"banter":{"enabled":true,"groups":["g1"]}}'),
+      res,
+    );
+    expect(res.statusCode).toBe(200);
+    expect(updates[0]).toEqual({ banter: { enabled: true, groups: ['g1'] } });
+  });
+
+  it('POST config：banter 类型错误被拒绝', async () => {
+    for (const banter of ['{"enabled":"yes"}', '{"enabled":true,"groups":"g1"}', '{"groups":[1]}']) {
+      const { routes } = createHarness({ onUpdateConfig: () => true });
+      const res = fakeRes();
+      await invoke(routes.get(BIND_CONFIG_PATH), fakeReq('POST', { host: '127.0.0.1:3080' }, `{"banter":${banter}}`), res);
+      expect(res.statusCode, banter).toBe(400);
+    }
+  });
+
   it('POST config：browser 保存合法值，最小写入顶层键', async () => {
     const updates: Array<Record<string, unknown>> = [];
     const { routes } = createHarness({ onUpdateConfig: (value) => { updates.push(value); return true; } });

@@ -77,6 +77,30 @@ interface SendFileArgs {
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm']);
 
+/**
+ * 同一目标、同一文件在这个时间窗内再发一次，判为重复。
+ *
+ * 常见情形：图先发了一版配文，回头发现漏了出处/画师，又想「补上再发一次」——
+ * QQ 里就是两张一样的图并排。窗口只取 20 秒：要真的重发（用户明说再来一张），
+ * 等一会儿就正常了，不会被永久拦住。
+ */
+const RECENT_SEND_TTL_MS = 20_000;
+const recentSends = new Map<string, number>();
+
+/** 清掉过期记录后判断这次是不是重复（顺带做一次懒惰清理） */
+function isRecentDuplicate(key: string, now: number): boolean {
+  for (const [k, at] of recentSends) {
+    if (now - at > RECENT_SEND_TTL_MS) recentSends.delete(k);
+  }
+  const at = recentSends.get(key);
+  return at !== undefined && now - at <= RECENT_SEND_TTL_MS;
+}
+
+/** 清空去重表（测试用） */
+export function resetRecentSends(): void {
+  recentSends.clear();
+}
+
 /** 解析显式 target（"c2c:openid" / "group:openid"），非法返回 undefined */
 function parseTarget(input: string): ReplyTarget | undefined {
   const idx = input.indexOf(':');
@@ -149,13 +173,21 @@ export function registerSendFileTool(
           target: { type: 'string' },
           fileUuid: { type: 'string' },
           messageId: { type: 'string' },
+          deduped: { type: 'boolean' },
         },
         required: ['fileName', 'fileSize', 'target', 'fileUuid'],
         additionalProperties: false,
       },
       render: (args: unknown, value: unknown): ContentBlock[] => {
-        const v = value as { fileName: string; target: string };
+        const v = value as { fileName: string; target: string; deduped?: boolean };
         const caption = (args as { caption?: unknown } | undefined)?.caption;
+        if (v.deduped === true) {
+          return [{
+            type: 'text',
+            text: `没有重复发送 ${v.fileName} → ${v.target}：二十秒内已经发过同一张，`
+              + 'QQ 里的消息改不了。要补充说明就发一条文字，不要再发同一张图。',
+          }];
+        }
         if (isVoiceFile(v.fileName)) {
           return [{
             type: 'text',
@@ -164,11 +196,12 @@ export function registerSendFileTool(
               + VOICE_REPLY_REMINDER,
           }];
         }
-        const captionSent = typeof caption === 'string' && caption.trim().length > 0;
+        // 这里只报事实。曾经拖一句「caption 已随文件发出，不要再复述…」的提醒，
+        // 但它会跟着工具结果一起出现在界面上，像是给用户看的旁白；
+        // 「别复述」的规则在【发图配文】里，去重也由 caption-echo 在出站时兜底。
         return [{
           type: 'text',
-          text: `已发送 ${v.fileName} → ${v.target}`
-            + (captionSent ? '（caption 已随文件发出，用户已经看到；不要再复述，没有新内容就直接结束本轮，不输出文字）' : ''),
+          text: `已发送 ${v.fileName} → ${v.target}`,
         }];
       },
     },
@@ -214,6 +247,20 @@ export function registerSendFileTool(
       const fileName = basename(absPath);
       const ext = absPath.slice(absPath.lastIndexOf('.')).toLowerCase();
       const source = { localPath: absPath };
+      const targetLabel = `${replyTarget.scope}:${replyTarget.targetId}`;
+
+      // 20 秒内已经发过同一张：不重复发，只回一条说明（QQ 不能撤回重发）
+      const dedupeKey = `${targetLabel}|${absPath}`;
+      if (isRecentDuplicate(dedupeKey, Date.now())) {
+        logger.info(`im-qqbot: qqbot_send_file 跳过 20 秒内的重复发送 ${fileName}`);
+        return {
+          fileName,
+          fileSize: info.size,
+          target: targetLabel,
+          fileUuid: 'duplicate-skipped',
+          deduped: true,
+        };
+      }
 
       let result: MediaSendResult;
       if (IMAGE_EXTS.has(ext)) {
@@ -236,6 +283,7 @@ export function registerSendFileTool(
         `im-qqbot: qqbot_send_file 发送 ${fileName} (${info.size} bytes) → ${replyTarget.scope}:${replyTarget.targetId}`
         + (captionText !== undefined ? `，caption ${captionText.length} 字` : ''),
       );
+      recentSends.set(dedupeKey, Date.now());
       try {
         onSent?.(absPath);
       } catch (err) {

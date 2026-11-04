@@ -394,7 +394,7 @@ describe('摘要、注入与加载', () => {
       c.currentRoom = 'mine-mouth';
       c.begun = true;
     });
-    const state = service.promptSections('group:g')[1]!.text;
+    const state = [...service.promptSections('group:g').map((s) => s.text), service.stateSnapshot('group:g')].join('\n');
     expect(state).toContain('章节：矿镇｜目标：打听矿坑的事');
     expect(state).toContain('任务：清理矿坑(clear-mine，进行中)');
     expect(state).toContain('mouth-alarm：队伍在矿口大声喧哗');
@@ -430,7 +430,7 @@ describe('开场', () => {
     writeFileSync(join(advDir, 'grey-mine.json'), JSON.stringify(withStartEncounter()));
     const service = new DndService({ store: new CampaignStore(join(root, 'campaigns')), library: new AdventureLibrary({ adventures: advDir }), mapDir: root });
     service.start('group:o', 'grey-mine', false);
-    const state = service.promptSections('group:o')[1]!.text;
+    const state = service.stateSnapshot('group:o');
     expect(state).toContain('【开场还没做完】');
     expect(state).toContain('1. 介绍角色');
     expect(state).not.toContain('本房间 DM 笔记');
@@ -443,7 +443,7 @@ describe('开场', () => {
     const after = service.require('group:o').campaign;
     expect(after.begun).toBe(true);
     expect(after.characters.some((ch) => ch.name === '巨鼠' && ch.room === 'camp-gate')).toBe(true);
-    expect(service.promptSections('group:o')[1]!.text).toContain('本房间 DM 笔记（只给你裁定用，不要直接念）：安全区。');
+    expect(service.stateSnapshot('group:o')).toContain('本房间 DM 笔记（只给你裁定用，不要直接念）：安全区。');
     expect(() => service.store.update('group:o', (c) => storyAction(c, adv, 'begin', '', {}))).toThrow(/已经开场/);
   });
 

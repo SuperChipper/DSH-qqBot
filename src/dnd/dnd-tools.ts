@@ -67,6 +67,19 @@ import {
   type Weapon,
   weaponDamage,
 } from './campaign.ts';
+import {
+  CHRONICLE_KINDS,
+  type ChronicleKind,
+  addEntry,
+  closeEntry,
+  formatEntry,
+  markChronicle,
+  openEntries,
+  recentEntries,
+  recordChanges,
+  searchEntries,
+  seedChronicle,
+} from './chronicle.ts';
 import type { DndService } from './dnd-service.ts';
 import { findRoom, resolveRoom } from './dungeon.ts';
 import { renderMapPng } from './map-render.ts';
@@ -306,9 +319,12 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     const key = recordOf(exec).sessionKey;
     const { adventure } = service.require(key);
     return service.store.update(key, (c) => {
+      seedChronicle(c, adventure);
+      const before = markChronicle(c);
       const result = fn(c, adventure);
       const story = afterChange(c, adventure);
       for (const line of story) pushLog(c, line);
+      recordChanges(before, c, adventure);
       return (story.length > 0 && typeof result === 'string' ? `${result}\n【剧情】${story.join('；')}` : result) as T;
     }, exec.label);
   };
@@ -494,11 +510,25 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         description: 'A roll you (the DM) call for outside the actor\'s own declaration: contested checks, '
           + 'opportunity attacks, reactions. Skips the turn-order and player checks.',
       },
+      dm_override: {
+        type: 'boolean',
+        description: 'Roll for a PC whose player has not spoken because another player explicitly delegated it '
+          + '(e.g. "让 Kriv 去谈"): skips the "only the owner may declare" check but still respects turn order. '
+          + 'Requires declared_by (who delegated) and must be explained in the reply.',
+      },
     },
     ['character', 'type'],
     (args, exec) => mutate(exec, (c) => {
       const type = String(args.type);
-      const actOptions = () => ({ declaredBy: memberId(exec, args.declared_by, 'declared_by'), reaction: args.reaction === true, recentSenders: sendersOf(exec) });
+      if (args.dm_override === true && str(args.declared_by) === undefined) {
+        throw new Error('dnd_check: dm_override 还要给 declared_by（提出委托的玩家编号，如 U4），并在回复里写明是谁委托的');
+      }
+      const actOptions = () => ({
+        declaredBy: memberId(exec, args.declared_by, 'declared_by'),
+        reaction: args.reaction === true,
+        dmOverride: args.dm_override === true,
+        recentSenders: sendersOf(exec),
+      });
       const targets = type === 'save' ? parseSaveTargets(args.targets) : undefined;
       if (targets !== undefined && targets.length > 0) {
         // character 是施法者/来源：是角色卡上的人就按主动行动校验并从他身上扣资源；陷阱之类的来源不校验
@@ -903,10 +933,30 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       room: { type: 'string', description: 'Room id or name, or another site\'s id/name (from that site\'s entry).' },
       who: { type: 'array', items: { type: 'string' }, description: 'Characters who move; omit for the whole party.' },
       discover_hidden: { type: 'boolean' },
+      dm_override: {
+        type: 'boolean',
+        description: 'Move a PC whose player has not spoken this turn: explicit delegation ("Kriv 先过去探路") or '
+          + 'forced movement (pushed, dragged, grappled). Say who delegated it / what forced it in the reply. Not for '
+          + 'quietly repositioning someone else\'s character.',
+      },
     },
     ['room'],
     (args, exec) => mutate(exec, (c, adventure) => {
-      const result = moveParty(c, adventure, String(args.room ?? ''), args.discover_hidden === true, strList(args.who), service.roller);
+      const who = strList(args.who);
+      if (who !== undefined && args.dm_override !== true) {
+        const senders = sendersOf(exec);
+        const silent = who
+          .map((n) => c.characters.find((ch) => ch.name === n))
+          .filter((ch) => ch !== undefined && ch.kind === 'pc' && ch.playerId !== undefined && !senders.includes(ch.playerId))
+          .map((ch) => `${ch!.name} 是〈${ch!.player ?? ch!.playerId}〉的角色`);
+        if (silent.length > 0) {
+          throw new Error(
+            `${silent.join('；')}，他本人这轮还没发话。拆开队伍要带走别人的卡，传 dm_override=true，`
+            + '并在回复里写清是委托还是被推/被拖；全队一起走就不要给 who。',
+          );
+        }
+      }
+      const result = moveParty(c, adventure, String(args.room ?? ''), args.discover_hidden === true, who, service.roller);
       const lines: string[] = [];
       if (result.checks.length > 0) {
         lines.push(`出口检定：${result.checks.map((r) => `${r.name} ${r.detail}`).join('；')}`);
@@ -1076,6 +1126,54 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         return `已写进团档，下次开团的「上次进度」用这一条。${notes.length > 0 ? `\n${notes.join('\n')}` : ''}`;
       });
     },
+  );
+
+  register(
+    'dnd_chronicle',
+    'The campaign\'s long-term plot ledger (DM eyes only). Visited rooms, defeated foes, quest changes, leads, facts and '
+    + 'PC items are recorded automatically. add: record what the tools cannot see: improvised people and events, captives, '
+    + 'promises and debts, loose threads, backstory, standing table rulings. search: look up the past by keywords before '
+    + 'answering questions about it or denying something happened. list: unresolved entries and recent ones. close: an '
+    + 'unresolved entry is settled.',
+    {
+      action: { type: 'string', enum: ['add', 'search', 'list', 'close'] },
+      text: { type: 'string', description: 'For add: one fact in a sentence, with names.' },
+      kind: { type: 'string', enum: [...CHRONICLE_KINDS], description: 'For add (default event). promise/captive/thread start unresolved.' },
+      query: { type: 'string', description: 'For search: keywords separated by spaces; any match counts, e.g. "矮人 地图".' },
+      id: { type: 'integer', description: 'For close: the entry number.' },
+      outcome: { type: 'string', description: 'For close: how it ended.' },
+    },
+    ['action'],
+    (args, exec) => mutate(exec, (c) => {
+      const action = String(args.action);
+      if (action === 'add') {
+        const entry = addEntry(c, { text: String(args.text ?? ''), kind: args.kind as ChronicleKind | undefined });
+        return `已记：${formatEntry(entry)}`;
+      }
+      if (action === 'close') {
+        const id = int(args.id);
+        if (id === undefined) throw new Error('dnd_chronicle close 要给 id');
+        return `已了结：${formatEntry(closeEntry(c, id, str(args.outcome)))}`;
+      }
+      if (action === 'search') {
+        const query = str(args.query);
+        if (query === undefined) throw new Error('dnd_chronicle search 要给 query');
+        const found = searchEntries(c, query);
+        return found.length > 0
+          ? found.map(formatEntry).join('\n')
+          // 账本有开账时间，查不到不等于没发生：别让模型据此否认玩家
+          : `账本里没搜到「${query}」。没记录不等于没发生，换个词再搜，或问玩家。`;
+      }
+      if (action === 'list') {
+        const open = openEntries(c);
+        const recent = recentEntries(c, 15).filter((e) => e.open !== true);
+        return [
+          `未了结（${open.length}）：${open.length > 0 ? `\n${open.map(formatEntry).join('\n')}` : '无'}`,
+          `最近：${recent.length > 0 ? `\n${recent.map(formatEntry).join('\n')}` : '无'}`,
+        ].join('\n');
+      }
+      throw new Error(`dnd_chronicle 不认识的 action: ${action}`);
+    }),
   );
 
   register(

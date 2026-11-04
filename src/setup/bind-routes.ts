@@ -25,6 +25,7 @@ import {
   CleanupSchema,
   DndSchema,
   FanartSchema,
+  BanterSchema,
   BrowserSchema,
   FileAccessSchema,
   MediaSchema,
@@ -115,7 +116,7 @@ const EDITABLE_CONFIG_KEYS = new Set([
   'requireMention', 'streaming', 'showToolResults', 'debug',
   'provider', 'model', 'preset',
   'groupPrompt', 'directPrompt',
-  'groupReplyProbability', 'replyDesire', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
+  'groupReplyProbability', 'replyDesire', 'banter', 'historyLimit', 'sessionIdleTimeout', 'ownerOpenid',
   'adminOpenids', 'autoCompactTokens', 'autoCompactPrivateRatio', 'autoCompactDeferOnTools', 'textChunkLimit', 'maxQueue',
   'processingTimeoutMs', 'askTimeoutMs',
   'tmpDir', 'tmpTtlHours', 'tmpMaxTotalMB',
@@ -166,6 +167,7 @@ const EDITABLE_CONFIG_SCHEMAS: Record<string, (value: unknown) => unknown> = {
   browser: (v) => BrowserSchema(v as never),
   dnd: (v) => DndSchema(v as never),
   replyDesire: (v) => ReplyDesireSchema(v as never),
+  banter: (v) => BanterSchema(v as never),
 };
 
 function booleanSchema(value: unknown, name: string): boolean {

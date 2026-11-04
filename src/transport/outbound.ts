@@ -11,8 +11,10 @@ import type { StickerStore } from '../media/sticker-store.ts';
 import { extractPseudoStickerCalls, sanitizePseudoToolText } from '../media/pseudo-sticker-call.ts';
 import { SEND_FILE_TOOL_NAME } from '../media/send-file-tool.ts';
 import { captionFromArgs, stripCaptionEcho } from './caption-echo.ts';
+import { isBlankReply } from './text-guard.ts';
 import { chunkMarkdownText } from './chunker.ts';
 import { OutboundBuffer, type QQBotSender } from './outbound-buffer.ts';
+import { SelfSentIndex } from './self-sent.ts';
 import { formatToolResult, type ToolsRegistryLike, type ToolResultData } from './tool-presenter.ts';
 import { DND_TOOL_PREFIX } from '../dnd/dnd-tools.ts';
 import { getEngagementTracker } from '../features/reply-desire.ts';
@@ -20,6 +22,7 @@ import {
   parseEvent,
   extractTurnError,
   contextTokensOf,
+  usageLogLine,
   type ChunkEvent,
   type MessageEvent,
   type ToolCallEvent,
@@ -76,6 +79,7 @@ class OutboundRouter {
   private readonly logger: Logger;
   private readonly toolsRegistry: ToolsRegistryLike | undefined;
   private readonly stickerStore: StickerStore | undefined;
+  private readonly selfSent: SelfSentIndex;
 
   public constructor(
     manager: SessionManager,
@@ -84,6 +88,7 @@ class OutboundRouter {
     logger: Logger,
     toolsRegistry: ToolsRegistryLike | undefined,
     stickerStore?: StickerStore,
+    selfSent: SelfSentIndex = new SelfSentIndex(),
   ) {
     this.manager = manager;
     this.bot = bot;
@@ -91,6 +96,7 @@ class OutboundRouter {
     this.logger = logger;
     this.toolsRegistry = toolsRegistry;
     this.stickerStore = stickerStore;
+    this.selfSent = selfSent;
   }
 
   /** 事件分发入口 */
@@ -186,6 +192,8 @@ class OutboundRouter {
 
   /** 完整 assistant 消息：有流式 buffer 则 flush，否则直接发送文本块 */
   private onMessage(sessionId: string, record: SessionRecord, event: MessageEvent): void {
+    if (event.usage !== undefined) this.logger.info(usageLogLine(record.sessionKey, event.usage, event.content));
+
     // 记下当前上下文大小，供 turn 结束后判断是否自动压缩（旧 sessionId 的迟到事件不算）
     if (event.usage !== undefined && record.sessionId === sessionId) {
       record.contextTokens = contextTokensOf(event.usage);
@@ -331,12 +339,16 @@ class OutboundRouter {
   /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */
   private async send(record: SessionRecord, text: string, tag: string, captions: readonly string[] = []): Promise<void> {
     const visible = this.salvage(text, captions);
-    if (!visible.trim()) return;
+    if (!visible.trim() || isBlankReply(visible)) {
+      if (visible.trim()) this.logger.debug(`im-qqbot: 只有标点的空回复，丢弃: ${JSON.stringify(visible)}`);
+      return;
+    }
     const chunks = chunkMarkdownText(visible, this.config.textChunkLimit);
     let failed = false;
     for (const chunk of chunks) {
       try {
-        await this.bot.sendMarkdown(record.replyTarget, chunk);
+        const sent = await this.bot.sendMarkdown(record.replyTarget, chunk);
+        this.selfSent.record((sent as { id?: string } | undefined)?.id, chunk);
       } catch (err) {
         failed = true;
         this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -367,8 +379,9 @@ export function createOutboundHandler(
   logger: Logger,
   toolsRegistry?: ToolsRegistryLike,
   stickerStore?: StickerStore,
+  selfSent?: SelfSentIndex,
 ): OutboundHandlers {
-  const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry, stickerStore);
+  const router = new OutboundRouter(manager, bot, config, logger, toolsRegistry, stickerStore, selfSent);
   return {
     routeSessionEvent: (session, event) => router.route(session, event),
     routeStreamFrame: (agentId, delta) => router.routeStreamFrame(agentId, delta),

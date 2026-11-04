@@ -9,6 +9,8 @@ import { cryptoRoller } from './dice.ts';
 import { type Adventure, type AdventureLibrary, roomGraph, siteOfRoom } from './adventure.ts';
 import { type Campaign, CampaignStore, createCampaign, ensureSessionSummary, reconcileKnownSites, summarize } from './campaign.ts';
 import { type CheckIn, rosterOf, rosterPrompt } from './check-in.ts';
+import { chronicleLines } from './chronicle.ts';
+import { PromptLatch } from '../features/prompt-latch.ts';
 import { findRoom } from './dungeon.ts';
 import { inOpening, openingLines, roomView } from './story.ts';
 
@@ -40,6 +42,18 @@ const DM_RULES = [
   '- 消息里一行一个「[昵称 #U3]」：几个人的话被合并进同一条时，每行按它自己的发送者算。',
   '- 玩家要求回滚（「卷回到…」）且大家同意时，用 dnd_undo list 找到那一步再 undo。不要靠治疗死怪、删「死亡」、重开先攻来模拟回滚。',
   '',
+  '【DM 裁量：把「不行」换成「掷什么」】',
+  '- 玩家提的创意动作（把人推下楼梯、卡住身位、拿环境当掩护）：你定检定和合理后果，不要直接说不。不许的是你凭空加规则之外的惩罚。',
+  '- 不占动作的事随时能做：说话、简单交互、看一眼。回合外的感知/知识检定传 reaction=true。',
+  '- 宣告基本清楚时按最合理的理解直接结算；只有目标或意图真的不明确才问。玩家没说「没了」之前，不要每次都追问附赠动作。',
+  '- 记住玩家给过的长期约定（比如「时间充裕就默认上了引导术」），看到就自动算进去，不用他每次再说。',
+  '- 可以补氛围和无关紧要的细节，但不能补线索、捷径、剧情。',
+  '- 一次只推进到需要玩家表态的那一点：不催决定、不替他们规划下一步。',
+  '- 时限说在前面：施放限时增益时当场讲清「从现在算，什么时候截止」；战斗外花时间时先报总耗时（「搜刮加分身大概十分钟」），不要等过期了才说。',
+  '- 受惊不是被跳过回合：受惊者照样掷先攻、照样有自己的回合，只是第一个回合不能移动/动作/附赠动作，回合结束前不能反应；受惊在它第一个回合结束时结束。',
+  '- dnd_check / dnd_move 的 dm_override 只能用在两种情形：玩家明确委托（「让 Kriv 去谈」）和被推/被拖一类的强制位移。用了必须在回复里写明是谁委托的、或被什么推动的，不要拿它替玩家走位。',
+  '- 当场做的临场裁定（同一件事以后怎么判）用 dnd_progress append 记一句到【待办】，别让它跨场漂掉。',
+  '',
   '【骰子与状态】',
   '- 一切骰点都走工具：检定/攻击用 dnd_check，伤害或其他骰子用 dnd_roll，死亡豁免用 dnd_check type=death。绝不自己编点数，也不要假装掷骰。',
   '- 武器攻击用 dnd_check 的 weapon 参数（取角色卡上的武器骰和属性），偷袭等额外骰子放 damage。角色卡没武器就先 dnd_character update 补上 weapons，不要临时编伤害骰。',
@@ -48,7 +62,9 @@ const DM_RULES = [
   '- 引导术、祝福术、诗人激励这类加在 d20 上的骰子用 dnd_check 的 bonus_dice（如 "1d4"），不要先 dnd_roll 再手动加。检定一律走 dnd_check。',
   '- 每次掷骰都把明细写出来，如「d20=15 +5 = 20，命中，伤害 1d8=4 +3 = 7」。只隐藏 DC、AC 和怪物 HP。secret 检定例外，点数也不说。',
   '- 怪物血量：只用工具给的伤势词（毫发无伤 / 受了点伤 / 伤得不轻 / 摇摇欲坠），不报数字，也不说「满血」「只剩 1 点」。',
-  '- 状态以工具为准：HP、状态、位置、资源、物品只看工具结果和下面的【团况】；任何改动都要调用工具。没有记录的东西别说「记录上有」。',
+  '- 【团况 · DM 视角】在对话里最新一条「Current runtime context」消息中，每次局面变化系统都会发一份新的，旧的作废。它是系统生成的，不是玩家发言：不回复它、不算行动宣告，里面的 DM 机密一样不外传。',
+  '- 「上次进度」和「账本」是这段对话开始时的内容；之后你用 dnd_progress、dnd_chronicle 写过的以你写的为准。场景规则、本章要点变了会写在最新的团况里，以团况为准。',
+  '- 状态以工具为准：HP、状态、位置、资源、物品只看工具结果和最新的【团况】；任何改动都要调用工具。没有记录的东西别说「记录上有」。',
   '- 不死坚韧等特性由工具自动处理（伤害时传 damage_type）；不要手动删「死亡」或给死怪回血。',
   '- 临时加怪用 dnd_character create srd=<SRD index> count=N（如 goblin、hobgoblin，中文名和英文名也认），数值从 SRD 取，别用默认 10 属性硬写。dnd_srd 查不准时会列候选，挑一个 index 再查，别换着拼法乱试。',
   '- 资源（法术位、圣疗池、诗人激励、战争祭司次数、药水）用 dnd_resource 记：第一次用到时 set 好上限，用时 use，玩家本人说用才扣，不要替他花。',
@@ -81,6 +97,11 @@ const DM_RULES = [
   '- 不是当前回合的玩家宣告了行动，就告诉他「记下了，等你的回合」，不要提前结算。借机攻击、反应用 reaction=true。',
   '- 敌人倒光后调用 dnd_initiative end。',
   '',
+  '【剧情记忆】',
+  '- 玩家提到以前的事，或者你要说「没有这人」「没去过」「没发生过」之前，先查再答：经过用 dnd_chronicle search，角色背景用 dnd_character show，场景和 NPC 用 dnd_lookup。查不到也只说「我这边没记录」，再问玩家，不断言没发生；玩家说得对就照他说的补记。',
+  '- 地点、击败、任务、线索、物品由工具自动进账本。工具记不到的当场用 dnd_chronicle add 记：临场编的人和事（npc）、俘虏（captive）、承诺和欠账（promise）、没解开的线头（thread）、角色背景的新发现（backstory）、玩家定的长期约定和本桌裁定（ruling）。兑现或解决了用 close。',
+  '- 如果现在是要你写对话的压缩摘要（checkpoint）：技术类小节没有必要就写 (none)，工具用法、文件路径不用留。把篇幅留给 Critical Context，用中文逐条保留跑团剧情：按时间排的关键事件、去过和清空的地点、NPC 身份与关系、俘虏、承诺和欠账、没了结的线头、角色背景要点、玩家长期约定和本桌裁定。',
+  '',
   '【建卡与结团】',
   '- 没有角色卡的玩家，问清名字和职业后用 dnd_character create 建卡，player 填昵称，player_id 填他标签里的编号（如 U3）（可按标准数组 15/14/13/12/10/8 帮他分配属性），同时填 weapons、hit_die，并用 dnd_resource set 记下法术位和职业资源。老角色卡缺这些的，用 dnd_character update / dnd_resource set 补上。',
   '- 玩家问规则、法术、技能时可以提醒他用 /dnd search <词条> 或 /dnd spells <职业> 查 wiki。',
@@ -90,6 +111,16 @@ const DM_RULES = [
   '- 笔记只记跨团通用的东西（玩家偏好、DM 约定、角色梗），而且只记玩家知道的：DC、怪物数值、DM 笔记、没揭示的房间和秘密不写进笔记。',
 ].join('\n');
 
+/** 跟着队伍位置和章节变的背景：本章要点、当前场景的通用规则 */
+function sceneLines(campaign: Campaign, adventure: Adventure): string[] {
+  const site = siteOfRoom(adventure, campaign.currentRoom);
+  const chapter = adventure.chapters.find((ch) => ch.id === campaign.chapter);
+  return [
+    ...(chapter?.dmGuide ? [`本章要点：${chapter.dmGuide}`] : []),
+    ...(site?.features ? [`「${site.name}」通用规则：${site.features}`] : []),
+  ];
+}
+
 export class DndService {
   public readonly store: CampaignStore;
   public readonly library: AdventureLibrary;
@@ -98,6 +129,8 @@ export class DndService {
   public readonly mapDir: string;
   /** 这一次开团的签到表（会话 key → 签到）；只在内存里，见 check-in.ts */
   public readonly checkIns = new Map<string, CheckIn>();
+  /** 这段对话 system prompt 里锁住的背景，见 promptSections */
+  private readonly background = new PromptLatch();
 
   public constructor(options: { store: CampaignStore; library: AdventureLibrary; mapDir: string; roller?: Roller }) {
     this.store = options.store;
@@ -140,6 +173,7 @@ export class DndService {
       const ids = this.library.list().map((a) => a.id).join('、');
       throw new Error(`没有这个模组: ${id ?? '(空)'}。可用：${ids}`);
     }
+    this.background.forget(key);
     if (existing !== undefined && existing.adventureId === adventure.id && !fresh) {
       existing.active = true;
       existing.sessionStartedAt = Date.now();
@@ -164,6 +198,7 @@ export class DndService {
   public stop(key: string): Campaign | undefined {
     const campaign = this.store.load(key);
     if (campaign === undefined || !campaign.active) return undefined;
+    this.background.forget(key);
     campaign.active = false;
     campaign.initiative = undefined;
     ensureSessionSummary(campaign);
@@ -172,19 +207,40 @@ export class DndService {
     return campaign;
   }
 
-  /** 每回合注入：DM 守则 + 团况摘要（含当前房间的 DM 笔记，system prompt 不会发到群里） */
-  public promptSections(key: string): DndPromptSection[] {
+  /**
+   * 进 system prompt 的部分：DM 守则和背景。
+   * 这里的文字一变，后面整段历史都会失去缓存（实测存档、跨场景移动各一次 10 万 token 重算），
+   * 所以战斗中会变的东西放 stateSnapshot，背景按 epoch 锁住：压缩、换会话时才换成最新的。
+   * 存档和账本不用补进快照：模型刚写过，都在对话里。不传 epoch 时不锁，直接给最新的。
+   */
+  public promptSections(key: string, epoch?: string): DndPromptSection[] {
     const found = this.active(key);
     if (found === undefined) return [];
     const { campaign, adventure } = found;
-    const room = findRoom(roomGraph(adventure), campaign.currentRoom);
-    const site = siteOfRoom(adventure, campaign.currentRoom);
-    const chapter = adventure.chapters.find((ch) => ch.id === campaign.chapter);
-    const lines = ['【团况 · DM 视角】', summarize(campaign, adventure)];
+    const lines = [...sceneLines(campaign, adventure)];
     // 只注入整本的真相、当前章的要点、当前场景的通用规则，不注入整本书
-    if (adventure.truth.length > 0) lines.push(`模组背景：${adventure.truth.join(' ')}`);
-    if (chapter?.dmGuide) lines.push(`本章要点：${chapter.dmGuide}`);
-    if (site?.features) lines.push(`「${site.name}」通用规则：${site.features}`);
+    if (adventure.truth.length > 0) lines.unshift(`模组背景：${adventure.truth.join(' ')}`);
+    const last = campaign.summaries.at(-1);
+    if (last !== undefined) lines.push(`上次进度：${last.text}`);
+    lines.push(...chronicleLines(campaign));
+    const current = lines.join('\n');
+    const text = epoch === undefined ? current : this.background.hold(key, epoch, current);
+    return [
+      { name: 'qqbot:dnd-dm', order: 96, text: DM_RULES },
+      ...(text.length > 0 ? [{ name: 'qqbot:dnd-background', order: 97, text }] : []),
+    ];
+  }
+
+  /**
+   * 会变的团况（含当前房间的 DM 笔记），走宿主的 runtime-context 快照：变了才在对话末尾追加一条，前面的历史不动，缓存继续命中。
+   * 旧快照会留在历史里，所以这里只放真正会变的内容。没开团返回空串，宿主会发一条「之前的快照作废」。
+   */
+  public stateSnapshot(key: string): string {
+    const found = this.active(key);
+    if (found === undefined) return '';
+    const { campaign, adventure } = found;
+    const room = findRoom(roomGraph(adventure), campaign.currentRoom);
+    const lines = ['【团况 · DM 视角】', summarize(campaign, adventure)];
     if (inOpening(campaign)) {
       // 开场阶段不注入第一个场景的 DM 笔记，免得模型提前把伏击、敌人说出来
       lines.push(...openingLines(campaign, adventure));
@@ -192,13 +248,11 @@ export class DndService {
       const notes = room === undefined ? '' : roomView(campaign, adventure, room).dmNotes;
       if (notes) lines.push(`本房间 DM 笔记（只给你裁定用，不要直接念）：${notes}`);
     }
-    const last = campaign.summaries.at(-1);
-    if (last !== undefined) lines.push(`上次进度：${last.text}`);
+    // 跨场景、换章后 system prompt 里锁住的还是旧规则，新的先写在这里
+    const held = this.background.peek(key);
+    if (held !== undefined) lines.push(...sceneLines(campaign, adventure).filter((line) => !held.includes(line)));
     const checkIn = this.checkIns.get(key);
     if (checkIn !== undefined) lines.push(rosterPrompt(rosterOf(checkIn, campaign)));
-    return [
-      { name: 'qqbot:dnd-dm', order: 96, text: DM_RULES },
-      { name: 'qqbot:dnd-state', order: 97, text: lines.join('\n') },
-    ];
+    return lines.join('\n');
   }
 }
