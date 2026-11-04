@@ -69,6 +69,7 @@ Send `/dnd start` in a group and the bot becomes that group's dungeon master (DM
 | `dnd_rest` | Short rest (the tool rolls hit dice and heals) and long rest |
 | `dnd_initiative` | Initiative start / next / goto / end / status; only creatures present join |
 | `dnd_move` | Move between rooms (`who` for split parties, secret doors). Returns the player-facing description plus DM-only notes |
+| `dnd_position` | Battlefield positions in combat (5 ft cells): placement, on-turn movement, distance queries; flags opportunity attacks on moves and checks range on attacks; kept in the state snapshot so compaction cannot lose it |
 | `dnd_map` | Renders the explored part of the map with fog and sends it to the group (needs the optional `sharp` dependency) |
 | `dnd_undo` | List recent changes, or undo N of them at once |
 | `dnd_end` | End the session with a story recap, injected next time the campaign starts |

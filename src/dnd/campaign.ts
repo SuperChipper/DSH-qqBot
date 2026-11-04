@@ -22,6 +22,7 @@ import {
   findRoom,
 } from './dungeon.ts';
 import { ABILITIES, type Ability, type Skill, abilityModifier, parseAbility, parseSkill, proficiencyBonus, SKILLS } from './rules.ts';
+import { battleLines } from './battlefield.ts';
 import { type NpcState, afterChange, describeCondition, evalCondition, locationKnown, roomView, storySummaryLines } from './story.ts';
 
 export type CharacterKind = 'pc' | 'npc' | 'monster';
@@ -52,6 +53,8 @@ export interface Character {
   damage?: string;
   /** 先攻加值覆盖（怪物用；PC 取敏捷调整值） */
   initBonus?: number;
+  /** 步行速度（尺）；缺省按 30 算，只用来提醒超速 */
+  speed?: number;
   /** 所在房间。怪物离开房间就不进先攻；PC/NPC 缺省时跟着队伍主位置（currentRoom） */
   room?: string;
   srd?: string;
@@ -103,6 +106,13 @@ export interface InitiativeEntry {
   init: number;
 }
 
+/** 战斗内坐标（一格 5 尺）。带上房间，角色换房间后旧坐标自动作废 */
+export interface BattleCell {
+  x: number;
+  y: number;
+  room: string;
+}
+
 export interface InitiativeState {
   round: number;
   /** 当前行动者在 order 里的下标 */
@@ -112,6 +122,12 @@ export interface InitiativeState {
   briefed?: Array<'pc' | 'monster'>;
   /** 出现了反应/借机攻击/指针修正等破例：下一个 PC 回合重新给完整提示 */
   rebrief?: boolean;
+  /** 站位：角色名 → 格子（见 battlefield.ts） */
+  positions?: Record<string, BattleCell>;
+  /** 不是角色卡上的地标：门、柱子、没建卡的俘虏 */
+  marks?: Record<string, BattleCell>;
+  /** 当前回合已走的尺数；指针一动就清 */
+  moved?: Record<string, number>;
 }
 
 export interface CampaignSummary {
@@ -283,6 +299,7 @@ export interface CharacterInput {
   attackBonus?: number;
   damage?: string;
   initBonus?: number;
+  speed?: number;
   weapons?: Weapon[];
   notes?: string;
   traits?: string[];
@@ -336,6 +353,7 @@ export function upsertCharacter(c: Campaign, input: CharacterInput): { character
   if (input.attackBonus !== undefined) next.attackBonus = Math.trunc(input.attackBonus);
   if (input.damage !== undefined) next.damage = input.damage;
   if (input.initBonus !== undefined) next.initBonus = Math.trunc(input.initBonus);
+  if (input.speed !== undefined) next.speed = clampInt(input.speed, 0, 300);
   if (input.weapons !== undefined) next.weapons = input.weapons;
   if (input.notes !== undefined) next.notes = input.notes;
   if (input.traits !== undefined) next.traits = [...new Set(input.traits.map(normalizeTrait))];
@@ -560,7 +578,7 @@ export function deathSave(c: Campaign, name: string, roller: Roller = cryptoRoll
 
 // ── 先攻 ──
 
-function isOut(ch: Character): boolean {
+export function isOut(ch: Character): boolean {
   return ch.conditions.includes('死亡');
 }
 
@@ -670,6 +688,7 @@ function removeFromInitiative(state: InitiativeState, name: string): boolean {
   const idx = state.order.findIndex((e) => e.name === name);
   if (idx === -1) return false;
   state.order.splice(idx, 1);
+  delete state.positions?.[name];
   if (idx <= state.turn) state.turn--;
   if (state.turn >= state.order.length) state.turn = state.order.length - 1;
   return true;
@@ -689,6 +708,7 @@ export function nextTurn(c: Campaign): { round: number; current: InitiativeEntry
   }
   if (state.order.length === 0) throw new Error('先攻表里已经没有能行动的角色，用 dnd_initiative end 结束战斗');
   let newRound = false;
+  delete state.moved;
   state.turn++;
   if (state.turn >= state.order.length) {
     state.turn = 0;
@@ -1064,6 +1084,7 @@ export function gotoTurn(c: Campaign, name: string, round?: number): InitiativeE
   const idx = state.order.findIndex((e) => e.name === ch.name);
   if (idx === -1) throw new Error(`${ch.name} 不在先攻表里`);
   state.turn = idx;
+  delete state.moved;
   if (round !== undefined && round >= 1) state.round = Math.trunc(round);
   pushLog(c, `先攻指针调整到第 ${state.round} 轮 ${ch.name}`);
   return state.order[idx]!;
@@ -1369,6 +1390,7 @@ export function summarize(c: Campaign, adv: Adventure): string {
     const s = c.initiative;
     const order = s.order.map((e, i) => (i === s.turn ? `▶${e.name}(${e.init})` : `${e.name}(${e.init})`)).join(' > ');
     lines.push(`战斗第 ${s.round} 轮：${order}`);
+    lines.push(...battleLines(c, (id) => findRoom(graph, id)?.name ?? id));
   }
   lines.push(...storySummaryLines(c, adv, occupied));
   if (c.log.length > 0) lines.push(`最近：${c.log.slice(-SUMMARY_LOG_LINES).join('；')}`);

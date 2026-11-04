@@ -40,3 +40,22 @@ npx vitest run --pool=threads   # 默认沙箱里 video-tool 的真实 ffmpeg �
 - 注释写「为什么」；不写复述代码的注释。
 - 写回 `cordis.patch.yml` 遵守最小写入：只写用户提交的顶层键，不固化默认值。
 - 纯规则逻辑（如回复欲望打分）优先放 `src/features/`，保持可单测、不依赖宿主。
+
+## 跑团（dnd）：写给 DM 的规则不放这里
+
+这个文件 DM 平时读不到：宿主只在碰到 `dsh-qqbot/` 下的文件时才注入它，而跑团会话的工作目录在上一级
+（session `c5a6a808` 的 2364 回合里只注入过两回，都是 DM 在改这个文件）。所以：
+
+- 给 DM 的规则写进 `src/dnd/dnd-service.ts` 的 DM 守则，压缩摘要要保留什么也在那里。
+- 能由代码保证的放工具返回值，比规则更管用：`dnd_move` 再进房间时的「这里来过」、
+  `dnd_position` 的借机和够不到提醒。模型在那一步正好看得到。
+- 战斗中要跨压缩保留的状态必须进 `summarize()`（团况每次变化都重发）。压缩摘要是转述，
+  站位这类细节走样过：格罗尔走开时漏算借机、狼咬完人又被报成「离你十来尺」。
+- 新增 `dnd_*` 工具时同步：DM 守则、`README.md` / `README_EN.md` 的工具表、测试。
+
+查问题时：
+
+- `dnd_*` 的结果永远不发到群里（`showToolResults`），群里看不到调用记录不等于没调用。
+- 会话记录在 `~/.dsh/sessions/<cwd>/<id>/session.v4.jsonl.zstd`，是一串独立的 zstd 帧。Node 的流式解压
+  只解第一帧，要按魔数切开逐帧解。
+- 战役档 `dnd/campaigns/qqbot_*_<群openid>.json`：`revealed` 里有的房间 = 演过，再看 `log` 和聊天记录确认演到哪一步。

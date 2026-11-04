@@ -111,6 +111,18 @@ import {
 import { ABILITIES, ABILITY_NAMES, type Ability, type Skill, SKILLS, parseAbility, parseSkill, skillLabel } from './rules.ts';
 import { applyProgressPatch, isEmptyPatch, parseProgressPatch } from './progress-patch.ts';
 import { type SrdEntry, type SrdKind, candidatesText, resolveSrdQuery, zhTable } from './srd-lookup.ts';
+import {
+  type Placement,
+  attackRangeNote,
+  battleLines,
+  distancesFrom,
+  moveOnGrid,
+  moveResultText,
+  removePosition,
+  setPositions,
+  turnPositionNote,
+  unplaced,
+} from './battlefield.ts';
 import { DEFENSE_NAMES, type SaveTarget, parseDefense, parseSaveTargets, resolveSaveEffect, saveDamage } from './save-effect.ts';
 
 export const DND_TOOL_PREFIX = 'dnd_';
@@ -155,6 +167,18 @@ const TEXT_OUTPUT = {
 };
 
 const SECRET_NOTE = '（DM 机密：不要把 DC/AC 说给玩家）';
+/** 暗骰也要当场交代结果，只是不给数字：静默结算等于让玩家在黑箱里打架 */
+const HIDDEN_ROLL_NOTE = '（暗骰：不报点数和 DC，但要当场说结果：过了/没过，或角色察觉到/没察觉到什么）';
+
+function parsePlacements(value: unknown): Placement[] {
+  if (!Array.isArray(value)) throw new Error('dnd_position: set 要给 placements 数组');
+  return value.map((raw) => {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const name = typeof o.name === 'string' ? o.name.trim() : '';
+    if (name.length === 0) throw new Error('placements 每一项要有 name');
+    return { name, x: o.x as number, y: o.y as number, ...(o.mark === true ? { mark: true } : {}) };
+  });
+}
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
@@ -227,7 +251,7 @@ function sheet(ch: Character, who: (openid: string) => string = (id) => id): str
   const abilities = ABILITIES.map((a) => `${ABILITY_NAMES[a]}${ch.abilities[a]}`).join(' ');
   const lines = [
     `${ch.name}${ch.player ? `〈${ch.player}${ch.playerId ? ` ${who(ch.playerId)}` : ''}〉` : ''}｜${ch.kind === 'pc' ? 'PC' : (ch.kind === 'npc' ? 'NPC' : '怪物')}${ch.className ? ` ${ch.className}` : ''} ${ch.level} 级`,
-    `HP ${ch.hp}/${ch.maxHp}${ch.tempHp > 0 ? ` +${ch.tempHp}` : ''}  AC ${ch.ac}`,
+    `HP ${ch.hp}/${ch.maxHp}${ch.tempHp > 0 ? ` +${ch.tempHp}` : ''}  AC ${ch.ac}${ch.speed !== undefined ? `  速度 ${ch.speed}` : ''}`,
     abilities,
   ];
   if (ch.skills.length > 0) lines.push(`熟练技能：${ch.skills.map(skillLabel).join('、')}`);
@@ -385,7 +409,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       lines.push(`- ${o.name} ${o.detail}${verdict}${nat}${dmg}`);
     }
     if (spent !== undefined) lines.push(`用掉「${spent.key}」，剩 ${spent.resource.current}/${spent.resource.max}`);
-    lines.push(args.secret === true ? '（暗骰：点数和 DC 都不要告诉玩家）' : SECRET_NOTE);
+    lines.push(args.secret === true ? HIDDEN_ROLL_NOTE : SECRET_NOTE);
     return lines.join('\n');
   };
 
@@ -429,7 +453,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       if (expression === undefined) throw new Error('dnd_roll: expression 不能为空');
       const result = rollExpression(expression, service.roller);
       const reason = str(args.reason);
-      return `${reason ? `${reason}：` : ''}${result.detail}${args.secret === true ? '（暗骰：不要告诉玩家点数）' : ''}`;
+      return `${reason ? `${reason}：` : ''}${result.detail}${args.secret === true ? HIDDEN_ROLL_NOTE : ''}`;
     },
   );
 
@@ -603,6 +627,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
             lines.push(hpLine(change));
           }
         }
+        const rangeNote = attackRangeNote(c, ch, target, { ...(weapon !== undefined ? { weapon } : {}), reaction: args.reaction === true, advantage: adv });
+        if (rangeNote !== undefined) lines.push(rangeNote);
         lines.push(SECRET_NOTE);
         return lines.join('\n');
       }
@@ -626,7 +652,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       const verdict = dc === undefined
         ? ''
         : ` vs DC ${dc} → ${roll.total >= dc ? '成功' : '失败'}${roll.natural === 20 ? '（天然 20）' : (roll.natural === 1 ? '（天然 1）' : '')}`;
-      return `${ch.name} ${label}：${roll.detail}${extraNote}${verdict}${spentNote}\n${secret ?'（暗骰：点数和 DC 都不要告诉玩家，只描述角色察觉到/没察觉到什么）' : SECRET_NOTE}`;
+      return `${ch.name} ${label}：${roll.detail}${extraNote}${verdict}${spentNote}\n${secret ? HIDDEN_ROLL_NOTE : SECRET_NOTE}`;
     }),
   );
 
@@ -680,6 +706,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         description: 'Room id the character is in (monsters; PCs that split off). Moving a monster in combat to a room '
           + 'outside the fight (fleeing, running for help) also takes it out of the initiative order.',
       },
+      speed: { type: 'integer', description: 'Walking speed in feet (default 30). dnd_position warns when a turn\'s movement exceeds it.' },
       hit_die: { type: 'string', description: 'PCs: hit die, e.g. d10 (fighter/paladin/ranger), d8 (cleric/rogue/bard).' },
       traits: {
         type: 'array',
@@ -759,7 +786,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           player: str(args.player), playerId: memberId(exec, args.player_id, 'player_id'), className: str(args.class_name), level: int(args.level), maxHp: int(args.max_hp),
           ac: int(args.ac), attackBonus: int(args.attack_bonus), damage: str(args.damage), notes: str(args.notes),
           skills: parseSkills(strList(args.skills)), expertise: parseSkills(strList(args.expertise)), saves: parseAbilities(strList(args.saves)),
-          weapons: parseWeapons(args.weapons), room: str(args.room), hitDie: str(args.hit_die), traits: strList(args.traits),
+          weapons: parseWeapons(args.weapons), room: str(args.room), hitDie: str(args.hit_die), traits: strList(args.traits), speed: int(args.speed),
         };
         for (const [k, v] of Object.entries(optional)) {
           if (v !== undefined) (input as unknown as Record<string, unknown>)[k] = v;
@@ -897,7 +924,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           + (current === undefined
             ? '调用 dnd_initiative next 轮到下一位。'
             : `仍是 ${current} 的回合；排在 ${current} 前面的新成员本轮已错过，下一轮才行动。`)
-          + away;
+          + away
+          + (unplaced(c).length > 0 ? `\n【站位】还没摆位：${unplaced(c).join('、')}，用 dnd_position set。` : '');
       }
       if (action === 'next') {
         assertCanEndTurn(c, { declaredBy: memberId(exec, args.declared_by, 'declared_by'), recentSenders: sendersOf(exec), dmOverride: args.dm_override === true });
@@ -914,13 +942,14 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const { rounds, defeated } = endInitiative(c);
         return `战斗结束，共 ${rounds} 轮。${defeated.length > 0 ? `击败：${defeated.join('、')}` : ''}`;
       }
-      return `第 ${requireInitiative(c).round} 轮：${orderLine(c)}`;
+      const graph = roomGraph(adventure);
+      return [`第 ${requireInitiative(c).round} 轮：${orderLine(c)}`, ...battleLines(c, (id) => findRoom(graph, id)?.name ?? id)].join('\n');
     }),
   );
 
   register(
     'dnd_move',
-    'Move characters to an adjacent room. Omit `who` only when the WHOLE party goes; when one or a few go ahead '
+    'Move characters to an adjacent room (moving inside the same room is dnd_position). Omit `who` only when the WHOLE party goes; when one or a few go ahead '
     + '(scouting, sneaking, fetching something) pass `who` so the others stay put. Returns the player-facing '
     + 'description (narrate from this) and DM-only notes (use for rulings, never read aloud). First visit reveals '
     + 'the room and spawns its monsters. In combat, characters in the initiative order move only on their own turn (with `who`); '
@@ -973,6 +1002,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         if (result.firstSiteVisit && result.site.arrival) lines.push(`【抵达「${result.site.name}」，可以念】${result.site.arrival}`);
         if (result.firstSiteVisit && result.site.features) lines.push(`【DM】「${result.site.name}」通用规则：${result.site.features}`);
         lines.push(`【玩家视角，可以描述】${result.view.playerView}`, `【DM 机密，勿念】${result.view.dmNotes}`);
+        // 房间文本是首次进门的剧本，不跟踪打完的仗；就在这里提醒，这是重放开场伏击的那一步
+        if (!result.firstVisit) lines.push('【DM】这里来过：上面是首次进门的剧本，不跟踪清空的怪、已触发的事件、搜过的东西。现况按团况和敌人名单说，别重放打过的仗。');
         if (result.room.shop !== undefined) lines.push(`【店铺】${shopLine(result.room.shop)}`);
       }
       if (result.spawned.length > 0) {
@@ -993,6 +1024,82 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       const joinHint = combatJoinHint(c, result.room.id, result.movers, result.spawned.map((m) => m.name));
       if (joinHint !== undefined) lines.push(joinHint);
       return lines.join('\n');
+    }),
+  );
+
+  register(
+    'dnd_position',
+    'Battlefield positions inside a room during combat; one cell is 5 ft, x grows east, y grows south, diagonals cost 5 ft. '
+    + 'The stored grid is the only source for distance, adjacency and opportunity attacks; never rule on those from memory. '
+    + 'set: place combatants at the start of a fight, when someone joins or enters the room, for forced movement (shove, '
+    + 'drag, teleport: no movement cost, no opportunity attack) and for corrections; mark=true places a landmark or an '
+    + 'uncarded creature (door, pillar, captive). move: one creature walks on its own turn, straight line; returns feet '
+    + 'used and whose reach it leaves. Route around something by calling move in segments. Use adjacent_to to step next '
+    + 'to someone. show: everyone\'s positions; with `from`, distances from that creature. remove: drop a mark or placement.',
+    {
+      action: { type: 'string', enum: ['set', 'move', 'show', 'remove'] },
+      placements: {
+        type: 'array',
+        description: 'For set.',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            x: { type: 'integer' },
+            y: { type: 'integer' },
+            mark: { type: 'boolean', description: 'Not a character sheet: door, pillar, uncarded captive.' },
+          },
+          required: ['name', 'x', 'y'],
+          additionalProperties: false,
+        },
+      },
+      name: { type: 'string', description: 'For move / remove: who.' },
+      x: { type: 'integer', description: 'For move: destination cell.' },
+      y: { type: 'integer', description: 'For move: destination cell.' },
+      adjacent_to: { type: 'string', description: 'For move instead of x/y: the free cell next to this creature nearest the mover.' },
+      from: { type: 'string', description: 'For show: list distances from this creature.' },
+      declared_by: { type: 'string', description: 'For move of a PC: member id of the player who declared it (the #U number, pass "U3").' },
+      reaction: { type: 'boolean', description: 'For move: movement off-turn (a reaction, a feature); not counted against this turn\'s speed.' },
+      dm_override: { type: 'boolean', description: 'For move: a player explicitly delegated this PC\'s move. Say so in the reply.' },
+    },
+    ['action'],
+    (args, exec) => mutate(exec, (c, adventure) => {
+      const action = String(args.action);
+      const graph = roomGraph(adventure);
+      const roomName = (id: string): string => findRoom(graph, id)?.name ?? id;
+      if (action === 'set') {
+        const notes = setPositions(c, parsePlacements(args.placements));
+        return [...battleLines(c, roomName), ...notes].join('\n');
+      }
+      if (action === 'move') {
+        const ch = requireCharacter(c, String(args.name ?? ''));
+        if (args.dm_override === true && str(args.declared_by) === undefined) {
+          throw new Error('dnd_position: dm_override 还要给 declared_by（委托的玩家编号，如 U4），并在回复里写明是谁委托的');
+        }
+        assertCanAct(c, ch, {
+          declaredBy: memberId(exec, args.declared_by, 'declared_by'),
+          reaction: args.reaction === true,
+          dmOverride: args.dm_override === true,
+          recentSenders: sendersOf(exec),
+        });
+        if (args.reaction === true) requireInitiative(c).rebrief = true;
+        const adjacentTo = str(args.adjacent_to);
+        const x = int(args.x);
+        const y = int(args.y);
+        return moveResultText(moveOnGrid(c, ch.name, {
+          ...(adjacentTo !== undefined ? { adjacentTo } : {}),
+          ...(x !== undefined ? { x } : {}),
+          ...(y !== undefined ? { y } : {}),
+          reaction: args.reaction === true,
+        }));
+      }
+      if (action === 'remove') return removePosition(c, String(args.name ?? ''));
+      if (action !== 'show') throw new Error(`dnd_position: 未知 action ${action}`);
+      requireInitiative(c);
+      const lines = battleLines(c, roomName);
+      const from = str(args.from);
+      if (from !== undefined) lines.push(distancesFrom(c, from));
+      return lines.join('\n') || '还没有人摆位，用 dnd_position set。';
     }),
   );
 
@@ -1433,7 +1540,8 @@ export function combatTurnPrompt(c: Campaign, name: string, extra: { recentSende
   if (!briefed.includes(kind)) state.briefed = [...briefed, kind];
   if (kind === 'pc') delete state.rebrief;
   else if (extra.force === true) state.rebrief = true;
-  return turnPrompt(ch, name, { full, absent });
+  const position = turnPositionNote(c, name);
+  return `${turnPrompt(ch, name, { full, absent })}${position.length > 0 ? `\n${position}` : ''}`;
 }
 
 const srdLists = new Map<SrdKind, SrdEntry[]>();
@@ -1518,6 +1626,8 @@ export function srdMonsterInput(data: Record<string, unknown>): Omit<CharacterIn
   if (attack !== undefined) input.attackBonus = num(attack.attack_bonus)!;
   if (typeof dice === 'string') input.damage = dice.replace(/\s+/g, '');
   if (traits.length > 0) input.traits = traits;
+  const walk = /(\d+)/.exec(String((data.speed as { walk?: unknown } | undefined)?.walk ?? ''));
+  if (walk !== null) input.speed = Number(walk[1]);
   const notes = [attack !== undefined ? `攻击：${String(attack.name)}` : '', specials.map((s) => String(s.name)).join('、')].filter(Boolean).join('；');
   if (notes) input.notes = notes;
   return input;
