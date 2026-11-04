@@ -16,6 +16,7 @@ import type { DshAgent, SessionManager } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
 import { MEDIA_ROOT } from './media-cleaner.ts';
 import { isSensitivePath } from '../shared/file-access.ts';
+import { canonical } from '../shared/tool-guard.ts';
 import { replyWindowMs } from '../transport/msgid-cache.ts';
 import { isVoiceFile, VOICE_REPLY_REMINDER, VOICE_REPLY_TOOL_HINT } from './voice-reply.ts';
 
@@ -111,9 +112,9 @@ function parseTarget(input: string): ReplyTarget | undefined {
   return { scope, targetId };
 }
 
-/** 判断 filePath 是否位于 root 目录内（含 root 本身） */
+/** 判断 filePath 是否位于 root 目录内（含 root 本身）；两边都解析符号链接，否则目录里的链接能把外面的文件发出去 */
 function isWithinRoot(filePath: string, root: string): boolean {
-  const rel = relative(resolve(root), filePath);
+  const rel = relative(canonical(root), canonical(filePath));
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
@@ -232,7 +233,7 @@ export function registerSendFileTool(
       if (!isPathAllowed(absPath, config.sendFile, cwd)) {
         throw new Error(`qqbot_send_file: file_path 不在允许的目录内: ${absPath}`);
       }
-      if (isSensitivePath(absPath, config)) {
+      if (isSensitivePath(absPath, config) || isSensitivePath(canonical(absPath), config)) {
         throw new Error(`qqbot_send_file: file_path 位于敏感目录，禁止访问: ${absPath}`);
       }
       if (!existsSync(absPath)) {

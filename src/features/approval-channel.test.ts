@@ -99,11 +99,18 @@ function installAndCapture(ch: ApprovalChannel, sent: SentMessage[]): {
   return { handler: captured.handler!, ...(captured.options !== undefined ? { options: captured.options } : {}) };
 }
 
+/** 最新一张审批卡片上按钮的 data */
+function cardData(sent: SentMessage[], decision: string): string {
+  const card = sent.filter((item) => item.opts?.keyboard !== undefined).at(-1)!;
+  const buttons = card.opts!.keyboard!.content.rows[0]!.buttons;
+  return buttons.map((button) => button.action.data).find((data) => (JSON.parse(data) as { d: string }).d === decision)!;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 describe('buildApprovalKeyboard', () => {
   it('builds two mutually-exclusive buttons with type-tagged data', () => {
-    const kb = buildApprovalKeyboard();
+    const kb = buildApprovalKeyboard('abc');
     const buttons = kb.content.rows[0]?.buttons ?? [];
     expect(buttons).toHaveLength(2);
 
@@ -111,11 +118,11 @@ describe('buildApprovalKeyboard', () => {
     expect(allow.group_id).toBe('approval');
     expect(allow.action.type).toBe(1);
     expect(allow.action.click_limit).toBe(1);
-    expect(JSON.parse(allow.action.data)).toEqual({ t: 'approval', d: 'allow' });
+    expect(JSON.parse(allow.action.data)).toEqual({ t: 'approval', d: 'allow', n: 'abc' });
 
     const deny = buttons[1]!;
     expect(deny.group_id).toBe('approval');
-    expect(JSON.parse(deny.action.data)).toEqual({ t: 'approval', d: 'deny' });
+    expect(JSON.parse(deny.action.data)).toEqual({ t: 'approval', d: 'deny', n: 'abc' });
   });
 });
 
@@ -151,7 +158,7 @@ describe('ApprovalChannel.install', () => {
     expect(sent[0]!.opts?.keyboard).toBeDefined();
 
     // 点击 allow → resolve allowed-once
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'peer-qq' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(cardData(sent, 'allow'), { user: 'peer-qq' }))).toBe(true);
     await expect(p).resolves.toBe('allowed-once');
   });
 
@@ -216,7 +223,7 @@ describe('ApprovalChannel.handleInteraction', () => {
       createSender(sent), logger, (id) => id === 'owner' || id === 'admin');
     const { handler } = installAndCapture(ch, sent);
     const pending = handler(makeRequest(), () => Promise.resolve('unavailable'));
-    const event = makeEvent(JSON.stringify({ t: 'approval', d: decision }), { group: 'group-1', member });
+    const event = makeEvent(cardData(sent, decision), { group: 'group-1', member });
     expect(event.user_openid).toBeUndefined();
     expect(ch.handleInteraction(event)).toBe(true);
     await expect(pending).resolves.toBe(outcome);
@@ -237,7 +244,7 @@ describe('ApprovalChannel.handleInteraction', () => {
     const pending = handler(makeRequest(), () => Promise.resolve('unavailable'));
     const settle = vi.fn();
     void Promise.resolve(pending).then(settle);
-    const data = JSON.stringify({ t: 'approval', d: 'allow' });
+    const data = cardData(sent, 'allow');
     expect(ch.handleInteraction(makeEvent(data, { group: 'group-1', ...peer }))).toBe(true);
     await Promise.resolve();
     expect(settle).not.toHaveBeenCalled();
@@ -262,7 +269,7 @@ describe('ApprovalChannel.handleInteraction', () => {
     // 非审批按钮 → false，不消费
     expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'question', q: 'x', i: 0 }), { user: 'peer-qq' }))).toBe(false);
     // 拒绝 → rejected
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'deny' }), { user: 'peer-qq' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(cardData(sent, 'deny'), { user: 'peer-qq' }))).toBe(true);
     await expect(p).resolves.toBe('rejected');
   });
 
@@ -274,6 +281,34 @@ describe('ApprovalChannel.handleInteraction', () => {
     )).toBe(true);
     await sleep(10);
     expect(sent.some((item) => item.text.includes('已失效'))).toBe(true);
+  });
+
+  it('旧卡片不能结算当前等待的审批', async () => {
+    const sent: SentMessage[] = [];
+    const ch = new ApprovalChannel(
+      createManager({ findBySessionId: (id) => (id === 'sess-qq' ? makeRecord(sessionKey('c2c', 'peer-qq')) : undefined) }),
+      createSender(sent),
+      createLogger(),
+    );
+    const { handler } = installAndCapture(ch, sent);
+
+    const first = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    const oldCard = cardData(sent, 'allow');
+    expect(ch.handleInteraction(makeEvent(cardData(sent, 'deny'), { user: 'peer-qq' }))).toBe(true);
+    await expect(first).resolves.toBe('rejected');
+
+    const second = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
+    await sleep(20);
+    const settled = vi.fn();
+    void Promise.resolve(second).then(settled);
+    expect(ch.handleInteraction(makeEvent(oldCard, { user: 'peer-qq' }))).toBe(true);
+    await sleep(10);
+    expect(settled).not.toHaveBeenCalled();
+    expect(sent.at(-1)?.text).toContain('已过期');
+
+    expect(ch.handleInteraction(makeEvent(cardData(sent, 'allow'), { user: 'peer-qq' }))).toBe(true);
+    await expect(second).resolves.toBe('allowed-once');
   });
 
   it('allows the c2c session user to approve their own operation', async () => {
@@ -296,7 +331,7 @@ describe('ApprovalChannel.handleInteraction', () => {
 
     const p = handler(makeRequest({ id: 'sess-qq' }), () => Promise.resolve('unavailable' as ApprovalOutcome));
     await sleep(20);
-    expect(ch.handleInteraction(makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { user: 'peer-qq' }))).toBe(true);
+    expect(ch.handleInteraction(makeEvent(cardData(sent, 'allow'), { user: 'peer-qq' }))).toBe(true);
     await expect(p).resolves.toBe('allowed-once');
   });
 
@@ -318,12 +353,12 @@ describe('ApprovalChannel.handleInteraction', () => {
 
     // 非主人点击：消费事件但不结算，审批仍等待
     expect(ch.handleInteraction(
-      makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', user: 'stranger' }),
+      makeEvent(cardData(sent, 'allow'), { group: 'group-1', user: 'stranger' }),
     )).toBe(true);
 
     // 主人点击：正常放行
     expect(ch.handleInteraction(
-      makeEvent(JSON.stringify({ t: 'approval', d: 'allow' }), { group: 'group-1', user: 'owner' }),
+      makeEvent(cardData(sent, 'allow'), { group: 'group-1', user: 'owner' }),
     )).toBe(true);
     await expect(p).resolves.toBe('allowed-once');
   });

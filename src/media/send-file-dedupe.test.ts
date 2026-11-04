@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -89,5 +89,44 @@ describe('qqbot_send_file 重复发送', () => {
     await definition.execute({ file_path: other }, exec);
 
     expect(sent).toHaveLength(2);
+  });
+});
+
+describe('qqbot_send_file 路径白名单', () => {
+  beforeEach(() => resetRecentSends());
+
+  function restricted(cwd: string) {
+    const definitions: Definition[] = [];
+    const ctx = { get: () => ({ register: (definition: Definition) => definitions.push(definition) }) } as unknown as Context;
+    const config = { cwd, sendFile: { restrictPaths: true, extraRoots: [] } } as unknown as ImQQBotConfig;
+    const logger = { info: () => {}, warn: () => {} } as unknown as Logger;
+    const sent: string[] = [];
+    const bot = {
+      sendImage: async (_target: ReplyTarget, source: { localPath?: string }) => {
+        sent.push(source.localPath ?? '');
+        return { upload: { file_uuid: 'u1' }, message: { id: 'm1' } };
+      },
+    } as unknown as MediaSenderLike;
+    const manager = { findByAgent: () => ({ replyTarget: { scope: 'group', targetId: 'g1' } }) } as unknown as SessionManager;
+    registerSendFileTool(ctx, bot, manager, config, logger);
+    return { definition: definitions.find((d) => d.name === 'qqbot_send_file')!, sent };
+  }
+
+  it('工作目录里指向外部的链接不算在目录内，目录里的真实文件照常发', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'qqbot-sendfile-root-'));
+    const cwd = join(base, 'cwd');
+    const outside = join(base, 'outside');
+    mkdirSync(cwd);
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'secret.jpg'), 'x');
+    writeFileSync(join(cwd, 'ok.jpg'), 'x');
+    // junction 在 Windows 上不需要管理员权限
+    symlinkSync(outside, join(cwd, 'link'), 'junction');
+
+    const { definition, sent } = restricted(cwd);
+    await expect(definition.execute({ file_path: join(cwd, 'link', 'secret.jpg') }, exec)).rejects.toThrow(/不在允许的目录内/);
+    expect(sent).toHaveLength(0);
+    await definition.execute({ file_path: join(cwd, 'ok.jpg') }, exec);
+    expect(sent).toHaveLength(1);
   });
 });

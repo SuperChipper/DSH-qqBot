@@ -100,7 +100,7 @@ export function hasFullToolAccess(session: ToolGuardSession, config: ImQQBotConf
 }
 
 /** 解析符号链接：路径不存在时取最近的已存在祖先再拼回去 */
-function canonical(path: string): string {
+export function canonical(path: string): string {
   let current = resolve(path);
   const tail: string[] = [];
   while (!existsSync(current)) {

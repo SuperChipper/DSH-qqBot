@@ -28,10 +28,11 @@ export interface QuestionButtonData {
   i: number;
 }
 
-/** 审批按钮：d=决策 */
+/** 审批按钮：d=决策，n=这张卡片的 nonce（点击时要和等待中的审批对上） */
 export interface ApprovalButtonData {
   t: 'approval';
   d: 'allow' | 'deny';
+  n: string;
 }
 
 /** 跑团按钮：a=动作（end 结束回合 / status 查看状态 / in 签到 / go 开场 / roster 发名单），n=角色名，r=轮次（防止点到过期的旧按钮） */

@@ -7,6 +7,7 @@
  * 每个会话同一时间最多一个 pending 审批（审批是阻塞式的）；outcome 是 dsh
  * 协议的闭合集合，无 allow-always，只提供「允许一次 / 拒绝」两个按钮。
  */
+import { randomUUID } from 'node:crypto';
 import type { EventOptions } from '@deepseek-ai/cordis';
 import type { InteractionEvent } from '@tencent-connect/qqbot-nodejs';
 import type { ChatScope, Logger, ReplyTarget } from '../types.ts';
@@ -73,6 +74,8 @@ interface PendingApproval {
   record: ApprovalSessionRecordLike;
   request: ApprovalRequest;
   resolve: (outcome: ApprovalOutcome) => void;
+  /** 只有这张卡片的按钮能结算：所有卡片按钮一样的话，点旧卡片会批准当前等待的另一项操作 */
+  nonce: string;
   onAbort?: () => void;
 }
 
@@ -213,6 +216,16 @@ export class ApprovalChannel {
       return true;
     }
 
+    if (button.n !== entry.nonce) {
+      this.logger.warn(`im-qqbot: approval click ignored, stale card key=${record.sessionKey} sender=${senderId ?? 'unknown'}`);
+      void this.sender
+        .sendMarkdown(record.replyTarget, '这张审批卡片已过期，当前操作还在等待，请点最新那张。')
+        .catch((err) => {
+          this.logger.warn(`im-qqbot: approval stale notice failed: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      return true;
+    }
+
     this.pending.delete(record.sessionKey);
     this.removeAbort(entry);
     entry.resolve(button.d === 'allow' ? 'allowed-once' : 'rejected');
@@ -228,7 +241,8 @@ export class ApprovalChannel {
     const command = commandOf(request);
     return new Promise<ApprovalOutcome>((resolve) => {
       // 先登记 pending 再发卡片：用户可能在 sendMarkdown 返回前就点了按钮。
-      const entry: PendingApproval = { record, request, resolve };
+      const nonce = randomUUID().slice(0, 8);
+      const entry: PendingApproval = { record, request, resolve, nonce };
       this.pending.set(key, entry);
 
       if (request.signal) {
@@ -242,7 +256,7 @@ export class ApprovalChannel {
       }
 
       void this.sender
-        .sendMarkdown(record.replyTarget, buildApprovalText(request, command), { keyboard: buildApprovalKeyboard() })
+        .sendMarkdown(record.replyTarget, buildApprovalText(request, command), { keyboard: buildApprovalKeyboard(nonce) })
         .then(() => {
           this.logger.info(`im-qqbot: approval sent to QQ, waiting for decision key=${key}`);
         })
