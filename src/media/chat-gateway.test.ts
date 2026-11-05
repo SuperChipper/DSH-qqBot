@@ -48,16 +48,22 @@ describe('chatCompletion', () => {
 });
 
 describe('describeVideoViaChat', () => {
-  it('用 video_url + data URI 传整段视频，模型默认 deepseek-v4.1-flash', async () => {
+  it('用 video_url + data URI 传整段视频，模型默认 mimo', async () => {
     setChatKeyResolver(async () => 'sk-x');
     const fetchMock = stubFetch('视频里在吃咖喱');
     const text = await describeVideoViaChat(Buffer.from('fake-mp4'), '讲讲');
 
     expect(text).toBe('视频里在吃咖喱');
     const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
-    expect(body.model).toBe('deepseek-v4.1-flash');
+    expect(body.model).toBe('mimo-v2.6-flash');
     expect(body.messages[0].content[0].type).toBe('video_url');
     expect(body.messages[0].content[0].video_url.url).toMatch(/^data:video\/mp4;base64,/);
+  });
+
+  it('模型没收到视频、回一段寒暄时按失败处理（否则幻觉会被当成描述）', async () => {
+    setChatKeyResolver(async () => 'sk-x');
+    stubFetch('您好！请问您想咨询什么问题？请描述一下您的具体情况，我会尽力为您提供帮助。');
+    await expect(describeVideoViaChat(Buffer.from('v'), '讲讲')).rejects.toThrow(/没有送进模型/);
   });
 
   it('QQBOT_VIDEO_MODEL 可以换模型', async () => {

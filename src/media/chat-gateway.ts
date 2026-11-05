@@ -38,8 +38,13 @@ export function chatEndpointFromEnv(): ChatEndpoint {
   };
 }
 
-/** 整段视频理解用的模型：和音频转写不是同一个（mimo 没测过 video_url，v4.1-flash 实测可看片） */
-export const DEFAULT_VIDEO_MODEL = 'deepseek-v4.1-flash';
+/**
+ * 整段视频理解用的模型。
+ *
+ * 实测（2026-11-05，20 次/4 个片子）：mimo 20/20 都能看到视频，deepseek-v4.1-flash 有约 1/4 的请求
+ * 会静默丢掉 video_url、回一段寒暄（"您可能还没有输入"）或者整段无关内容。宁可慢（12-55s）也不能瞎答。
+ */
+export const DEFAULT_VIDEO_MODEL = 'mimo-v2.6-flash';
 
 /** 视频端点：网关和凭证同 chatEndpointFromEnv，只把模型换掉 */
 export function videoEndpointFromEnv(): ChatEndpoint {
@@ -151,6 +156,14 @@ export async function transcribeViaChat(
 }
 
 /**
+ * 模型根本没收到视频时的典型话术。
+ *
+ * 这个网关偶发把 `video_url` 静默丢掉（不报错，模型照样回一段寒暄或完全无关的内容），
+ * 比 4xx 更危险：不拦下来的话，调用方会把幻觉当成对视频的描述。命中就按失败处理，让它退回抽帧。
+ */
+const MISSED_VIDEO_RE = /没有(上传|提供)(任何)?(图片|视频)|您可能还没有(输入|上传)|请问您想咨询|请问有什么(可以|能)(帮|为)|把需要(改写|处理)的内容|no (image|video) (was )?(provided|attached)/i;
+
+/**
  * 把整段视频交给模型看。
  *
  * 只测通过 `video_url` + data URI 这一种：`input_video` 会被网关拒（atlas 还没实现）。
@@ -161,8 +174,12 @@ export async function describeVideoViaChat(
   prompt: string,
   options: ChatCompletionOptions = {},
 ): Promise<string> {
-  return chatCompletion([
+  const text = await chatCompletion([
     { type: 'video_url', video_url: { url: `data:video/mp4;base64,${video.toString('base64')}` } },
     { type: 'text', text: prompt },
   ], { timeoutMs: 600000, maxTokens: 2048, endpoint: videoEndpointFromEnv(), ...options });
+  if (MISSED_VIDEO_RE.test(text)) {
+    throw new Error(`视频没有送进模型（回的是寒暄）：${text.slice(0, 80)}`);
+  }
+  return text;
 }

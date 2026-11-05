@@ -47,7 +47,19 @@ const DESCRIPTION =
   + 'reply: answer what the user actually wanted (a reaction, a summary, or a specific answer) instead '
   + 'of relaying the description.';
 
-const DEFAULT_PROMPT = 'Describe what happens in the video: scenes, people, actions and any on-screen text.';
+/**
+ * 整段视频的硬约束，每次都拼在用户问题后面。
+ *
+ * 两个坑都是实测出来的：
+ * - 提「作品名/角色名」会让模型拼命猜（有一版写了「确定才报作品名」，结果回「这是《夏生夏代》…」）。
+ *   一个字都别提交代出处，它反而老老实实描述画面、抄字幕。
+ * - mimo 拿到 video 会顺带解析音轨，一半概率输出成「说话人列表 + 背景音乐分析」。视频这一路只要画面，
+ *   声音有单独的转写，所以显式禁掉音频维度。
+ */
+const VIDEO_RULES = '只看画面，按时间顺序描述。把画面上出现的文字（字幕、标题、UI）原样抄下来。'
+  + '不要列出说话人，不要描述背景音乐和音效，不用总结。';
+
+const DEFAULT_PROMPT = '描述画面里发生了什么：谁在做什么、什么表情、场景什么样。';
 
 /** 整段直传上限：base64 后约 ×4/3，网关请求体一般 25MB 封顶 */
 const DIRECT_MAX_BYTES = 15 * 1024 * 1024;
@@ -324,7 +336,7 @@ export async function registerDescribeVideoTool(
           try {
             visual = await describeVideoViaChat(
               await readFile(whole),
-              `${Math.round(duration * 10) / 10}s video. ${asked}`,
+              `这是一段 ${Math.round(duration * 10) / 10} 秒的视频。${asked}\n${VIDEO_RULES}`,
               { logger },
             );
             mode = 'video';
