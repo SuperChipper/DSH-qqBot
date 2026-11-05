@@ -16,6 +16,7 @@ import {
   type Campaign,
   type Character,
   type CharacterInput,
+  type ReactionDef,
   type CharacterKind,
   type HpChange,
   addSummary,
@@ -23,6 +24,8 @@ import {
   UNDEAD_FORTITUDE,
   applyDamage,
   assertCanAct,
+  assertDeclaredByOwner,
+  assertNoPending,
   assertCanEndTurn,
   attackModifier,
   changeCondition,
@@ -123,6 +126,20 @@ import {
   turnPositionNote,
   unplaced,
 } from './battlefield.ts';
+import {
+  assertWindowClosed,
+  consumesReaction,
+  declineReaction,
+  eligibleReactors,
+  findReactor,
+  holdNotice,
+  openPending,
+  pendingHit,
+  pendingState,
+  reactionsOf,
+  requirePending,
+  waitingOn,
+} from './pending-attack.ts';
 import { DEFENSE_NAMES, type SaveTarget, parseDefense, parseSaveTargets, resolveSaveEffect, saveDamage } from './save-effect.ts';
 
 export const DND_TOOL_PREFIX = 'dnd_';
@@ -139,6 +156,8 @@ export interface DndToolDeps {
   sendImage(record: SessionRecord, path: string, caption?: string): Promise<void>;
   /** 先攻指针变了（start/next/goto）：轮到 PC 时由按钮模块在回复发完后发「结束回合」按钮 */
   onTurnChange?(record: SessionRecord): void;
+  /** 有一笔待结算的攻击：回复发完后发反应按钮并开始计时 */
+  onPendingAttack?(record: SessionRecord): void;
   /** 群成员短别名（#U3）和 openid 互换；不传时 declared_by / player_id 按原样当 openid */
   members?: MemberIds;
 }
@@ -169,6 +188,51 @@ const TEXT_OUTPUT = {
 const SECRET_NOTE = '（DM 机密：不要把 DC/AC 说给玩家）';
 /** 暗骰也要当场交代结果，只是不给数字：静默结算等于让玩家在黑箱里打架 */
 const HIDDEN_ROLL_NOTE = '（暗骰：不报点数和 DC，但要当场说结果：过了/没过，或角色察觉到/没察觉到什么）';
+
+function parseReactions(value: unknown): ReactionDef[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.map((raw) => {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const name = typeof o.name === 'string' ? o.name.trim() : '';
+    if (name.length === 0) throw new Error('reactions 每一项要有 name');
+    const def: ReactionDef = { name };
+    if (o.when === 'foe_attacks' || o.when === 'attacked' || o.when === 'attacking') def.when = o.when;
+    if (typeof o.resource === 'string' && o.resource.trim().length > 0) def.resource = o.resource.trim();
+    return def;
+  });
+}
+
+/** 「-1d6」「+10」「5」：工具掷骰，正负号决定加还是减 */
+function signedRoll(expression: string, roller: Roller): { total: number; detail: string } {
+  const m = /^\s*([+-]?)\s*(.+)$/.exec(expression);
+  if (m === null) throw new Error(`看不懂修正值「${expression}」，写成 -1d6 或 +10`);
+  const result = rollExpression(m[2]!, roller);
+  return { total: m[1] === '-' ? -result.total : result.total, detail: `${m[1] === '-' ? '-' : '+'}${result.detail}` };
+}
+
+/** 这次攻击的伤害表达式；既没武器也没给 damage 时是 undefined */
+function attackExpression(ch: Character, weapon: Weapon | undefined, extra: string | undefined): string | undefined {
+  return weapon !== undefined ? `${weaponDamage(ch, weapon)}${extra !== undefined ? `+${extra}` : ''}` : extra ?? ch.damage;
+}
+
+function rollAttackDamage(ch: Character, weapon: Weapon | undefined, expression: string, crit: boolean, roller: Roller): { total: number; detail: string } {
+  const gwf = usesGreatWeaponFighting(ch, weapon)
+    ? greatWeaponRoller(roller, diceCount(crit ? critExpression(weapon!.damage) : weapon!.damage))
+    : undefined;
+  const dmg = rollExpression(crit ? critExpression(expression) : expression, gwf?.roller ?? roller);
+  const rerolled = gwf !== undefined && gwf.rerolls.length > 0 ? `（巨武器战斗重投：${gwf.rerolls.join('、')}）` : '';
+  return { total: dmg.total, detail: `${dmg.detail}${rerolled}` };
+}
+
+/** 把攻击伤害记到目标身上；倒地的 PC 被重击记两次死亡豁免失败（applyDamage 已记一次） */
+function applyAttackDamage(c: Campaign, targetName: string, amount: number, crit: boolean, damageType: string | undefined, roller: Roller): HpChange {
+  const change = applyDamage(c, targetName, amount, { crit, damageType, roller });
+  const target = requireCharacter(c, targetName);
+  if (crit && change.before === 0 && target.kind === 'pc' && !target.conditions.includes('死亡')) {
+    change.events.push(...recordDeathFailures(c, target.name, 1));
+  }
+  return change;
+}
 
 function parsePlacements(value: unknown): Placement[] {
   if (!Array.isArray(value)) throw new Error('dnd_position: set 要给 placements 数组');
@@ -262,6 +326,7 @@ function sheet(ch: Character, who: (openid: string) => string = (id) => id): str
     const hit = weaponAttackModifier(ch, w);
     lines.push(`武器 ${w.name}${weaponTags(w)}：命中 ${hit >= 0 ? '+' : ''}${hit}，伤害 ${weaponDamage(ch, w)}${w.notes ? `（${w.notes}）` : ''}`);
   }
+  if ((ch.reactions?.length ?? 0) > 0) lines.push(`反应：${ch.reactions!.map((r) => r.name).join('、')}`);
   if (ch.conditions.length > 0) lines.push(`状态：${ch.conditions.join('、')}`);
   if (ch.deathSaves !== undefined) lines.push(`死亡豁免：成功 ${ch.deathSaves.successes}/3 失败 ${ch.deathSaves.failures}/3`);
   const resources = Object.entries(ch.resources ?? {}).map(([k, r]) => `${k} ${r.current}/${r.max}（${{ short: '短休回满', long: '长休回满', none: '不回复' }[r.reset]}）`);
@@ -368,6 +433,99 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
   const whoOf = (exec: Exec) => (openid: string): string => {
     const alias = deps.members?.display(recordOf(exec), openid);
     return alias === undefined ? openid : `#${alias}`;
+  };
+
+  /** dnd_apply 处理待结算攻击的部分：先改数值、记不用，最后才落账 */
+  const resolvePending = (c: Campaign, args: Record<string, unknown>, exec: Exec): string => {
+    const p = requirePending(c);
+    const named = requireCharacter(c, String(args.target ?? ''));
+    if (named.name !== p.target) throw new Error(`待结算这笔打的是 ${p.target}，不是 ${named.name}`);
+    if (args.cancel === true) {
+      delete requireInitiative(c).pending;
+      pushLog(c, `${p.attacker}→${p.target} 的攻击作废`);
+      return `${p.attacker}→${p.target} 这笔作废，没有扣血。`;
+    }
+    const lines: string[] = [];
+    for (const name of strList(args.decline) ?? []) declineReaction(p, requireCharacter(c, name).name);
+
+    const reaction = args.reaction as Record<string, unknown> | undefined;
+    if (reaction !== undefined) {
+      const reactor = findReactor(c, p, String(reaction.by ?? ''));
+      const clicked = p.claimed.some((o) => o.character === reactor.name);
+      if (!clicked) assertDeclaredByOwner(reactor, { declaredBy: memberId(exec, args.declared_by, 'declared_by'), recentSenders: sendersOf(exec) }, '反应');
+      const name = str(reaction.name) ?? '反应';
+      const spendKey = str(reaction.spend);
+      if (spendKey !== undefined) useResource(c, reactor.name, spendKey);
+      const effects: string[] = [];
+      const attackMod = str(reaction.attack_mod);
+      if (attackMod !== undefined) {
+        const r = signedRoll(attackMod, service.roller);
+        p.attackMod += r.total;
+        effects.push(`攻击 ${r.detail}`);
+      }
+      const acMod = int(reaction.ac_mod);
+      if (acMod !== undefined) {
+        p.acMod += acMod;
+        effects.push(`AC ${acMod >= 0 ? '+' : ''}${acMod}`);
+      }
+      const damageMod = str(reaction.damage_mod);
+      if (damageMod !== undefined) {
+        const r = signedRoll(damageMod, service.roller);
+        p.damageMod += r.total;
+        effects.push(`伤害 ${r.detail}`);
+      }
+      const def = reactionsOf(reactor).find((r) => r.name === name);
+      const counter = def?.counter === true;
+      const effect = effects.join('，') || (counter ? '反手打回去' : '无数值变化');
+      p.used.push({ by: reactor.name, name, effect });
+      p.claimed = p.claimed.filter((o) => o.character !== reactor.name);
+      if (consumesReaction(p, reactor.name)) {
+        const state = requireInitiative(c);
+        state.reacted = [...new Set([...(state.reacted ?? []), reactor.name])];
+        state.rebrief = true;
+      }
+      pushLog(c, `${reactor.name} 用「${name}」（${effect}）`);
+      lines.push(`${reactor.name} 用「${name}」：${effect}${spendKey !== undefined ? `，用掉「${spendKey}」` : ''}`);
+      if (counter) {
+        lines.push(`${name} 是一次新的攻击，不改这笔的数字：这笔落账之后，用 dnd_check character=${reactor.name} type=attack target=${p.attacker} reaction=true 结算还击（还击不打中也不影响这笔）。`);
+      }
+    }
+
+    // 未命中被改成命中时，这时才有伤害可掷
+    if (pendingHit(p) && p.rawDamage === undefined) {
+      const attacker = requireCharacter(c, p.attacker);
+      const weapon = p.weapon === undefined ? undefined : findWeapon(attacker, p.weapon);
+      const expression = attackExpression(attacker, weapon, p.extraDamage);
+      if (expression === undefined) throw new Error(`${p.attacker} 没有伤害表达式，先 cancel 再重新结算`);
+      const dmg = rollAttackDamage(attacker, weapon, expression, p.crit, service.roller);
+      p.rawDamage = dmg.total;
+      p.damageDetail = dmg.detail;
+      lines.push(`改成命中了，伤害 ${dmg.detail}`);
+    }
+
+    if (args.settle !== true) {
+      const waiting = waitingOn(p);
+      lines.push(pendingState(p));
+      lines.push(waiting.length > 0
+        ? `还没落账：还在等 ${waiting.join('、')}。`
+        : `都答复了：报完结果就 dnd_apply target=${p.target} settle=true 落账。`);
+      lines.push(SECRET_NOTE);
+      return lines.join('\n');
+    }
+
+    assertWindowClosed(p);
+    delete requireInitiative(c).pending;
+    if (!pendingHit(p)) {
+      lines.push(`${p.attacker}→${p.target} 落账：未命中，没有扣血。`);
+    } else {
+      const raw = Math.max(0, (p.rawDamage ?? 0) + p.damageMod);
+      const amount = saveDamage(raw, false, 'half', p.defense);
+      lines.push(`${p.attacker}→${p.target} 落账：${p.defense !== undefined ? `${DEFENSE_NAMES[p.defense]} ` : ''}受 ${amount}`);
+      lines.push(hpLine(applyAttackDamage(c, p.target, amount, p.crit, p.damageType, service.roller)));
+    }
+    lines.push('继续结算这个回合；这一只行动完了再 next。');
+    lines.push(SECRET_NOTE);
+    return lines.join('\n');
   };
 
   /**
@@ -524,6 +682,11 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           + 'the character it is on). Fails if none left. Only when the player said they use it.',
       },
       secret: { type: 'boolean', description: 'Hidden check (passive perception, insight): do not reveal the roll.' },
+      hold: {
+        type: 'boolean',
+        description: 'For type=attack in combat: roll but do not apply damage yet, leaving a reaction window. Automatic when a PC '
+          + 'with a registered reaction can respond; pass it yourself only for an NPC or monster reaction.',
+      },
       declared_by: {
         type: 'string',
         description: 'Member id of the player whose message declared this action: the #U number in their tag "[昵称 #U3]" (pass "U3"). '
@@ -555,6 +718,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       });
       const targets = type === 'save' ? parseSaveTargets(args.targets) : undefined;
       if (targets !== undefined && targets.length > 0) {
+        assertNoPending(c, '结算豁免效果');
         // character 是施法者/来源：是角色卡上的人就按主动行动校验并从他身上扣资源；陷阱之类的来源不校验
         const source = findCharacter(c, String(args.character ?? ''));
         if (source !== undefined) {
@@ -567,6 +731,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       const adv = advantageOf(args.advantage);
       const secret = args.secret === true;
       if (type === 'save' && str(args.damage) !== undefined) {
+        assertNoPending(c, '结算豁免效果');
         // 没有 targets 但带了伤害：掷豁免的人自己挨这一下（踩中陷阱），走同一套减半/抗性结算
         const defense = parseDefense(args.defense);
         return saveEffectText(c, args, [{ name: ch.name, ...(defense !== undefined ? { defense } : {}) }], undefined, true);
@@ -591,6 +756,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       }
 
       if (type === 'attack') {
+        assertNoPending(c, '再结算攻击');
         const targetName = str(args.target);
         if (targetName === undefined) throw new Error('dnd_check: 攻击需要 target');
         const target = requireCharacter(c, targetName);
@@ -603,28 +769,36 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         const crit = roll.natural === 20;
         const hit = crit || (roll.natural !== 1 && roll.total >= target.ac);
         const lines = [`${ch.name}${weapon !== undefined ? `（${weapon.name}）` : ''} 攻击 ${target.name}：${roll.detail}${extraNote} vs AC ${target.ac} → ${crit ? '重击！' : (hit ? '命中' : (roll.natural === 1 ? '天然 1，失手' : '未命中'))}${spentNote}`];
-        if (hit) {
-          const extra = str(args.damage);
-          const expression = weapon !== undefined
-            ? `${weaponDamage(ch, weapon)}${extra !== undefined ? `+${extra}` : ''}`
-            : extra ?? ch.damage;
+        const extra = str(args.damage);
+        const expression = attackExpression(ch, weapon, extra);
+        const defense = parseDefense(args.defense);
+        const damageType = str(args.damage_type);
+        const reactors = c.initiative === undefined || expression === undefined
+          ? []
+          : eligibleReactors(c, ch, target, { hit, crit, natural: roll.natural });
+        // 能反应的人在场就先不落账；hold=true 给 DM 手动挂起（NPC、怪物的反应工具不替它判断）
+        const hold = c.initiative !== undefined && expression !== undefined && roll.natural !== 1 && (reactors.length > 0 || args.hold === true);
+        if (hold) {
+          const dmg = hit ? rollAttackDamage(ch, weapon, expression!, crit, service.roller) : undefined;
+          if (dmg !== undefined) lines.push(`伤害（还没扣）${dmg.detail}`);
+          lines.push(holdNotice(openPending(c, {
+            at: Date.now(), attacker: ch.name, target: target.name, natural: roll.natural, rollDetail: roll.detail,
+            total: roll.total, ac: target.ac, crit, reactors,
+            ...(weapon !== undefined ? { weapon: weapon.name } : {}),
+            ...(extra !== undefined ? { extraDamage: extra } : {}),
+            ...(dmg !== undefined ? { rawDamage: dmg.total, damageDetail: dmg.detail } : {}),
+            ...(damageType !== undefined ? { damageType } : {}),
+            ...(defense !== undefined ? { defense } : {}),
+          })));
+          deps.onPendingAttack?.(recordOf(exec));
+        } else if (hit) {
           if (expression === undefined) {
             lines.push('没有伤害表达式：传 weapon（角色卡上的武器），或用 dnd_roll 掷伤害（重击时骰子翻倍）再 dnd_apply 扣血。');
           } else {
-            const gwf = usesGreatWeaponFighting(ch, weapon)
-              ? greatWeaponRoller(service.roller, diceCount(crit ? critExpression(weapon!.damage) : weapon!.damage))
-              : undefined;
-            const dmg = rollExpression(crit ? critExpression(expression) : expression, gwf?.roller ?? service.roller);
-            const rerolled = gwf !== undefined && gwf.rerolls.length > 0 ? `（巨武器战斗重投：${gwf.rerolls.join('、')}）` : '';
-            const defense = parseDefense(args.defense);
+            const dmg = rollAttackDamage(ch, weapon, expression, crit, service.roller);
             const amount = saveDamage(dmg.total, false, 'half', defense);
-            lines.push(`伤害 ${dmg.detail}${rerolled}${defense !== undefined ? `，${DEFENSE_NAMES[defense]} → ${amount}` : ''}`);
-            const change = applyDamage(c, target.name, amount, { crit, damageType: str(args.damage_type), roller: service.roller });
-            // 倒地的 PC 被重击：死亡豁免记两次失败（applyDamage 已记一次）
-            if (crit && change.before === 0 && target.kind === 'pc' && !target.conditions.includes('死亡')) {
-              change.events.push(...recordDeathFailures(c, target.name, 1));
-            }
-            lines.push(hpLine(change));
+            lines.push(`伤害 ${dmg.detail}${defense !== undefined ? `，${DEFENSE_NAMES[defense]} → ${amount}` : ''}`);
+            lines.push(hpLine(applyAttackDamage(c, target.name, amount, crit, damageType, service.roller)));
           }
         }
         const rangeNote = attackRangeNote(c, ch, target, { ...(weapon !== undefined ? { weapon } : {}), reaction: args.reaction === true, advantage: adv });
@@ -659,7 +833,8 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
   register(
     'dnd_apply',
     'Change a character\'s state: damage, healing, temporary HP, conditions. This is the only way HP or conditions '
-    + 'change; roll the amount with dnd_roll first.',
+    + 'change; roll the amount with dnd_roll first. Also resolves a pending attack left by dnd_check: `reaction` changes '
+    + 'the numbers (the tool rolls the dice), `decline` records who passed, `settle` applies the result, `cancel` drops it.',
     {
       target: { type: 'string' },
       damage: { type: 'integer' },
@@ -669,9 +844,33 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       temp_hp: { type: 'integer' },
       add_conditions: { type: 'array', items: { type: 'string' }, description: 'e.g. ["中毒", "倒地"]' },
       remove_conditions: { type: 'array', items: { type: 'string' } },
+      reaction: {
+        type: 'object',
+        description: 'For a pending attack. e.g. cutting words {by:"Kriv",name:"尖刻言语",attack_mod:"-1d6",spend:"诗人激励"}; shield '
+          + '{by:"Kriv",name:"护盾术",ac_mod:5,spend:"防御法杖充能"}; guided strike {by:"刻德温",name:"导引打击",attack_mod:"+10",spend:"引导神力"}.',
+        properties: {
+          by: { type: 'string' },
+          name: { type: 'string' },
+          attack_mod: { type: 'string', description: 'Added to the attack total, e.g. "-1d6" or "+10". The tool rolls it.' },
+          ac_mod: { type: 'integer', description: 'Added to the target AC, e.g. 5.' },
+          damage_mod: { type: 'string', description: 'Added to the damage, e.g. "-1d6". The tool rolls it.' },
+          spend: { type: 'string', description: 'Resource the reactor spends.' },
+        },
+        required: ['by', 'name'],
+        additionalProperties: false,
+      },
+      decline: { type: 'array', items: { type: 'string' }, description: 'Characters whose player said they will not react to the pending attack.' },
+      settle: { type: 'boolean', description: 'Apply the pending attack. Refused while the reaction window is open and someone has not answered.' },
+      cancel: { type: 'boolean', description: 'Drop the pending attack without applying it (it should not have happened).' },
+      declared_by: { type: 'string', description: 'For reaction by a PC: member id of the player who said so (the #U number, pass "U3").' },
     },
     ['target'],
     (args, exec) => mutate(exec, (c) => {
+      if (args.settle === true || args.cancel === true || args.reaction !== undefined || args.decline !== undefined) {
+        const text = resolvePending(c, args, exec);
+        if (c.initiative?.pending === undefined) deps.onTurnChange?.(recordOf(exec));
+        return text;
+      }
       const ch = requireCharacter(c, String(args.target ?? ''));
       const lines: string[] = [];
       const damage = int(args.damage);
@@ -707,6 +906,22 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           + 'outside the fight (fleeing, running for help) also takes it out of the initiative order.',
       },
       speed: { type: 'integer', description: 'Walking speed in feet (default 30). dnd_position warns when a turn\'s movement exceeds it.' },
+      reactions: {
+        type: 'array',
+        description: 'Reactions that can change an attack; attacks pause for the player when one applies (replaces the list). '
+          + 'when: foe_attacks (a foe hits an ally or self: 尖刻言语), attacked (self is hit: 护盾术), attacking (own attack misses: 导引打击). '
+          + 'resource: what it spends; once that runs out the player is not asked.',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            when: { type: 'string', enum: ['foe_attacks', 'attacked', 'attacking'] },
+            resource: { type: 'string' },
+          },
+          required: ['name'],
+          additionalProperties: false,
+        },
+      },
       hit_die: { type: 'string', description: 'PCs: hit die, e.g. d10 (fighter/paladin/ranger), d8 (cleric/rogue/bard).' },
       traits: {
         type: 'array',
@@ -786,7 +1001,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
           player: str(args.player), playerId: memberId(exec, args.player_id, 'player_id'), className: str(args.class_name), level: int(args.level), maxHp: int(args.max_hp),
           ac: int(args.ac), attackBonus: int(args.attack_bonus), damage: str(args.damage), notes: str(args.notes),
           skills: parseSkills(strList(args.skills)), expertise: parseSkills(strList(args.expertise)), saves: parseAbilities(strList(args.saves)),
-          weapons: parseWeapons(args.weapons), room: str(args.room), hitDie: str(args.hit_die), traits: strList(args.traits), speed: int(args.speed),
+          weapons: parseWeapons(args.weapons), room: str(args.room), hitDie: str(args.hit_die), traits: strList(args.traits), speed: int(args.speed), reactions: parseReactions(args.reactions),
         };
         for (const [k, v] of Object.entries(optional)) {
           if (v !== undefined) (input as unknown as Record<string, unknown>)[k] = v;
@@ -939,6 +1154,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
         return `已调整：第 ${requireInitiative(c).round} 轮，${combatTurnPrompt(c, entry.name, { recentSenders: sendersOf(exec), force: true })}`;
       }
       if (action === 'end') {
+        assertNoPending(c, '结束战斗');
         const { rounds, defeated } = endInitiative(c);
         return `战斗结束，共 ${rounds} 轮。${defeated.length > 0 ? `击败：${defeated.join('、')}` : ''}`;
       }
@@ -971,6 +1187,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
     },
     ['room'],
     (args, exec) => mutate(exec, (c, adventure) => {
+      assertNoPending(c, '换房间');
       const who = strList(args.who);
       if (who !== undefined && args.dm_override !== true) {
         const senders = sendersOf(exec);
@@ -1073,6 +1290,7 @@ export function registerDndTools(ctx: Context, deps: DndToolDeps): void {
       }
       if (action === 'move') {
         const ch = requireCharacter(c, String(args.name ?? ''));
+        if (args.reaction !== true) assertNoPending(c, '移动');
         if (args.dm_override === true && str(args.declared_by) === undefined) {
           throw new Error('dnd_position: dm_override 还要给 declared_by（委托的玩家编号，如 U4），并在回复里写明是谁委托的');
         }

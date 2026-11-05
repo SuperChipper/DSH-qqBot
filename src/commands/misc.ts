@@ -5,7 +5,7 @@
  * - /stop：中止当前生成（对应底层 agent cancel，通用能力）
  */
 import type { CommandDeps, CategorizedCommand } from './types.ts';
-import { getScopePeer, PLUGIN_VERSION } from '../shared/index.ts';
+import { getScopePeer, PLUGIN_VERSION, sendMarkdownChunked } from '../shared/index.ts';
 
 /** /bot-ping — 测试当前 dsh 与 QQ 连接的网络延迟 */
 export function pingCommand(): CategorizedCommand {
@@ -49,6 +49,22 @@ export function versionCommand({ manager }: CommandDeps): CategorizedCommand {
       const current = manager.getEffectiveModel('c2c', '');
       const modelInfo = current ? `${current.provider}/${current.model}` : '宿主默认';
       return `dsh-qqbot v${PLUGIN_VERSION} | model: ${modelInfo}`;
+    },
+  };
+}
+
+/** /bot-me — 查自己的 openid（加管理员名单时要用），群里顺带给出群 openid */
+export function meCommand({ config }: CommandDeps): CategorizedCommand {
+  return {
+    name: 'bot-me',
+    category: 'qqbot',
+    description: '查看你的 OpenID',
+    handler: async (cmdCtx) => {
+      const lines = [`你的 OpenID：${cmdCtx.message.senderId ?? 'unknown'}`];
+      const groupId = (cmdCtx.message as { groupOpenid?: string }).groupOpenid;
+      if (groupId) lines.push(`本群 OpenID：${groupId}`);
+      await sendMarkdownChunked(cmdCtx, lines.join('\n'), config.textChunkLimit);
+      return { kind: 'noop' as const };
     },
   };
 }

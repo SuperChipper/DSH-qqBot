@@ -23,12 +23,11 @@ describe('pickLowestEffort', () => {
 });
 
 describe('buildJudgeSystem', () => {
-  it('串模式不再给群友之间的聊天低分，改看有没有具体可接的点', () => {
-    expect(buildJudgeSystem(['小d'])).toContain('群友之间在聊自己的事');
-    const banter = buildJudgeSystem(['小d'], undefined, true);
-    expect(banter).not.toContain('群友之间在聊自己的事');
-    expect(banter).toContain('前后矛盾');
-    expect(banter).toContain('拿不准就给低分');
+  it('不因为是群友之间聊天就给低分，看有没有具体可接的点', () => {
+    const system = buildJudgeSystem(['小d']);
+    expect(system).not.toContain('群友之间在聊自己的事');
+    expect(system).toContain('前后矛盾');
+    expect(system).toContain('拿不准就给低分');
   });
 });
 

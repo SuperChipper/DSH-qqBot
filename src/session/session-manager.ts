@@ -43,7 +43,8 @@ import {
 import type { QuestionChannel } from '../features/question-channel.ts';
 import type { ApprovalChannel } from '../features/approval-channel.ts';
 import { GROUP_MESSAGE_FORMAT_PROMPT } from '../features/message-format.ts';
-import { BANTER_PROMPT, isBanterGroup } from '../features/banter.ts';
+import type { PersonaStore } from '../features/persona-store.ts';
+import type { PersonaSwitch, SwitchPersonaOutcome } from '../features/persona-switch.ts';
 import { compactThreshold, decideAutoCompact, deferCeiling, lastTurnUsedTools } from '../features/compact-policy.ts';
 import type {
   SessionEventLike,
@@ -190,6 +191,8 @@ export class SessionManager {
   private readonly promptLatch = new PromptLatch();
   /** 由 bootstrap 注入的跑团按钮（/dnd start 发签到）；按钮关闭时为空 */
   public dndButtons?: DndTurnButtons;
+  public personaStore?: PersonaStore;
+  public personaSwitch?: PersonaSwitch;
   /** 由 bootstrap 探测到的 ffmpeg 绝对路径（配置的或 winget 目录里找到的；走 PATH 时为空），提示模型直接用 */
   public ffmpegPath?: string;
 
@@ -275,7 +278,9 @@ export class SessionManager {
       if (!record) return assembled;
 
       const sections = [...(assembled.sections ?? [])];
-      const prompt = record.scope === 'group' ? this.config.groupPrompt : this.config.directPrompt;
+      const prompt = record.scope === 'group'
+        ? this.personaStore?.current(record.peerId)?.prompt ?? this.config.groupPrompt
+        : this.config.directPrompt;
       if (prompt) {
         sections.push({ name: 'qqbot:scope-prompt', order: 90, text: prompt });
       }
@@ -295,9 +300,6 @@ export class SessionManager {
             '一句话能回完就一句话；不知道对方指什么就直接问，别自己脑补一大段。',
           ].join('\n'),
         });
-        if (isBanterGroup(this.config, record.peerId) && this.dndService?.active(record.sessionKey) === undefined) {
-          sections.push({ name: 'qqbot:banter', order: 91, text: BANTER_PROMPT });
-        }
       }
 
       const epoch = promptEpoch(record);
@@ -1011,7 +1013,26 @@ export class SessionManager {
     return undefined;
   }
 
-  async remove(scope: ChatScope, peerId: string): Promise<void> {
+  /**
+   * 切换群人设：记下当前人设用的会话，换到目标人设自己的会话（第一次用就是新会话）。
+   * 群历史游标绑定 sessionId，换会话后会重新注入最近的群聊，上下文不会断。
+   */
+  switchPersona(groupId: string, personaId: string): SwitchPersonaOutcome {
+    const store = this.personaStore;
+    const currentId = store?.currentId(groupId);
+    if (store === undefined || currentId === personaId) return 'same';
+    const key = this.sessionKey('group', groupId);
+    // 开团的存档跟着会话走，中途换人设 DM 就换人了
+    if (this.dndService?.active(key) !== undefined) return 'dnd';
+    const record = this.sessions.get(key);
+    if (record !== undefined && record.agent.status !== 'idle') return 'busy';
+    store.rememberSession(groupId, currentId!, record?.sessionId ?? this.currentSessionId(key));
+    store.select(groupId, personaId);
+    void this.remove('group', groupId, store.sessionFor(groupId, personaId) ?? randomUUID());
+    return 'ok';
+  }
+
+  async remove(scope: ChatScope, peerId: string, nextSessionId: string = randomUUID()): Promise<void> {
     const key = this.sessionKey(scope, peerId);
     const record = this.sessions.get(key);
     const oldSessionId = record?.sessionId ?? this.modelResolver.getSessionId(key);
@@ -1024,7 +1045,9 @@ export class SessionManager {
         this.retiredSessionIds.delete(first);
       }
     }
-    this.modelResolver.setSessionId(key, randomUUID());
+    // 切回用过的人设时，这个会话不再算退役
+    this.retiredSessionIds.delete(nextSessionId);
+    this.modelResolver.setSessionId(key, nextSessionId);
 
     if (!record) return;
     this.sessions.delete(key);

@@ -34,11 +34,13 @@ import { MEDIA_ROOT } from '../media/media-cleaner.ts';
 import { startCleanup } from '../media/cleanup.ts';
 import { ensureVisionInputModal, registerDescribeImageTool } from '../media/vision-tool.ts';
 import { locateFfmpeg, registerDescribeVideoTool } from '../media/video-tool.ts';
+import { registerTranscribeTool } from '../media/transcribe-tool.ts';
 import { registerSendFileTool, withFreshReplyTarget, type MediaSenderLike } from '../media/send-file-tool.ts';
 import { registerSpeakTool } from '../media/speak-tool.ts';
 import { StickerStore } from '../media/sticker-store.ts';
 import { registerSaveStickerTool } from '../media/save-sticker-tool.ts';
 import { registerMatchStickerTool } from '../media/match-sticker-tool.ts';
+import { registerHistorySearchTool } from '../features/history-tool.ts';
 import { registerPetNativeBalance } from '../pet/native-balance.ts';
 import { NotesStore } from '../notes/notes-store.ts';
 import { EmbeddingCache, createOpenAIEmbedder, resolveEmbeddingApiKey } from '../notes/embedding.ts';
@@ -53,6 +55,8 @@ import { AdventureLibrary } from '../dnd/adventure.ts';
 import { DndService } from '../dnd/dnd-service.ts';
 import { registerDndTools } from '../dnd/dnd-tools.ts';
 import { ACK, DndTurnButtons } from '../dnd/turn-buttons.ts';
+import { PersonaStore } from '../features/persona-store.ts';
+import { PersonaSwitch } from '../features/persona-switch.ts';
 import { ToolAccess, ToolAccessStore } from '../features/tool-access.ts';
 import { getSenderAliases, memberIdsFor } from '../features/sender-alias.ts';
 import { createToolGuard } from '../shared/tool-guard.ts';
@@ -73,6 +77,7 @@ function dispatchInteraction(
   dndButtons?: DndTurnButtons,
   toolAccess?: ToolAccess,
   browserAccess?: BrowserAccess,
+  personaSwitch?: PersonaSwitch,
 ): number {
   const raw = event.data?.resolved?.button_data;
   if (!raw) return ACK.duplicate;
@@ -83,6 +88,7 @@ function dispatchInteraction(
   // 终端白名单确认：只认主人点击，别人点回 denied
   if (button.t === 'access') return toolAccess?.handleInteraction(event) ?? ACK.duplicate;
   if (button.t === 'browser-access') return browserAccess?.handleInteraction(event) ?? ACK.duplicate;
+  if (button.t === 'persona') return personaSwitch?.handleInteraction(event) ?? ACK.duplicate;
   const matched = button.t === 'question'
     ? manager.questionChannel?.handleInteraction(event) ?? false
     : manager.approvalChannel?.handleInteraction(event) ?? false;
@@ -285,6 +291,12 @@ export async function bootstrapGateway(
     : undefined;
   manager.dndButtons = dndButtons;
 
+  // ── 群聊人设（/persona 卡片；选择按群持久化） ──
+  const personaStore = new PersonaStore({ logger });
+  const personaSwitch = new PersonaSwitch(manager, personaStore, sender, config, logger);
+  manager.personaStore = personaStore;
+  manager.personaSwitch = personaSwitch;
+
   // ── 工具权限：非白名单会话不给终端、文件工具只能碰 bot 自己的目录；主人可在聊天里确认加白名单 ──
   const toolAccess = new ToolAccess(config, new ToolAccessStore(), manager, sender, logger);
   manager.toolAccess = toolAccess;
@@ -323,7 +335,7 @@ export async function bootstrapGateway(
     // 记录互动事件 id，作为后续被动回复候选（event_id）
     cacheEventId(scope, targetId, event.id);
 
-    const code = dispatchInteraction(event, manager, dndButtons, toolAccess, browserAccess);
+    const code = dispatchInteraction(event, manager, dndButtons, toolAccess, browserAccess, personaSwitch);
     await bot.acknowledgeInteraction(event.id, code).catch(() => {});
   });
 
@@ -382,6 +394,9 @@ export async function bootstrapGateway(
     config.asr,
     logger,
   );
+
+  // ── 听音频（qqbot_transcribe）：本机 whisper 常挂，改走能吃音频的模型 ──
+  registerTranscribeTool(ctx, logger);
 
   // ── 附件发送工具注册（qqbot_send_file） ──
   // 包装 bot：让文件发送也走 msgId 兜底 + 被动回复限额管控。
@@ -476,6 +491,9 @@ export async function bootstrapGateway(
     registerNotesTools(ctx, notesStore, manager, logger);
   }
 
+  // ── 历史归档检索（qqbot_history_search）：归档写得多、读得少，这里补一个查询口 ──
+  registerHistorySearchTool(ctx, config.appId, manager, logger);
+
   // ── 跑团工具注册（dnd_*） ──
   if (dndService !== undefined) {
     registerDndTools(ctx, {
@@ -490,6 +508,7 @@ export async function bootstrapGateway(
         );
       },
       onTurnChange: (record) => dndButtons?.schedule(record),
+      onPendingAttack: (record) => dndButtons?.scheduleReaction(record),
       members: memberIdsFor(getSenderAliases(), config.appId),
     });
   }

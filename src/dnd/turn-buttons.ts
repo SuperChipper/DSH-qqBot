@@ -11,8 +11,9 @@ import type { InlineKeyboard, InteractionEvent } from '@tencent-connect/qqbot-no
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import type { SessionManager, SessionRecord } from '../session/index.ts';
 import type { Logger, ReplyTarget } from '../types.ts';
-import { decodeButtonData, encodeButtonData } from '../features/button-utils.ts';
-import { type Campaign, findCharacter, nextTurn, playerStatus } from './campaign.ts';
+import { BUTTONS_PER_ROW, buttonLabel, decodeButtonData, encodeButtonData } from '../features/button-utils.ts';
+import { type Campaign, type PendingAttack, findCharacter, nextTurn, playerStatus } from './campaign.ts';
+import { REACTION_WINDOW_MS, waitingOn } from './pending-attack.ts';
 import { type CheckIn, arrivalNotice, checkInHint, createCheckIn, isComplete, kickoffMessage, markArrived, rosterOf, rosterText } from './check-in.ts';
 import type { DndService } from './dnd-service.ts';
 import { combatTurnPrompt } from './dnd-tools.ts';
@@ -24,6 +25,8 @@ export const ACK = { ok: 0, failed: 1, duplicate: 3, denied: 4 } as const;
 const FLUSH_DELAY_MS = 1500;
 /** 「名单」按钮的冷却：这段时间内重复点不再发，免得几个人一起点刷屏 */
 const ROSTER_COOLDOWN_MS = 30_000;
+/** QQ 内联键盘最多几行：超了整条消息会发不出去 */
+const MAX_KEYBOARD_ROWS = 5;
 /** 签到提醒攒几秒再发：开团时几个人前后脚点签到，合成一条 */
 const ARRIVAL_BATCH_MS = 4000;
 
@@ -71,6 +74,26 @@ export function buildTurnKeyboard(name: string, round: number): InlineKeyboard {
       ],
     },
   };
+}
+
+/** 按钮上只放名字前半截：「刻德温 Kodwin」→「刻德温」，label 才不会被截成省略号 */
+function shortName(name: string): string {
+  const first = name.trim().split(/\s+/)[0] ?? name;
+  return first.length > 0 ? first : name;
+}
+
+/**
+ * 反应窗口：每个可用的反应一个按钮，再加一个「不用」。权限不靠 QQ 的 specify_user_ids，
+ * 和「结束回合」一样在回调里比对点击者 openid：别人的按钮点了会被拒，提示也更明确。
+ */
+export function buildReactionKeyboard(p: PendingAttack): InlineKeyboard {
+  const options = p.reactors.map((r, i) => callbackButton(`dnd-react-${i}`, buttonLabel(`${shortName(r.character)}·${r.reaction}`), 1, encodeButtonData({ t: 'dnd', a: 'react', r: p.seq, i })));
+  // 挤在一行里名字会被截断 → 默认竖着排；QQ 键盘最多 5 行，选项太多才退回两列，宁可挤也别整条发不出去
+  const perRow = options.length + 1 > MAX_KEYBOARD_ROWS ? BUTTONS_PER_ROW : 1;
+  const rows: InlineKeyboard['content']['rows'] = [];
+  for (let i = 0; i < options.length; i += perRow) rows.push({ buttons: options.slice(i, i + perRow) });
+  rows.push({ buttons: [callbackButton('dnd-pass', '不用', 0, encodeButtonData({ t: 'dnd', a: 'pass', r: p.seq }))] });
+  return { content: { rows } };
 }
 
 export function buildCheckInKeyboard(): InlineKeyboard {
@@ -127,6 +150,8 @@ export class DndTurnButtons {
   private async flush(record: SessionRecord): Promise<void> {
     const found = this.service.active(record.sessionKey);
     if (found === undefined) return;
+    // 待结算期间回合按钮点了也推进不了，落账后会再排一次
+    if (found.campaign.initiative?.pending !== undefined) return;
     const pc = currentPc(found.campaign);
     if (pc === undefined) return;
     const mark = `${pc.round}:${pc.turn}:${pc.name}`;
@@ -141,6 +166,90 @@ export class DndTurnButtons {
       this.disabled = true;
       this.logger.warn(`im-qqbot: 跑团按钮发送失败，本次运行不再发按钮: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * 有一笔待结算：回复发完后发反应按钮，再开始计时。计时不看按钮能不能发：
+   * 按钮关着时玩家照样打字回应，时间到了也要提醒 DM 落账，否则这笔会一直挂着。
+   */
+  public scheduleReaction(record: SessionRecord): void {
+    void record.agent.whenIdle()
+      .catch(() => {})
+      .then(() => new Promise((resolve) => setTimeout(resolve, FLUSH_DELAY_MS)))
+      .then(() => this.openReactionWindow(record))
+      .catch((err: unknown) => this.logger.warn(`im-qqbot: 反应窗口失败: ${err instanceof Error ? err.message : String(err)}`));
+  }
+
+  private async openReactionWindow(record: SessionRecord): Promise<void> {
+    const p = this.service.active(record.sessionKey)?.campaign.initiative?.pending;
+    if (p === undefined) return;
+    if (!this.disabled && record.scope === 'group' && p.reactors.length > 0) {
+      const text = `⚡ ${p.attacker} 打 ${p.target}，还没结算。要用反应的点下面，只有本人点才算，也可以直接打字说。`
+        + `约 ${Math.round(REACTION_WINDOW_MS / 1000)} 秒没回算不用。`;
+      try {
+        await this.sender.sendMarkdown(record.replyTarget, text, { keyboard: buildReactionKeyboard(p) });
+      } catch (err) {
+        this.disabled = true;
+        this.logger.warn(`im-qqbot: 反应按钮发送失败，本次运行不再发按钮: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    const timer = setTimeout(() => this.reactionTimeout(record, p.seq), REACTION_WINDOW_MS);
+    timer.unref?.();
+  }
+
+  private reactionTimeout(record: SessionRecord, seq: number): void {
+    const p = this.service.active(record.sessionKey)?.campaign.initiative?.pending;
+    if (p === undefined || p.seq !== seq) return;
+    const waiting = waitingOn(p);
+    if (waiting.length === 0) return;
+    this.notifyDm(record, `[系统 · 反应窗口] 时间到，${waiting.join('、')} 没回，算不用。用 dnd_apply target=${p.target} settle=true 落账，再接着结算。`);
+  }
+
+  private notifyDm(record: SessionRecord, text: string): void {
+    record.agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' as const } }));
+  }
+
+  /** 反应按钮：点击者必须是那个角色的玩家。「不用」只算他自己，全员答复才叫醒 DM，免得每人点一下都触发一轮回复 */
+  private reactionClick(event: InteractionEvent, key: string, record: SessionRecord | undefined, button: { a: string; r?: number; i?: number }): number {
+    const p = this.service.active(key)?.campaign.initiative?.pending;
+    if (p === undefined || p.seq !== button.r) return ACK.duplicate;
+    const clicker = event.group_member_openid ?? event.user_openid;
+    const ownsReactor = (name: string): boolean => {
+      const ch = this.service.active(key)?.campaign.characters.find((x) => x.name === name);
+      return ch !== undefined && (ch.playerId === undefined || ch.playerId === clicker);
+    };
+    const answered = new Set([...p.declined, ...p.used.map((u) => u.by), ...p.claimed.map((o) => o.character)]);
+
+    if (button.a === 'pass') {
+      const mine = [...new Set(p.reactors.map((r) => r.character))].filter(ownsReactor);
+      if (mine.length === 0) return ACK.denied;
+      const fresh = mine.filter((name) => !answered.has(name));
+      if (fresh.length === 0) return ACK.duplicate;
+      const left = this.service.store.update(key, (c) => {
+        const pending = c.initiative?.pending;
+        if (pending === undefined) return undefined;
+        for (const name of fresh) if (!pending.declined.includes(name)) pending.declined.push(name);
+        return waitingOn(pending);
+      }, `按钮 不用反应 ${fresh.join('、')}`);
+      if (record !== undefined && left !== undefined && left.length === 0) {
+        this.notifyDm(record, `[系统 · 按钮] 反应都答复了，${fresh.join('、')} 不用。用 dnd_apply target=${p.target} settle=true 落账，再接着结算。`);
+      }
+      return ACK.ok;
+    }
+
+    const option = button.i === undefined ? undefined : p.reactors[button.i];
+    if (option === undefined) return ACK.failed;
+    if (!ownsReactor(option.character)) return ACK.denied;
+    if (answered.has(option.character)) return ACK.duplicate;
+    this.service.store.update(key, (c) => {
+      c.initiative?.pending?.claimed.push({ character: option.character, reaction: option.reaction });
+    }, `按钮 反应 ${option.character}·${option.reaction}`);
+    this.logger.info(`im-qqbot: 跑团反应按钮 key=${key} ${option.character}·${option.reaction} by=${clicker ?? '?'}`);
+    if (record !== undefined) {
+      this.notifyDm(record, `[系统 · 按钮] ${option.character} 的玩家本人点了用「${option.reaction}」。这是对「${p.attacker}→${p.target}」那笔的反应，不是新的回合行动：`
+        + `用 dnd_apply target=${p.target} reaction={by:"${option.character}", name:"${option.reaction}", ...} 改数值，不用 declared_by。`);
+    }
+    return ACK.ok;
   }
 
   /**
@@ -276,6 +385,7 @@ export class DndTurnButtons {
     if (button.a === 'in') return this.checkIn(event, key, record, found.campaign);
     if (button.a === 'go') return this.start(event, key, record, found.campaign);
     if (button.a === 'roster') return this.roster(key, record, found.campaign);
+    if (button.a === 'react' || button.a === 'pass') return this.reactionClick(event, key, record, button);
 
     if (button.a === 'status') {
       if (record !== undefined) {
@@ -291,6 +401,8 @@ export class DndTurnButtons {
     const ch = findCharacter(found.campaign, pc.name);
     const clicker = event.group_member_openid ?? event.user_openid;
     if (ch?.playerId !== undefined && ch.playerId !== clicker) return ACK.denied;
+    // 还有一笔没落账：现在推进就把窗口吃掉了
+    if (found.campaign.initiative?.pending !== undefined) return ACK.failed;
 
     const next = this.service.store.update(key, (c) => {
       const { round, current, newRound } = nextTurn(c);

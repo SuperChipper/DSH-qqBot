@@ -65,6 +65,8 @@ interface VisionWire {
 /** 在线语音识别（与 src/config.ts 的 AsrConfig 对应；apiKey 走环境变量/patch，不进表单） */
 interface AsrWire {
   enabled: boolean;
+  /** 'chat' = 订阅网关（忽略 baseUrl/apiKey/model），'openai' = /audio/transcriptions */
+  mode: string;
   baseUrl: string;
   model: string;
   preferQQ: boolean;
@@ -177,12 +179,6 @@ interface ReplyDesireWire {
   judge: ReplyJudgeWire;
 }
 
-/** 串模式（与 src/config.ts 的 BanterConfig 对应） */
-interface BanterWire {
-  enabled: boolean;
-  groups: string[];
-}
-
 const REPLY_JUDGE_DEFAULTS: ReplyJudgeWire = {
   enabled: false, provider: '', model: '', reasoningEffort: '',
   debounceMs: 2500, maxWaitMs: 15000, contextMessages: 20, timeoutMs: 15000,
@@ -230,7 +226,6 @@ type ConfigWire = {
   browser?: BrowserConfig;
   dnd?: DndWire;
   replyDesire?: ReplyDesireWire;
-  banter?: BanterWire;
   cwd?: string;
 };
 
@@ -458,15 +453,24 @@ function SegmentedRow({ label, help, value, options, onChange }: {
 
 type AccessMode = AccessControlWire['c2cMode'];
 
+/** 通用下拉（label + select，help 可选） */
+function SelectRow({ label, help, value, options, onChange }: {
+  label: string; help?: string; value: string; options: Array<{ value: string; label: string }>;
+  onChange: (value: string) => void;
+}): ReactNode {
+  return createElement('div', { className: 'imqb2-field' },
+    createElement('span', { className: 'imqb2-label' }, label),
+    createElement('select', { value, onChange: (e: ChangeEvent<HTMLSelectElement>) => { onChange(e.target.value); } },
+      options.map((o) => createElement('option', { key: o.value, value: o.value }, o.label))),
+    help === undefined ? null : createElement('p', { className: 'imqb2-hint' }, help),
+  );
+}
+
 function BrowserSelectRow({ label, value, options, onChange }: {
   label: string; value: string; options: Array<{ value: string; label: string }>;
   onChange: (value: string) => void;
 }): ReactNode {
-  return createElement('label', { className: 'imqb2-field' },
-    createElement('span', { className: 'imqb2-label' }, label),
-    createElement('select', { value, onChange: (e: ChangeEvent<HTMLSelectElement>) => { onChange(e.target.value); } },
-      options.map((o) => createElement('option', { key: o.value, value: o.value }, o.label))),
-  );
+  return SelectRow({ label, value, options, onChange });
 }
 
 const MODE_OPTIONS: ReadonlyArray<{ value: AccessMode; label: string }> = [
@@ -567,10 +571,6 @@ export function ConfigPanel(): ReactNode {
       const r = changed.replyDesire as ReplyDesireWire;
       changed.replyDesire = { ...r, names: r.names.map((v) => v.trim()).filter(Boolean) };
     }
-    if (changed.banter !== undefined) {
-      const b = changed.banter as BanterWire;
-      changed.banter = { ...b, groups: b.groups.map((v) => v.trim()).filter(Boolean) };
-    }
 
     setBusy(true);
     void fetch(BIND_CONFIG_PATH, {
@@ -610,7 +610,7 @@ export function ConfigPanel(): ReactNode {
     defaultPrompt: 'Describe this image in detail.', maxBytes: 10 * 1024 * 1024, maxTokens: 1024, timeoutMs: 120000,
   };
   const asr: AsrWire = form.asr ?? {
-    enabled: false, baseUrl: 'https://api.siliconflow.cn/v1',
+    enabled: false, mode: 'chat', baseUrl: 'https://api.siliconflow.cn/v1',
     model: 'Qwen/Qwen3-ASR-1.7B', preferQQ: true, timeoutMs: 30000,
   };
   // 旧配置没有 fallback 组时按默认值显示
@@ -651,7 +651,6 @@ export function ConfigPanel(): ReactNode {
   const patchJudge = (next: Partial<ReplyJudgeWire>): void => {
     patch('replyDesire', { ...replyDesire, judge: { ...judge, ...next } });
   };
-  const banter: BanterWire = form.banter ?? { enabled: false, groups: [] };
 
   return createElement('form', { className: 'imqb2-form', onSubmit: submit },
     createElement('div', { className: 'imqb2-group-title' }, '服务范围'),
@@ -804,7 +803,7 @@ export function ConfigPanel(): ReactNode {
     }),
     createElement(NumberRow, {
       label: '对话窗口时长（毫秒）', value: replyDesire.engagedMs, min: 5000, max: 600000, step: 5000,
-      help: '被 @ 或接话后开窗；窗口内刚聊过的人再说话基本都会被接，默认 90000（90 秒）',
+      help: '被 @ 或接话后开窗；没开模型打分时，窗口内刚聊过的人再说话基本都会被接，默认 90000（90 秒）',
       onChange: (v) => { patch('replyDesire', { ...replyDesire, engagedMs: v }); },
     }),
     createElement(NumberRow, {
@@ -814,7 +813,7 @@ export function ConfigPanel(): ReactNode {
     }),
     createElement(SwitchRow, {
       label: '规则拿不准时让模型打分', checked: judge.enabled,
-      help: '没点名、不在对话窗口的普通文字，交给模型判断要不要接；语气词、表情包、开团期间不调模型',
+      help: '没点名的普通文字交给模型判断要不要接，打开后文字不再靠对话窗口直接放行；语气词、表情包、开团期间不调模型',
       onChange: (v) => { patchJudge({ enabled: v }); },
     }),
     ...(judge.enabled ? [
@@ -852,20 +851,6 @@ export function ConfigPanel(): ReactNode {
         onChange: (v) => { patchJudge({ timeoutMs: v }); },
       }),
     ] : []),
-
-    createElement('div', { className: 'imqb2-group-title' }, '串模式'),
-    createElement(SwitchRow, {
-      label: '启用群聊串模式', checked: banter.enabled,
-      help: replyDesire.enabled && judge.enabled
-        ? '只在下面列出的群生效；私聊和开团期间不生效'
-        : '要主动接话，还需打开上面的「未 @ 时按打分决定是否接话」和「规则拿不准时让模型打分」；否则只改变被 @ 时的语气',
-      onChange: (v) => { patch('banter', { ...banter, enabled: v }); },
-    }),
-    createElement(ListRow, {
-      label: '开启串模式的群 openid', help: '每行一个',
-      value: banter.groups, rows: 2,
-      onChange: (v) => { patch('banter', { ...banter, groups: v }); },
-    }),
 
     createElement('div', { className: 'imqb2-group-title' }, '表情收藏'),
     createElement(SwitchRow, {
@@ -998,17 +983,26 @@ export function ConfigPanel(): ReactNode {
     createElement('div', { className: 'imqb2-group-title' }, '语音识别'),
     createElement(SwitchRow, {
       label: '启用在线语音识别', checked: asr.enabled,
-      help: 'QQ 没给识别文本时，把语音发给转写接口；密钥请用环境变量 QQBOT_ASR_API_KEY 或 patch 配置',
+      help: 'QQ 没给识别文本时，把语音转成文字（chat 模式不需要额外密钥，走订阅网关）',
       onChange: (v) => { patch('asr', { ...asr, enabled: v }); },
     }),
-    createElement(FieldRow, {
+    createElement(SelectRow, {
+      label: '转写协议', value: asr.mode,
+      options: [
+        { value: 'chat', label: '订阅网关（chat）' },
+        { value: 'openai', label: '音频接口（openai）' },
+      ],
+      help: 'chat 用 opencode-go 的 mimo，端点与密钥取自 QQBOT_TRANSCRIBE_* 环境变量；openai 才用下面的地址和模型（密钥 QQBOT_ASR_API_KEY）',
+      onChange: (v) => { patch('asr', { ...asr, mode: v }); },
+    }),
+    asr.mode === 'openai' ? createElement(FieldRow, {
       label: '接口地址', value: asr.baseUrl, placeholder: 'https://api.siliconflow.cn/v1',
       onChange: (v) => { patch('asr', { ...asr, baseUrl: v }); },
-    }),
-    createElement(FieldRow, {
+    }) : null,
+    asr.mode === 'openai' ? createElement(FieldRow, {
       label: '转写模型', value: asr.model, placeholder: 'Qwen/Qwen3-ASR-1.7B',
       onChange: (v) => { patch('asr', { ...asr, model: v }); },
-    }),
+    }) : null,
     createElement(SwitchRow, {
       label: '优先用 QQ 自带识别文本', checked: asr.preferQQ,
       onChange: (v) => { patch('asr', { ...asr, preferQQ: v }); },

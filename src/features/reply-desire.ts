@@ -91,9 +91,9 @@ export const STICKER_REACT_MS = 30_000;
 export const STICKER_COOLDOWN_MS = 5 * 60_000;
 /** 复读判定：连续几条同一张表情包（含当前） */
 const CHAIN_LENGTH = 3;
-/** 串模式：连续主动接同一个人几次后停手 */
+/** 靠模型打分连续主动接同一个人几次后停手 */
 export const BANTER_MAX_STREAK = 2;
-/** 串模式：隔多久不算连续 */
+/** 隔多久不算连续 */
 export const BANTER_STREAK_RESET_MS = 10 * 60_000;
 const RECENT_LIMIT = 5;
 /** 给模型打分看的 bot 最近几句话（群记忆只记群友说的，不记 bot 自己的） */
@@ -244,7 +244,7 @@ interface GroupReplyState {
   stickerReplyAt?: number;
   /** bot 最近说的话 */
   botLines: Array<{ text: string; timestamp: number }>;
-  /** 串模式下 bot 连续主动接的那个人 */
+  /** bot 靠模型打分连续主动接的那个人 */
   banterStreak?: { senderId: string; count: number; at: number };
 }
 
@@ -353,7 +353,7 @@ export class EngagementTracker {
     else state.stickerAnswered.add(senderId);
   }
 
-  /** 串模式放行了一条：接的还是同一个人就累加，换人或隔太久重新算 */
+  /** 模型打分放行了一条：接的还是同一个人就累加，换人或隔太久重新算 */
   public noteBanter(groupId: string, senderId: string, now: number): void {
     const state = this.group(groupId);
     const streak = state.banterStreak;
@@ -361,7 +361,7 @@ export class EngagementTracker {
     state.banterStreak = { senderId, count: continued ? streak.count + 1 : 1, at: now };
   }
 
-  /** 这个人已经被连续接到上限（串模式不走对话窗口，轮数上限管不到这里） */
+  /** 这个人已经被连续接到上限（打分放行的文字不走对话窗口，轮数上限管不到这里） */
   public banterCapped(groupId: string, senderId: string, now: number): boolean {
     const streak = this.groups.get(groupId)?.banterStreak;
     return streak !== undefined && streak.senderId === senderId

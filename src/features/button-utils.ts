@@ -35,12 +35,16 @@ export interface ApprovalButtonData {
   n: string;
 }
 
-/** 跑团按钮：a=动作（end 结束回合 / status 查看状态 / in 签到 / go 开场 / roster 发名单），n=角色名，r=轮次（防止点到过期的旧按钮） */
+/**
+ * 跑团按钮：a=动作（end 结束回合 / status 查看状态 / in 签到 / go 开场 / roster 发名单 / react 用反应 / pass 不用反应），
+ * n=角色名，r=轮次，react/pass 时是待结算序号（防止点到过期的旧按钮），i=待结算名单里的下标
+ */
 export interface DndButtonData {
   t: 'dnd';
-  a: 'end' | 'status' | 'in' | 'go' | 'roster';
+  a: 'end' | 'status' | 'in' | 'go' | 'roster' | 'react' | 'pass';
   n?: string;
   r?: number;
+  i?: number;
 }
 
 /** 终端白名单确认按钮：p=待确认申请 id，d=决策（只认主人点击） */
@@ -56,7 +60,15 @@ export interface BrowserAccessButtonData {
   d: 'allow' | 'deny';
 }
 
-export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData | AccessButtonData | BrowserAccessButtonData;
+/** 人设卡片按钮：a=动作（use 切换 / page 翻页），p=人设 id，n=页码 */
+export interface PersonaButtonData {
+  t: 'persona';
+  a: 'use' | 'page';
+  p?: string;
+  n?: number;
+}
+
+export type ButtonData = QuestionButtonData | ApprovalButtonData | DndButtonData | AccessButtonData | BrowserAccessButtonData | PersonaButtonData;
 
 /** 编码 button_data（JSON 字符串） */
 export function encodeButtonData(data: ButtonData): string {
@@ -67,7 +79,7 @@ export function encodeButtonData(data: ButtonData): string {
 export function decodeButtonData(raw: string): ButtonData | undefined {
   try {
     const parsed = JSON.parse(raw) as Partial<ButtonData>;
-    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd' || parsed.t === 'access' || parsed.t === 'browser-access')) {
+    if (parsed !== null && typeof parsed === 'object' && (parsed.t === 'question' || parsed.t === 'approval' || parsed.t === 'dnd' || parsed.t === 'access' || parsed.t === 'browser-access' || parsed.t === 'persona')) {
       return parsed as ButtonData;
     }
   } catch {

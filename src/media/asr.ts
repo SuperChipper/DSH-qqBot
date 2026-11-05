@@ -1,12 +1,17 @@
 /**
  * 在线语音识别 — 把 QQ 语音转成文本，供纯文本模型理解。
  *
- * 走 OpenAI 兼容的 POST {baseUrl}/audio/transcriptions（multipart: file + model），
- * SiliconFlow / Groq / OpenAI / 自建 whisper 服务均可直接换用；可再配一个备用接口（如本机 whisper 优先、在线兜底）。
+ * 两种协议（`asr.mode`）：
+ * - `chat`（默认）：POST {baseUrl}/chat/completions + input_audio，端点/凭证取自 `QQBOT_TRANSCRIBE_*`，
+ *   默认是 opencode-go 的 mimo-v2.6-flash。订阅额度覆盖，不需要单独的 ASR key，本机 whisper 已退役。
+ * - `openai`：POST {baseUrl}/audio/transcriptions（multipart: file + model），
+ *   SiliconFlow / Groq / OpenAI / 自建 whisper 服务都能直接换用。
+ * 两种都能再配一个 `fallback`，主接口连不上或 5xx 时改走它。
  *
  * 音频来源：优先 QQ 网关给的 voice_wav_url（已是 WAV），否则下载 url 的 SILK 并用 silk-wasm 解码成 WAV。
  */
 import { decode, isSilk, isWav } from 'silk-wasm';
+import { chatEndpointFromEnv, transcribeViaChat } from './chat-gateway.ts';
 import type { AsrConfig } from '../config.ts';
 import type { Logger, RawAttachment } from '../types.ts';
 import { fetchSafe } from '../transport/attachment.ts';
@@ -63,11 +68,26 @@ export class AsrOfflineError extends Error {
   }
 }
 
-/** 服务离线时给模型的说明：明确拒绝，不让它自己找别的办法转写 */
+/**
+ * 服务不可用时给模型的说明：明确拒绝，不让它自己找别的办法转写。
+ * （本机 whisper 2026-11 已退役，默认走 chat 网关，这条只在两种协议都不可用时出现。）
+ */
 export const ASR_OFFLINE_HINT =
-  'speech recognition is unavailable: the ASR server is offline. Tell the user, and ask the bot owner '
-  + 'to start the whisper server. Do not try to transcribe the audio any other way '
-  + '(no ffmpeg/whisper scripts, no other services).';
+  'speech recognition is unavailable right now. Tell the user, and do not try to transcribe the audio '
+  + 'any other way (no ffmpeg/whisper scripts, no third-party services). They can retry later, or hand '
+  + 'over a local file path so qqbot_transcribe can read it directly.';
+
+/** 语音消息和视频音轨的转写指令：只要文字，别加时间轴和说话人标签 */
+const SPEECH_PROMPT = '把这通语音转成文字。只输出说话内容本身，不要时间轴、不要说话人标签、不要分析过程。';
+
+/** chat 协议只吃 wav / mp3；SILK 解码和 QQ 的 voice_wav_url 都会落到 wav */
+function chatFormatOf(name: string): 'wav' | 'mp3' {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.mp3')) return 'mp3';
+  if (lower.endsWith('.wav')) return 'wav';
+  throw new Error(`chat 转写只支持 wav/mp3，这次拿到的是 ${name}；这种格式请用 qqbot_transcribe`);
+}
+
 
 /** 连接层错误码（undici 把它们挂在 TypeError('fetch failed').cause 上） */
 const OFFLINE_CODES = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'EHOSTUNREACH', 'UND_ERR_CONNECT_TIMEOUT']);
@@ -129,15 +149,34 @@ async function postTranscription(audio: { data: Buffer; name: string }, endpoint
 }
 
 /**
- * 转写：先走主接口，连不上或 5xx 且配了备用接口时改走备用接口。
- * 超时不切换：本机服务处理长音频本来就慢，再把整段音频发去在线服务只会更久。
- * 两边都连不上时抛备用接口的 AsrOfflineError。
+ * 转写：`chat` 协议走订阅网关，`openai` 协议走 /audio/transcriptions（原有行为）。
+ * 两种协议都在连不上或 5xx 时改走 `fallback`（fallback 永远是 openai 协议）。
+ * 超时不切换：长音频本来就要时间，再发一遍只会更久。
  */
 export async function requestTranscription(
   audio: { data: Buffer; name: string },
   asr: AsrConfig,
   logger?: Logger,
 ): Promise<string> {
+  if (asr.mode === 'chat') {
+    const endpoint = chatEndpointFromEnv();
+    try {
+      return await transcribeViaChat(audio.data, chatFormatOf(audio.name), {
+        prompt: SPEECH_PROMPT,
+        endpoint,
+        timeoutMs: asr.timeoutMs,
+        logger,
+      });
+    } catch (err) {
+      if (isConnectionError(err)) throw new AsrOfflineError(endpoint.baseUrl, err);
+      const fallback = asr.fallback;
+      if (fallback?.enabled !== true) throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      logger?.info(`im-qqbot: ASR chat 网关不可用（${reason}），改用备用接口 ${fallback.baseUrl}`);
+      return postTranscription(audio, fallback);
+    }
+  }
+
   try {
     return await postTranscription(audio, asr);
   } catch (err) {

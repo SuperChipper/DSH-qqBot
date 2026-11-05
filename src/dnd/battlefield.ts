@@ -15,6 +15,7 @@ import {
   findCharacter,
   isOut,
   isRangedWeapon,
+  reactionsOf,
   requireCharacter,
   requireInitiative,
   roomOf,
@@ -42,7 +43,7 @@ function isHostile(a: Character, b: Character): boolean {
   return (a.kind === 'monster') !== (b.kind === 'monster');
 }
 
-function canReact(ch: Character): boolean {
+export function canReact(ch: Character): boolean {
   return !isOut(ch) && ch.hp > 0 && !ch.conditions.some((cond) => CANNOT_REACT.includes(cond));
 }
 
@@ -140,6 +141,8 @@ export interface MoveResult {
   speed: number;
   /** 这一步离开了谁的触及范围 */
   provokes: string[];
+  /** 这一步「进入」了谁的长柄触及范围（长柄大师这类反向触发） */
+  enters: Array<{ name: string; reach: number; reaction: string }>;
   notes: string[];
 }
 
@@ -187,6 +190,7 @@ export function moveOnGrid(c: Campaign, name: string, request: MoveRequest): Mov
 
   const path = straightPath(from, dest);
   const provokes: string[] = [];
+  const enters: Array<{ name: string; reach: number; reaction: string }> = [];
   for (const { ch: other, cell } of placedIn(c, from.room)) {
     if (other.name === ch.name || !isHostile(ch, other) || !canReact(other)) continue;
     const leaves = path.some((step, i) => {
@@ -194,6 +198,16 @@ export function moveOnGrid(c: Campaign, name: string, request: MoveRequest): Mov
       return next !== undefined && distanceFeet(step, cell) <= MELEE_REACH_FEET && distanceFeet(next, cell) > MELEE_REACH_FEET;
     });
     if (leaves) provokes.push(other.name);
+    // 长柄大师：拿着长柄武器时，敌人「进入」触及范围也吃借机——方向反着算，一回合至多一次
+    for (const r of reactionsOf(other)) {
+      if (r.enter !== true) continue;
+      const reach = r.range ?? MELEE_REACH_FEET;
+      const steppedIn = path.some((step, i) => {
+        const next = path[i + 1];
+        return next !== undefined && distanceFeet(step, cell) > reach && distanceFeet(next, cell) <= reach;
+      });
+      if (steppedIn) enters.push({ name: other.name, reach, reaction: r.name });
+    }
   }
 
   const feet = distanceFeet(from, dest);
@@ -207,7 +221,7 @@ export function moveOnGrid(c: Campaign, name: string, request: MoveRequest): Mov
   if (ch.conditions.includes('倒地')) notes.push(`${ch.name} 还倒地：爬行每尺算两尺；站起来花一半速度，再 dnd_apply 解除倒地`);
   const stuck = ch.conditions.filter((cond) => ['擒抱', '束缚', '麻痹', '石化', '昏迷'].includes(cond));
   if (stuck.length > 0) notes.push(`${ch.name} 处于${stuck.join('、')}，速度应为 0`);
-  return { name: ch.name, from, to, feet, totalFeet: moved[ch.name] ?? 0, speed: ch.speed ?? DEFAULT_SPEED, provokes, notes };
+  return { name: ch.name, from, to, feet, totalFeet: moved[ch.name] ?? 0, speed: ch.speed ?? DEFAULT_SPEED, provokes, enters, notes };
 }
 
 export function moveResultText(r: MoveResult): string {
@@ -215,6 +229,9 @@ export function moveResultText(r: MoveResult): string {
   if (r.totalFeet > r.speed) lines.push(`【DM】超过速度 ${r.speed}：只有冲刺之类才够，不合法就 dnd_undo。`);
   if (r.provokes.length > 0) {
     lines.push(`【DM】离开了 ${r.provokes.join('、')} 的触及范围：他们可以借机（撤离动作除外；一回合一次反应，5 尺以外的长触及这里没算）。`);
+  }
+  if (r.enters.length > 0) {
+    lines.push(`【DM】进入 ${r.enters.map((e) => `${e.name} 的 ${e.reach} 尺触及（${e.reaction}）`).join('、')}：可以借机，用 dnd_check ... reaction=true 结算。`);
   }
   lines.push(...r.notes.map((n) => `【DM】${n}`));
   return lines.join('\n');

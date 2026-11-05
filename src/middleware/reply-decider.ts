@@ -26,7 +26,6 @@ import {
 } from '../features/reply-desire.ts';
 import type { JudgeLine, JudgeQueue, ReplyJudge } from '../features/reply-judge.ts';
 import { readRecentGroupMessages } from '../features/group-memory.ts';
-import { isBanterGroup } from '../features/banter.ts';
 
 interface MentionState {
   wasMentioned: boolean;
@@ -78,8 +77,11 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
     const dnd = manager.dndService?.active(manager.sessionKey('group', groupId)) !== undefined;
     const mention = ctx.state.mention as MentionState | undefined;
     const queue = judgeDeps?.queue;
+    const persona = manager.personaStore?.current(groupId);
+    // 换了人设，群里叫 bot 的称呼也跟着换；人设没写就沿用配置
+    const names = persona !== undefined && persona.names.length > 0 ? persona.names : rd.names;
     // 没有模型打分时不改门控：窗口一关又没有 judge，这个群就只剩 @ 才回了
-    const banter = !dnd && judgeDeps !== undefined && isBanterGroup(config, groupId);
+    const judged = !dnd && judgeDeps !== undefined;
 
     const answer = async (result: DesireResult): Promise<void> => {
       queue?.cancel(groupId);
@@ -114,9 +116,9 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
       attachments,
       senderId: msg.senderId,
       mentionsOthers: Array.isArray(mentions) && mentions.some((m) => m?.is_you !== true),
-      names: rd.names,
-      // 串模式的文字不吃窗口加分：窗口内规则直接放行，既跳过防抖变成秒回，也会追着一个人连着接
-      engagement: dnd || (banter && stickerId === undefined) ? undefined : tracker.get(groupId, now),
+      names,
+      // 文字不吃窗口加分：窗口内规则直接放行，既跳过防抖变成秒回，也会追着一个人连着接
+      engagement: dnd || (judged && stickerId === undefined) ? undefined : tracker.get(groupId, now),
       recent: tracker.recent(groupId),
       sinceBotSpoke: tracker.sinceBotSpoke(groupId, now),
       stickerAnswered: tracker.stickerAnswered(groupId, msg.senderId),
@@ -132,7 +134,7 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
     }
 
     if (judgeDeps === undefined || dnd || !isJudgeCandidate(text, result)
-      || (banter && tracker.banterCapped(groupId, msg.senderId, now))) {
+      || tracker.banterCapped(groupId, msg.senderId, now)) {
       queue?.activity(groupId, now);
       if (config.debug) {
         logger.debug(`reply-desire: skip score=${result.score.toFixed(2)} [${result.reasons.join(',')}]`);
@@ -157,17 +159,16 @@ export function replyDecider(config: ImQQBotConfig, manager: SessionManager, log
     const desire = await judgeDeps.judge.score({
       provider,
       model,
-      names: rd.names,
-      persona: config.groupPrompt,
+      names,
+      persona: persona?.prompt ?? config.groupPrompt,
       lines: judgeLines(config, groupId, msg.messageId),
-      banter,
     });
     if (desire === undefined || desire < rd.threshold) {
       logger.info(`reply-desire: judge skip group=${groupId} desire=${desire?.toFixed(2) ?? 'n/a'}`);
       ctx.stop('reply-desire:judge-low');
       return;
     }
-    if (banter) tracker.noteBanter(groupId, msg.senderId, Date.now());
+    tracker.noteBanter(groupId, msg.senderId, Date.now());
     await answer({ score: desire, reasons: [...result.reasons, 'judge'] });
   };
 }

@@ -2,7 +2,7 @@
  * 持久化群记忆（借鉴 dsh-pet：把群聊沉淀到磁盘 JSONL，重启后可回灌长期上下文）
  * 路径：~/.dsh/qqbot-memory/<appId>-<groupId>.jsonl
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -42,7 +42,7 @@ export function appendGroupMessage(appId: string, groupId: string, entry: GroupM
 }
 
 /** 读取全部群记忆（坏行跳过，读失败返回空） */
-function readAllGroupMessages(appId: string, groupId: string): GroupMemoryEntry[] {
+export function readAllGroupMessages(appId: string, groupId: string): GroupMemoryEntry[] {
   try {
     const p = memoryPath(appId, groupId);
     if (!existsSync(p)) return [];
@@ -125,5 +125,23 @@ export function writeHistoryCursor(appId: string, groupId: string, cursor: Group
     writeFileSync(p, JSON.stringify(cursor), 'utf8');
   } catch {
     /* ignore */
+  }
+}
+
+/**
+ * 列出这个 appId 下所有有记忆文件的会话 id。
+ * 只用于「检索时不给会话就是全量搜」——文件名里除了会话 id 没有别的元信息，
+ * 群/私聊的区别只有调用方知道（见 history-tool 的 chat 参数）。
+ */
+export function listMemoryChats(appId: string): string[] {
+  try {
+    const dir = resolve(homedir(), '.dsh', 'qqbot-memory');
+    if (!existsSync(dir)) return [];
+    const prefix = `${sanitize(appId)}-`;
+    return readdirSync(dir)
+      .filter((f) => f.startsWith(prefix) && f.endsWith('.jsonl'))
+      .map((f) => f.slice(prefix.length, -'.jsonl'.length));
+  } catch {
+    return [];
   }
 }

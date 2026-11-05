@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { EngagementTracker, classifyMessage, scoreReplyDesire, type DesireInput } from './reply-desire.ts';
+import { BANTER_STREAK_RESET_MS, EngagementTracker, classifyMessage, scoreReplyDesire, type DesireInput } from './reply-desire.ts';
 
 const base: DesireInput = { content: '', senderId: 'u1', mentionsOthers: false, names: ['小d', 'Dsh'] };
 
@@ -108,6 +108,22 @@ describe('scoreReplyDesire 表情包', () => {
 });
 
 describe('EngagementTracker', () => {
+  it('连续主动接同一个人到上限后停手，换人或隔太久重新算', () => {
+    const tracker = new EngagementTracker();
+    tracker.noteBanter('g', 'u1', 0);
+    expect(tracker.banterCapped('g', 'u1', 0)).toBe(false);
+    tracker.noteBanter('g', 'u1', 1);
+    expect(tracker.banterCapped('g', 'u1', 1)).toBe(true);
+    expect(tracker.banterCapped('g', 'u2', 1)).toBe(false);
+    expect(tracker.banterCapped('g', 'u1', 2 + BANTER_STREAK_RESET_MS)).toBe(false);
+
+    tracker.noteBanter('g', 'u2', 2);
+    expect(tracker.banterCapped('g', 'u1', 2)).toBe(false);
+
+    tracker.noteBanter('g', 'u2', 3 + BANTER_STREAK_RESET_MS);
+    expect(tracker.banterCapped('g', 'u2', 3 + BANTER_STREAK_RESET_MS)).toBe(false);
+  });
+
   it('窗口过期即清除，touch 只续已开的窗口但总会记下 bot 说话时间', () => {
     const t = new EngagementTracker();
     t.touch('g', 0, 100);

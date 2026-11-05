@@ -76,8 +76,8 @@
 | 工具 | 作用 |
 |------|------|
 | `dnd_roll` | 任意骰子表达式（`2d6+3`、`4d6kh3`…） |
-| `dnd_check` | 技能/属性检定、豁免、攻击、死亡豁免；隐藏 DC/AC；武器、法术攻击、额外骰（引导术/激励）、消耗资源，命中后自动扣血 |
-| `dnd_apply` | 伤害（带伤害类型/重击）、治疗、临时 HP、状态 |
+| `dnd_check` | 技能/属性检定、豁免、攻击、死亡豁免；隐藏 DC/AC；武器、法术攻击、额外骰（引导术/激励）、消耗资源，命中后自动扣血；有人能反应时攻击只掷骰、先挂成待结算，留出反应窗口 |
+| `dnd_apply` | 伤害（带伤害类型/重击）、治疗、临时 HP、状态；给待结算的攻击改数值（尖刻言语、护盾术、导引打击）并落账 |
 | `dnd_character` | 建卡/改卡（玩家绑定、武器、生命骰、物品金币）；`srd=goblin count=3` 从 SRD 取真实数值临时加怪 |
 | `dnd_resource` | 法术位、圣疗池、诗人激励、职业特性次数 |
 | `dnd_rest` | 短休（工具掷生命骰回血）/ 长休 |
@@ -131,8 +131,9 @@
 
 - **图文同发**：`qqbot_send_file` 新增 `caption`，文字和图片/视频/文件作为同一条富媒体消息发出；模型误写的 `<qqbot_send_file>` 文本标签会被剥离。
 - **原生读图**：新增 pi-ai 路由 `deepseek-native`（`deepseek-flash`，text + image）和 `vision.native`，图片作为 `ImageBlock` 直接交给主模型；`qqbot_describe_image` 保留给 OCR、图表、长截图。已有会话需要 `/new` 或 `/model` 切换后才生效。
-- **语音识别**：`asr.enabled` 开启后，QQ 没给识别文本的语音会下载（SILK 用 silk-wasm 解码为 WAV）并调用 OpenAI 兼容的 `/audio/transcriptions`，默认 SiliconFlow SenseVoice；换 Groq / OpenAI 只需改 `baseUrl` 和 `model`。
-- **视频理解**：`qqbot_describe_video` 用 ffmpeg 在视频前 `video.maxSeconds` 秒均匀抽帧（约 2 秒一帧，最多 `video.maxFrames`），拼成一张宫格图交给视觉模型，同时把音轨交给 `asr` 转写，合成「画面 + 语音」文本。需要 vision 已配置且能找到 ffmpeg/ffprobe，否则不注册。
+- **语音识别**：`asr.enabled` 开启后，QQ 没给识别文本的语音会下载（SILK 用 silk-wasm 解码为 WAV）再转写。`asr.mode` 选协议：`chat`（默认）走 `chat/completions` + `input_audio`，端点和凭证取自 `QQBOT_TRANSCRIBE_*`，默认 opencode-go 的 mimo，不需要单独 ASR 密钥；`openai` 走 `/audio/transcriptions`（multipart），任何 OpenAI 兼容服务都行，换 Groq / SenseVoice 只改 `baseUrl` 和 `model`。`asr.fallback` 永远是 openai 协议，两种模式都能用。
+- **视频理解**：`qqbot_describe_video` 优先把整段视频经 `video_url` + data URI 交给 `deepseek-v4.1-flash` 自己看（文件超过 15MB 先用 ffmpeg 压到 480p）；压缩后仍超限才退回「均匀抽帧 + 宫格」的老路径。音轨整段抽成 48kbps mp3 单独转写，最后合成「画面 + 语音」文本。返回里的 `mode` 说明这次走的是 `video` 还是 `frames`。需要 vision 已配置且能找到 ffmpeg/ffprobe，否则不注册。
+- **音频转写**：`qqbot_transcribe` 把音频/视频里的人声转成带时间轴的说话人分段文字（`12.50-18.20 | SPEAKER_01: ...`）。不走 `asr` 配置：本地 ffmpeg 抽成 48 kbps 单声道 mp3，交给能吃音频的模型（默认 OpenCode go 的 `mimo-v2.6-flash`），超过 10 分钟自动切片。`QQBOT_TRANSCRIBE_BASE_URL` / `QQBOT_TRANSCRIBE_MODEL` / `QQBOT_TRANSCRIBE_KEY_REF` 换端点和模型，密钥从凭证库解析。本机 whisper 挂掉时它就是唯一的路；只想看画面、或要「画面 + 语音」一起描述仍用 `qqbot_describe_video`。
 - **合并转发里的图片**：QQ 不把聊天记录里的图片放进附件，只在展开的文本里留一行带 URL 的 `[附件n] 类型:图片 …`（URL 过期后就打不开）。现在会把这些图片提取出来下载到 media（每条消息最多 8 张），文本改写成 `[图片#n: 本地路径]`，编号接在历史图片之后；开了 `vision.native` 时直接作为原生图片交给主模型，并附一句提示说明哪些已下载、哪些只剩 URL。
 
 ## 🔧 工具

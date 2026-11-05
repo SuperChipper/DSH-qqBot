@@ -82,9 +82,22 @@ export interface VideoConfig {
   maxSeconds: number;
 }
 
+/** 语音识别的两种协议 */
+export type AsrMode =
+  /** POST {baseUrl}/chat/completions + input_audio：能吃订阅制网关（默认 opencode-go 的 mimo），不需要单独 ASR key */
+  | 'chat'
+  /** POST {baseUrl}/audio/transcriptions（multipart）：任何 OpenAI 兼容 ASR 服务 */
+  | 'openai';
+
 export interface AsrConfig {
   /** 是否启用在线语音识别（QQ 未给出识别文本时转写语音） */
   enabled: boolean;
+  /**
+   * 走哪种协议。`chat` 时 baseUrl / apiKey / model 不参与，端点和凭证取自
+   * `QQBOT_TRANSCRIBE_*` 环境变量（默认 opencode-go 的 mimo，凭证 ref 是 OPENCODE_GO_API_KEY）。
+   * `fallback` 始终按 openai 协议走。
+   */
+  mode: AsrMode;
   /** OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions） */
   baseUrl: string;
   /** 接口密钥（空 = 环境变量 QQBOT_ASR_API_KEY） */
@@ -237,14 +250,6 @@ export interface ReplyDesireConfig {
   judge: ReplyJudgeConfig;
 }
 
-/** 群聊串模式 */
-export interface BanterConfig {
-  /** 总开关；关掉时保留群列表 */
-  enabled: boolean;
-  /** 开启串模式的群 openid；不在列表里的群不受影响 */
-  groups: string[];
-}
-
 /** 笔记语义检索（向量相似度，作为 RRF 第三路） */
 export interface NotesSemanticConfig {
   /** 是否启用；关闭时只用 BM25 + 字面精确匹配 */
@@ -307,8 +312,6 @@ export interface ImQQBotConfig {
   groupReplyProbability?: number;
   /** 群聊回复欲望门控（规则打分 + 对话窗口） */
   replyDesire: ReplyDesireConfig;
-  /** 群聊串模式（按群开启） */
-  banter: BanterConfig;
   /** 群聊额外 system prompt */
   groupPrompt?: string;
   /** 私聊额外 system prompt */
@@ -506,12 +509,6 @@ export const ReplyDesireSchema: Schema<ReplyDesireConfig> = Schema.object({
   judge: ReplyJudgeSchema.description('模型打分'),
 });
 
-/** 串模式子 Schema */
-export const BanterSchema: Schema<BanterConfig> = Schema.object({
-  enabled: Schema.boolean().default(false).description('是否启用群聊串模式'),
-  groups: Schema.array(Schema.string()).default([]).description('开启串模式的群 openid'),
-});
-
 /** 富媒体理解子 Schema（独立导出：config 面板的服务端校验复用） */
 export const MediaSchema: Schema<MediaConfig> = Schema.object({
   enabled: Schema.boolean().default(true).description('是否启用富媒体理解（图片/视频下载 + 工具分析）'),
@@ -558,6 +555,10 @@ export const AsrFallbackSchema: Schema<AsrFallbackConfig> = Schema.object({
 
 export const AsrSchema: Schema<AsrConfig> = Schema.object({
   enabled: Schema.boolean().default(false).description('是否启用在线语音识别（QQ 未给出识别文本时转写语音）'),
+  mode: Schema.union([
+    Schema.const('chat').description('chat/completions + input_audio（订阅制网关，默认 opencode-go 的 mimo）'),
+    Schema.const('openai').description('POST {baseUrl}/audio/transcriptions（任何 OpenAI 兼容 ASR 服务）'),
+  ]).default('chat').description('转写协议：chat 忽略下面的地址/密钥/模型，改用 QQBOT_TRANSCRIBE_* 环境变量'),
   baseUrl: Schema.string().default('https://api.siliconflow.cn/v1').description('OpenAI 兼容接口地址（POST {baseUrl}/audio/transcriptions）'),
   apiKey: Schema.string().default('').description('接口密钥（空=环境变量 QQBOT_ASR_API_KEY）'),
   model: Schema.string().default('Qwen/Qwen3-ASR-1.7B').description('转写模型 id'),
@@ -566,6 +567,7 @@ export const AsrSchema: Schema<AsrConfig> = Schema.object({
   fallback: AsrFallbackSchema.description('备用接口：主接口连不上或 5xx 时改用'),
 }).default({
   enabled: false,
+  mode: 'chat',
   baseUrl: 'https://api.siliconflow.cn/v1',
   apiKey: '',
   model: 'Qwen/Qwen3-ASR-1.7B',
@@ -641,7 +643,6 @@ export const ConfigSchema: Schema<ImQQBotConfig> = Schema.object({
     engagedMaxTurns: 8,
     judge: REPLY_JUDGE_DEFAULTS,
   }).description('群聊回复欲望门控'),
-  banter: BanterSchema.default({ enabled: false, groups: [] }).description('群聊串模式'),
   groupPrompt: Schema.string().description('群聊额外system prompt'),
   directPrompt: Schema.string().description('私聊额外system prompt'),
   textChunkLimit: Schema.number().default(4500).description('单条消息最大字符数'),

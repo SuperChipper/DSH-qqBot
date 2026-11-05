@@ -364,3 +364,38 @@ describe('dnd_position 工具', () => {
     expect(text).toContain('当场说结果');
   });
 });
+
+describe('长柄大师：进入触及范围也吃借机', () => {
+  function reachArena() {
+    const c = arena();
+    // 刻德温只有备注，没有 reactions：走「从备注认能力」这条路
+    ch(c, '刻德温').notes = '4 级专长：长柄大师 Polearm Master，手持长戟（触及 10 尺）';
+    setPositions(c, [
+      { name: '刻德温', x: 10, y: 10 },
+      { name: '狼', x: 6, y: 10 },
+      { name: 'Kriv', x: 0, y: 20 },
+      { name: '大地精', x: 0, y: 25 },
+    ]);
+    return c;
+  }
+
+  it('从 20 尺走进 10 尺触及会报，并指出是哪个反应', () => {
+    const c = reachArena();
+    const r = moveOnGrid(c, '狼', { x: 8, y: 10 });
+    expect(r.enters).toEqual([{ name: '刻德温', reach: 10, reaction: '长柄大师' }]);
+    expect(moveResultText(r)).toContain('10 尺触及');
+    expect(moveResultText(r)).toContain('长柄大师');
+  });
+
+  it('本来就在触及范围里挪动，不算「进入」', () => {
+    const c = reachArena();
+    setPositions(c, [{ name: '狼', x: 8, y: 10 }]);
+    expect(moveOnGrid(c, '狼', { x: 8, y: 9 }).enters).toEqual([]);
+  });
+
+  it('没有这个专长的人不会报', () => {
+    const c = reachArena();
+    ch(c, '刻德温').notes = '普通战士，手里只有长剑';
+    expect(moveOnGrid(c, '狼', { x: 8, y: 10 }).enters).toEqual([]);
+  });
+});

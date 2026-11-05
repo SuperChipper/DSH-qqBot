@@ -36,6 +36,7 @@ import { getHistoryStore, historyGroupKey } from '../features/history-store.ts';
 import { appendGroupMessage } from '../features/group-memory.ts';
 import { makeSenderLabeler, MENTION_MARK, type SenderLabeler } from '../features/message-format.ts';
 import { getSenderAliases } from '../features/sender-alias.ts';
+import { classifyReactionReply, reactionReplyNote } from '../dnd/pending-attack.ts';
 
 /**
  * 排队消息合并：SDK 默认把几条内容直接拼起来、全算在第一条的发送者头上，
@@ -61,6 +62,19 @@ export function mergeWithSenders(buffered: MiddlewareContext[], label: SenderLab
   if (attachments.length > 0) (first.message as { attachments?: unknown[] }).attachments = attachments;
   first.state.mergedSenders = [...new Set(buffered.map((ctx) => ctx.message.senderId))];
   return first;
+}
+
+/** 这条群消息是不是在回应待结算攻击的反应询问 */
+export function pendingReactionReply(
+  message: MiddlewareContext['message'],
+  manager: Pick<SessionManager, 'sessionKey' | 'dndService'>,
+): { note: string } | undefined {
+  const groupId = message.groupOpenid;
+  if (message.kind !== 'group' || groupId === undefined) return undefined;
+  const campaign = manager.dndService?.active(manager.sessionKey('group', groupId))?.campaign;
+  if (campaign?.initiative?.pending === undefined) return undefined;
+  const reply = classifyReactionReply(campaign, message.senderId, String(message.content ?? ''));
+  return reply === undefined ? undefined : { note: reactionReplyNote(campaign, reply) };
 }
 
 /** 引用解析走了 msg_elements 时，从 ref store 补回被引用消息的发送者（原文和附件仍用 msg_elements 的） */
@@ -159,6 +173,8 @@ export function setupMiddlewares(
     passthrough: replyDesireOn,
     isImplicitMention: (ctx) => {
       if (ctx.message.kind !== 'group') return false;
+      // 待结算期间的反应回应不靠 @ 也不靠概率：玩家等着它落账，漏了这条窗口就白开了
+      if (pendingReactionReply(ctx.message, manager) !== undefined) return true;
       const p = config.groupReplyProbability ?? 0;
       if (!(p > 0 && Math.random() < p)) return false;
       // 跑团期间默认照样随机插嘴：这类消息不带 (@you)，DM 守则规定只吐槽、不当成行动宣告去结算。
@@ -182,15 +198,22 @@ export function setupMiddlewares(
     }
     bot.use(replyDecider(config, manager, logger, judgeDeps));
   }
-  if (config.banter?.enabled === true && config.banter.groups.length > 0
-    && (!replyDesireOn || config.replyDesire.judge?.enabled !== true)) {
-    logger.warn('im-qqbot: 串模式需要同时开启回复欲望和模型打分才会主动接话，现在只改变被 @ 时的语气');
-  }
 
   // 6. 内容清洗（去 @marker、表情标签、多余空白）
   bot.use(contentSanitizer({
     parseFaceTags: true,
   }));
+
+  // 6.5. 待结算期间给反应回应打标记：模型据此不把它当成新的回合行动
+  //      放在清洗之后、合并之前，几个人的话合并成一条时每行还带着自己的标记
+  bot.use(async (ctx, next) => {
+    const reply = pendingReactionReply(ctx.message, manager);
+    if (reply !== undefined) {
+      const msg = ctx.message as { content?: string };
+      msg.content = `${String(msg.content ?? '')}\n${reply.note}`;
+    }
+    await next();
+  });
 
   // 7. 三层限流（sender / group / global）
   bot.use(rateLimiter());

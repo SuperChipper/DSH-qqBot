@@ -23,6 +23,7 @@ import {
 } from './dungeon.ts';
 import { ABILITIES, type Ability, type Skill, abilityModifier, parseAbility, parseSkill, proficiencyBonus, SKILLS } from './rules.ts';
 import { battleLines } from './battlefield.ts';
+import { pendingSummaryLine } from './pending-attack.ts';
 import { type NpcState, afterChange, describeCondition, evalCondition, locationKnown, roomView, storySummaryLines } from './story.ts';
 
 export type CharacterKind = 'pc' | 'npc' | 'monster';
@@ -55,6 +56,8 @@ export interface Character {
   initBonus?: number;
   /** 步行速度（尺）；缺省按 30 算，只用来提醒超速 */
   speed?: number;
+  /** 能改写攻击结果的反应；工具按它决定要不要停下来等（见 pending-attack.ts）。缺省时从备注推断 */
+  reactions?: ReactionDef[];
   /** 所在房间。怪物离开房间就不进先攻；PC/NPC 缺省时跟着队伍主位置（currentRoom） */
   room?: string;
   srd?: string;
@@ -106,6 +109,81 @@ export interface InitiativeEntry {
   init: number;
 }
 
+/** foe_attacks：敌人打队友时（尖刻言语）；attacked：自己被打时（护盾术）；attacking：自己攻击没中时（导引打击） */
+export interface ReactionDef {
+  name: string;
+  when?: 'foe_attacks' | 'attacked' | 'attacking';
+  /** 用掉的资源；卡上这项用完了就不问他 */
+  resource?: string;
+  /** 够得着的距离（尺），量的是「反应者到自己那次攻击的发起者」；不填 = 不按距离筛 */
+  range?: number;
+  /**
+   * 这个反应是一次新的攻击（哨兵：5 尺内有人打别人时反打一记），不是改数值。
+   * 工具只登记「用掉了」，还击本身由 DM 落账后用 dnd_check reaction=true 结算。
+   */
+  counter?: boolean;
+  /**
+   * 触发条件反过来：敌人「进入」触及范围时借机（长柄大师），不是离开。
+   * 这时 range 当那把武器的触及用，不填按 5 尺。
+   */
+  enter?: boolean;
+}
+
+/**
+ * 没写 reactions 的旧角色卡从备注认这几个常见能力，旧存档不用先补卡就有反应窗口。
+ * 新卡用 dnd_character reactions 明写，写了就不再猜（空数组 = 明确没有）。
+ */
+const INFERRED_REACTIONS: Array<{ pattern: RegExp; def: ReactionDef }> = [
+  { pattern: /尖刻言语|Cutting Words/i, def: { name: '尖刻言语', when: 'foe_attacks', resource: '诗人激励', range: 60 } },
+  { pattern: /护盾术/, def: { name: '护盾术', when: 'attacked' } },
+  { pattern: /导引打击|Guided Strike/i, def: { name: '导引打击', when: 'attacking', resource: '引导神力' } },
+  // 哨兵：5 尺内有人打别人时反打一记。是不算命中与否的新攻击，所以不看 hit
+  { pattern: /哨兵|Sentinel/i, def: { name: '哨兵', when: 'foe_attacks', range: 5, counter: true } },
+  // 长柄大师：拿着长柄武器时，敌人「进入」触及范围就借机（不是离开）
+  { pattern: /长柄大师|Polearm Master/i, def: { name: '长柄大师', when: 'foe_attacks', enter: true, range: 10 } },
+];
+
+export function reactionsOf(ch: Character): ReactionDef[] {
+  if (ch.reactions !== undefined) return ch.reactions;
+  const notes = ch.notes ?? '';
+  return INFERRED_REACTIONS.filter(({ pattern }) => pattern.test(notes)).map(({ def }) => def);
+}
+
+export interface ReactorOption {
+  character: string;
+  reaction: string;
+}
+
+/** 掷完骰、还没落账的一次攻击 */
+export interface PendingAttack {
+  /** 按钮靠它认出旧消息 */
+  seq: number;
+  at: number;
+  attacker: string;
+  target: string;
+  weapon?: string;
+  /** 额外伤害表达式；未命中转命中时落账才掷，要留着 */
+  extraDamage?: string;
+  natural: number;
+  rollDetail: string;
+  total: number;
+  ac: number;
+  crit: boolean;
+  /** 掷好的伤害（抗性之前）；没中时没有 */
+  rawDamage?: number;
+  damageDetail?: string;
+  damageType?: string;
+  defense?: 'resistant' | 'immune' | 'vulnerable';
+  attackMod: number;
+  acMod: number;
+  damageMod: number;
+  reactors: ReactorOption[];
+  declined: string[];
+  /** 按钮上点了要用的（本人已确认），效果还没结算 */
+  claimed: ReactorOption[];
+  used: Array<{ by: string; name: string; effect: string }>;
+}
+
 /** 战斗内坐标（一格 5 尺）。带上房间，角色换房间后旧坐标自动作废 */
 export interface BattleCell {
   x: number;
@@ -128,6 +206,11 @@ export interface InitiativeState {
   marks?: Record<string, BattleCell>;
   /** 当前回合已走的尺数；指针一动就清 */
   moved?: Record<string, number>;
+  /** 同一时间只有一笔：落账前不能推进，所以不需要队列 */
+  pending?: PendingAttack;
+  pendingSeq?: number;
+  /** 本轮用过反应的人；到他自己的回合开始时恢复 */
+  reacted?: string[];
 }
 
 export interface CampaignSummary {
@@ -300,6 +383,7 @@ export interface CharacterInput {
   damage?: string;
   initBonus?: number;
   speed?: number;
+  reactions?: ReactionDef[];
   weapons?: Weapon[];
   notes?: string;
   traits?: string[];
@@ -354,6 +438,7 @@ export function upsertCharacter(c: Campaign, input: CharacterInput): { character
   if (input.damage !== undefined) next.damage = input.damage;
   if (input.initBonus !== undefined) next.initBonus = Math.trunc(input.initBonus);
   if (input.speed !== undefined) next.speed = clampInt(input.speed, 0, 300);
+  if (input.reactions !== undefined) next.reactions = input.reactions;
   if (input.weapons !== undefined) next.weapons = input.weapons;
   if (input.notes !== undefined) next.notes = input.notes;
   if (input.traits !== undefined) next.traits = [...new Set(input.traits.map(normalizeTrait))];
@@ -699,8 +784,16 @@ export function requireInitiative(c: Campaign): InitiativeState {
   return c.initiative;
 }
 
+/** 有待结算的攻击时拒绝往下走：只靠提醒拦不住，模型常把一只怪的回合一口气结算完 */
+export function assertNoPending(c: Campaign, what: string): void {
+  const p = c.initiative?.pending;
+  if (p === undefined) return;
+  throw new Error(`还有一笔待结算（${p.attacker}→${p.target}），先不能${what}。玩家回应后 dnd_apply target=${p.target} settle=true 落账；判错了才用 cancel=true。`);
+}
+
 /** 推进到下一个还能行动的角色（跳过死亡的；昏迷的 PC 保留，要做死亡豁免） */
 export function nextTurn(c: Campaign): { round: number; current: InitiativeEntry; newRound: boolean } {
+  assertNoPending(c, '推进回合');
   const state = requireInitiative(c);
   for (const entry of [...state.order]) {
     const ch = findCharacter(c, entry.name);
@@ -715,7 +808,13 @@ export function nextTurn(c: Campaign): { round: number; current: InitiativeEntry
     state.round++;
     newRound = true;
   }
-  return { round: state.round, current: state.order[state.turn]!, newRound };
+  // 反应到自己回合开始时恢复
+  const current = state.order[state.turn]!;
+  if (state.reacted !== undefined) {
+    state.reacted = state.reacted.filter((n) => n !== current.name);
+    if (state.reacted.length === 0) delete state.reacted;
+  }
+  return { round: state.round, current, newRound };
 }
 
 /** 结束战斗：清空先攻，移除已死亡的怪物 */
@@ -1030,7 +1129,7 @@ export interface ActOptions {
 }
 
 /** PC 必须由绑定的玩家本人宣告，且这个人最近确实发过消息 */
-function assertDeclaredByOwner(ch: Character, options: ActOptions, what: string): void {
+export function assertDeclaredByOwner(ch: Character, options: ActOptions, what: string): void {
   if (ch.kind !== 'pc' || ch.playerId === undefined) return;
   const owner = `〈${ch.player ?? ch.playerId}〉`;
   if (options.declaredBy !== ch.playerId) {
@@ -1079,6 +1178,7 @@ export function assertCanEndTurn(c: Campaign, options: ActOptions & { dmOverride
 
 /** 纠正先攻指针：跳到某角色的回合（叙事和状态对不上时用） */
 export function gotoTurn(c: Campaign, name: string, round?: number): InitiativeEntry {
+  assertNoPending(c, '调整先攻指针');
   const state = requireInitiative(c);
   const ch = requireCharacter(c, name);
   const idx = state.order.findIndex((e) => e.name === ch.name);
@@ -1391,6 +1491,7 @@ export function summarize(c: Campaign, adv: Adventure): string {
     const order = s.order.map((e, i) => (i === s.turn ? `▶${e.name}(${e.init})` : `${e.name}(${e.init})`)).join(' > ');
     lines.push(`战斗第 ${s.round} 轮：${order}`);
     lines.push(...battleLines(c, (id) => findRoom(graph, id)?.name ?? id));
+    if (s.pending !== undefined) lines.push(pendingSummaryLine(s.pending));
   }
   lines.push(...storySummaryLines(c, adv, occupied));
   if (c.log.length > 0) lines.push(`最近：${c.log.slice(-SUMMARY_LOG_LINES).join('；')}`);
@@ -1414,6 +1515,7 @@ export function playerStatus(c: Campaign, adv: Adventure): string {
   if (c.initiative !== undefined) {
     const s = c.initiative;
     lines.push(`⚔ 第 ${s.round} 轮：${s.order.map((e, i) => (i === s.turn ? `▶${e.name}` : e.name)).join(' → ')}`);
+    if (s.pending !== undefined) lines.push(`⏳ ${s.pending.attacker} 打 ${s.pending.target}，还没结算，等反应`);
   }
   return lines.join('\n');
 }

@@ -2,12 +2,14 @@ import { createServer, type AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { encode } from 'silk-wasm';
 import { AsrOfflineError, pcmToWav, requestTranscription, toUploadableAudio } from './asr.ts';
+import { setChatKeyResolver } from './chat-gateway.ts';
 import { transcribeVoices } from '../middleware/attachment.ts';
 import type { AsrConfig } from '../config.ts';
 import type { RawAttachment } from '../types.ts';
 
 const asr: AsrConfig = {
   enabled: true,
+  mode: 'openai',
   baseUrl: 'https://asr.example.com/v1/',
   apiKey: 'test-key',
   model: 'FunAudioLLM/SenseVoiceSmall',
@@ -118,6 +120,50 @@ describe('requestTranscription', () => {
   it('throws on HTTP errors', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('bad key', { status: 401 })));
     await expect(requestTranscription({ data: Buffer.from(''), name: 'v.wav' }, asr)).rejects.toThrow('HTTP 401');
+  });
+});
+
+describe('chat 协议（mode: chat）', () => {
+  const chatAsr: AsrConfig = { ...asr, mode: 'chat' };
+
+  afterEach(() => {
+    setChatKeyResolver(undefined);
+    vi.unstubAllGlobals();
+  });
+
+  it('走 chat/completions + input_audio，并带上 reasoning_effort=none', async () => {
+    setChatKeyResolver(async () => 'sk-chat');
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ choices: [{ message: { content: '你好呀' } }] }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const text = await requestTranscription({ data: Buffer.from('fake-wav'), name: 'voice.wav' }, chatAsr);
+    expect(text).toBe('你好呀');
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain('/chat/completions');
+    const body = JSON.parse(init.body as string);
+    expect(body.reasoning_effort).toBe('none');
+    expect(body.messages[0].content[0].input_audio.format).toBe('wav');
+    expect((init.headers as Record<string, string>).authorization).toBe('Bearer sk-chat');
+  });
+
+  it('不是 wav/mp3 时直接报错，不发请求', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(requestTranscription({ data: Buffer.from('amr'), name: 'voice.amr' }, chatAsr))
+      .rejects.toThrow(/只支持 wav\/mp3/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('chat 网关连不上时抛 AsrOfflineError（语音消息才会标 asrOffline）', async () => {
+    setChatKeyResolver(async () => 'sk-chat');
+    const refused = (): TypeError => Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw refused(); }));
+    await expect(requestTranscription({ data: Buffer.from('w'), name: 'voice.wav' }, chatAsr))
+      .rejects.toBeInstanceOf(AsrOfflineError);
   });
 });
 
